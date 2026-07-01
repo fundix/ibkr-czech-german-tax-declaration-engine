@@ -189,6 +189,11 @@ def run_main_calculations(
         FinancialEventType.OPTION_EXPIRATION_WORTHLESS: option_expiration_processor,
     }
 
+    # Synthetic income events (e.g. the taxable-dividend portion of an excess
+    # capital repayment) are collected here and appended AFTER the loop, rather
+    # than mutating current_year_events while it is being iterated.
+    deferred_income_events: List[FinancialEvent] = []
+
     logger.info(f"Processing {len(current_year_events)} current tax year events using dispatch table...")
     for event_idx, event in enumerate(current_year_events):
         asset_object = asset_resolver.get_asset_by_id(event.asset_internal_id)
@@ -251,8 +256,11 @@ def run_main_calculations(
                 if excess > Decimal('0'):
                     logger.info(f"Capital repayment excess {excess} EUR becomes taxable dividend income")
 
-                    # Create new DIVIDEND_CASH event for excess amount
-                    _create_excess_dividend_event(event, excess, asset_object, current_year_events)
+                    # Create new DIVIDEND_CASH event for excess amount.
+                    # Deferred (not appended to current_year_events mid-iteration).
+                    deferred_income_events.append(
+                        _create_excess_dividend_event(event, excess, asset_object)
+                    )
 
                     # Reduce original capital repayment event to only the cost basis portion
                     cost_basis_portion = repayment_amount_eur - excess
@@ -323,7 +331,7 @@ def run_main_calculations(
 
     logger.info("Vorabpauschale calculation skipped (result is €0 for tax year 2023).")
 
-    processed_income_events_for_output: List[FinancialEvent] = list(current_year_events)
+    processed_income_events_for_output: List[FinancialEvent] = list(current_year_events) + deferred_income_events
 
     logger.info(f"Calculation engine finished. Produced {len(realized_gains_losses)} RealizedGainLoss records.")
     logger.info(f"Calculation engine produced {len(vorabpauschale_data_items)} VorabpauschaleData records (expected 0 for 2023).")
@@ -331,25 +339,31 @@ def run_main_calculations(
     return realized_gains_losses, vorabpauschale_data_items, processed_income_events_for_output, eoy_mismatch_errors
 
 
-def _create_excess_dividend_event(original_event, excess_amount, asset_object, current_year_events):
+def _create_excess_dividend_event(original_event, excess_amount, asset_object):
     """Create a new DIVIDEND_CASH event for excess capital repayment amount.
 
     Args:
         original_event: The original CAPITAL_REPAYMENT event
-        excess_amount: The excess amount that becomes taxable dividend
+        excess_amount: The excess amount that becomes taxable dividend (EUR)
         asset_object: The asset for which the dividend is being created
-        current_year_events: The current year events list to add the new event to
+
+    Returns the new event; the caller is responsible for adding it to the
+    output event list (it is NOT appended here — see deferred_income_events).
     """
     from src.domain.events import CashFlowEvent
     from src.domain.enums import FinancialEventType
 
-    # Create new DIVIDEND_CASH event for excess amount
+    # ``excess`` comes from the FIFO ledger's cost-basis reduction, which works in
+    # EUR — the amount is genuinely an EUR figure. Label it as EUR so that
+    # (gross_amount_foreign_currency, local_currency) stay unit-consistent; the
+    # original event's foreign currency must NOT be reused, or a downstream
+    # consumer would treat this EUR number as that foreign currency.
     excess_dividend_event = CashFlowEvent(
         asset_internal_id=asset_object.internal_asset_id,
         event_date=original_event.event_date,
         event_type=FinancialEventType.DIVIDEND_CASH,
         gross_amount_foreign_currency=excess_amount,
-        local_currency=original_event.local_currency,
+        local_currency="EUR",
         source_country_code=getattr(original_event, 'source_country_code', None),
         ibkr_transaction_id=f"{original_event.ibkr_transaction_id}_EXCESS",
         ibkr_activity_description=f"{original_event.ibkr_activity_description} [EXCESS TAXABLE DIVIDEND]",
@@ -359,9 +373,6 @@ def _create_excess_dividend_event(original_event, excess_amount, asset_object, c
     # Set the EUR amount
     excess_dividend_event.gross_amount_eur = excess_amount
     excess_dividend_event.event_id = uuid.uuid4()
-
-    # Add to the current year events list for processing
-    current_year_events.append(excess_dividend_event)
 
     logger.info(f"Created excess dividend event {excess_dividend_event.event_id} for {excess_amount} EUR from capital repayment excess")
 

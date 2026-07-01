@@ -132,10 +132,17 @@ class WithholdingTaxLinker:
             if match:
                 candidate_matches.append(match)
         
-        # Return the match with highest confidence score
+        # Return the match with highest confidence score.
+        # Tie-break deterministically on the candidate income event id so that
+        # equal-confidence candidates (e.g. two same-day, same-currency dividends
+        # on one asset) always resolve to the SAME income event regardless of the
+        # order events were parsed in — instead of "whichever appeared first".
         if candidate_matches:
-            return max(candidate_matches, key=lambda m: m.confidence_score)
-        
+            return max(
+                candidate_matches,
+                key=lambda m: (m.confidence_score, str(m.candidate_event_id)),
+            )
+
         return None
     
     def _try_exact_match(

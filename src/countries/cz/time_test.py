@@ -62,6 +62,24 @@ def evaluate_time_test(
     taxable (no exemption applied).
     """
     for item in items:
+        if getattr(item, "fx_conversion_failed", False):
+            # Foreign→CZK conversion failed for this item. Its CZK amounts are
+            # None (never the raw foreign amount), so it must not silently enter
+            # the tax base with a bogus figure. Flag it for manual review and
+            # keep it conservatively taxable.
+            item.is_taxable = True
+            item.is_exempt = False
+            item.exemption_reason = None
+            item.included_in_tax_base = True
+            item.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+            note = item.tax_review_note or ""
+            item.tax_review_note = (
+                f"{note + '; ' if note else ''}"
+                "FX→CZK conversion failed — CZK amount unavailable; "
+                "manual review required (item kept in tax base as conservative default)."
+            )
+            continue
+
         if item.item_type in _NO_TIME_TEST_ITEM_TYPES:
             # Income items and options — always taxable, no time test
             item.is_taxable = True

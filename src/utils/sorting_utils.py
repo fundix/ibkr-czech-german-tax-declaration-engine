@@ -12,7 +12,7 @@ from src.domain.events import (
 from src.identification.asset_resolver import AssetResolver
 from src.domain.assets import Asset
 from src.domain.enums import AssetCategory 
-from src.utils.type_utils import parse_ibkr_date
+from src.utils.type_utils import parse_ibkr_date, numeric_tx_sort_key
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +97,19 @@ def get_event_sort_key(event: FinancialEvent, asset_resolver: AssetResolver) -> 
             event.event_id
         )
     
-    # For events on the same date, prioritize transaction ID over event type
-    # This ensures chronological order is preserved (IBKR assigns transaction IDs sequentially)
-    transaction_id_for_sort = event.ibkr_transaction_id or ""
-
-    # The final secondary key tuple: (transaction_id, intra_day_order_integer, then PRD elements)
-    # The PRD elements ALREADY end with event.event_id.
-    secondary_key_tuple = (transaction_id_for_sort, intra_day_order) + specific_secondary_elements
+    # Same-day ordering must respect the intra-day DEPENDENCY order FIRST
+    # (corporate actions → option lifecycle → trades → cash): e.g. a split must be
+    # applied to the lots before a same-day sale consumes them, and an option
+    # exercise must precede the resulting stock trade. Only WITHIN the same
+    # category do we then order chronologically by transaction id.
+    #
+    # IBKR transaction ids are numeric-but-stringly-typed, so they are compared
+    # numerically (see numeric_tx_sort_key) — a plain string compare would put
+    # "10000000001" before "9999999999" and reorder same-day FIFO consumption.
+    #
+    # specific_secondary_elements is kept as the finer tie-break and still ends
+    # with event.event_id for fully deterministic ordering.
+    tx_sort = numeric_tx_sort_key(event.ibkr_transaction_id or "")
+    secondary_key_tuple = (intra_day_order, tx_sort) + specific_secondary_elements
 
     return (parsed_date, secondary_key_tuple)

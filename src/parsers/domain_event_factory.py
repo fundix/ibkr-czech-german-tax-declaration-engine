@@ -642,9 +642,18 @@ class DomainEventFactory:
                     **common_ca_params_kw
                 )
 
-            elif ca_type_from_file == "FS" or "FORWARD SPLIT" in ca_type_from_file or \
-               ("SPLIT" in ca_desc_from_file and "REVERSE" not in ca_desc_from_file):
-                logger.debug(f"CA Record {idx+1}: Identified as potential Forward Split.")
+            elif ca_type_from_file == "FS" or ca_type_from_file == "RS" \
+               or "FORWARD SPLIT" in ca_type_from_file or "REVERSE SPLIT" in ca_type_from_file \
+               or "SPLIT" in ca_desc_from_file:
+                # Both forward AND reverse splits are handled here. The standard
+                # "X FOR Y" convention means X new shares per Y old shares, so
+                # new/old yields the correct multiplier in both directions:
+                #   forward 2 FOR 1 -> 2.0 (quantity doubles);
+                #   reverse 1 FOR 10 -> 0.1 (quantity /10).
+                # FifoLedger.adjust_lots_for_split handles a sub-1 ratio correctly
+                # (quantity *= ratio, cost/unit = total_cost / new_qty).
+                is_reverse = (ca_type_from_file == "RS") or ("REVERSE" in ca_desc_from_file)
+                logger.debug(f"CA Record {idx+1}: Identified as potential {'Reverse' if is_reverse else 'Forward'} Split.")
                 ratio_match = re.search(r"(\d+(?:\.\d+)?)\s*FOR\s*(\d+(?:\.\d+)?)", ca_desc_from_file)
                 new_per_old_ratio = None
                 if ratio_match:
@@ -657,7 +666,15 @@ class DomainEventFactory:
                         logger.warning(f"CA Record {idx+1}: Could not parse split ratio from '{ca_desc_from_file}' for CA {rca.action_id_ibkr}: {e}.")
                 else:
                      logger.warning(f"CA Record {idx+1}: Could not find split ratio pattern in description '{ca_desc_from_file}' for CA {rca.action_id_ibkr}. Cannot create CorpActionSplitForward event.")
-                logger.debug(f"CA Record {idx+1} (FS): Parsed new_per_old_ratio: {new_per_old_ratio}")
+                # Sanity check: a reverse split must reduce the share count (ratio < 1)
+                # and a forward split must increase it (ratio > 1). Warn on a mismatch
+                # so a mis-formatted description surfaces rather than silently mis-adjusting.
+                if new_per_old_ratio is not None:
+                    if is_reverse and new_per_old_ratio > Decimal(1):
+                        logger.warning(f"CA Record {idx+1}: REVERSE split parsed ratio {new_per_old_ratio} > 1 for CA {rca.action_id_ibkr} — verify description '{ca_desc_from_file}'.")
+                    elif not is_reverse and new_per_old_ratio < Decimal(1):
+                        logger.warning(f"CA Record {idx+1}: FORWARD split parsed ratio {new_per_old_ratio} < 1 for CA {rca.action_id_ibkr} — verify description '{ca_desc_from_file}'.")
+                logger.debug(f"CA Record {idx+1} ({'RS' if is_reverse else 'FS'}): Parsed new_per_old_ratio: {new_per_old_ratio}")
 
                 if new_per_old_ratio is not None:
                      common_ca_params_kw_base["gross_amount_foreign_currency"] = Decimal('0.0') # Splits typically don't have a gross cash amount

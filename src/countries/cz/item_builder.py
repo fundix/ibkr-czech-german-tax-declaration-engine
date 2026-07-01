@@ -109,17 +109,30 @@ def _convert(
     fx: Optional[CzCurrencyConverter],
     fx_records: List[FxConversionRecord],
 ) -> Tuple[Optional[Decimal], Optional[FxConversionRecord]]:
-    """Convert *amount* to CZK.  Returns (czk_amount, record)."""
-    if fx is None or amount is None:
+    """Convert *amount* to CZK.  Returns (czk_amount, record).
+
+    Behaviour:
+    - ``amount is None`` → ``(None, None)``.
+    - No FX converter configured (``fx is None``) → return the amount unchanged
+      (the plugin runs in EUR mode and labels its output "amounts in EUR").
+    - FX configured but the conversion cannot be performed (unparseable date, or
+      no ČNB rate even after fallback) → ``(None, None)``.  The caller MUST treat
+      a ``None`` CZK value as a *failed* conversion and flag the item for review.
+      It must NEVER substitute the un-converted foreign amount into a CZK field —
+      doing so would book e.g. 1000 USD as 1000 CZK (~22× understatement).
+    """
+    if amount is None:
+        return None, None
+    if fx is None:
         return amount, None
     if currency is None:
         currency = "EUR"
     dt = parse_ibkr_date(date_str)
     if dt is None:
-        return amount, None
+        return None, None
     rec = fx.convert_to_czk(amount, currency, dt)
     if rec is None:
-        return amount, None
+        return None, None
     fx_records.append(rec)
     return rec.converted_amount_czk, rec
 
@@ -195,6 +208,8 @@ def _build_income_items(
             fx=fx_rec,
             **meta,
         )
+        if fx is not None and czk is None:
+            item.fx_conversion_failed = True
         items.append(item)
 
     return items, wht_events
@@ -282,6 +297,8 @@ def _link_wht(
             fx=fx_rec,
             source_country=getattr(wht, "source_country_code", None),
         )
+        if fx is not None and czk is None:
+            target.fx_conversion_failed = True
         target.wht_records.append(wht_rec)
         linked_wht_ids.add(wht_id)
 
@@ -344,6 +361,8 @@ def _build_unlinked_wht_items(
             **meta,
         )
         item.tax_review_note = "Unlinked WHT — no matching income event found"
+        if fx is not None and czk is None:
+            item.fx_conversion_failed = True
         items.append(item)
 
     return items
@@ -412,6 +431,8 @@ def _build_disposal_items(
             quantity=rgl.quantity_realized,
             **meta,
         )
+        if fx is not None and (cost_czk is None or proceeds_czk is None or gl_czk_direct is None):
+            item.fx_conversion_failed = True
         items.append(item)
 
     return items

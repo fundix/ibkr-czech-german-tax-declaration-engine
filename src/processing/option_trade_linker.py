@@ -15,13 +15,19 @@ class OptionTradeLinker:
 
     def _build_option_event_lookup(self,
                                    option_lifecycle_events: List[OptionLifecycleEvent]
-                                   ) -> Dict[Tuple[str, str, str], OptionLifecycleEvent]:
+                                   ) -> Dict[Tuple[str, str, str], List[OptionLifecycleEvent]]:
         """
         Builds a lookup map for option lifecycle events (Exercise/Assignment).
         Key: (event_date_str, underlying_conid_str, abs_expected_stock_qty_str)
-        Value: OptionLifecycleEvent
+        Value: list (FIFO queue) of OptionLifecycleEvents sharing that key.
+
+        Multiple option events can legitimately map to the same key (e.g. two
+        exercised lots of identical size on the same underlying the same day).
+        We keep ALL of them in a queue so each links to its own stock trade,
+        instead of overwriting (which lost one premium and made a later stock
+        trade crash on a missing pending adjustment).
         """
-        lookup: Dict[Tuple[str, str, str], OptionLifecycleEvent] = {}
+        lookup: Dict[Tuple[str, str, str], List[OptionLifecycleEvent]] = {}
         for opt_event in option_lifecycle_events:
             if not isinstance(opt_event, (OptionExerciseEvent, OptionAssignmentEvent)):
                 continue
@@ -42,25 +48,26 @@ class OptionTradeLinker:
                 expected_stock_qty_abs.to_eng_string()
             )
 
-            if link_key in lookup:
-                existing_event = lookup[link_key]
-                logger.warning(
-                    f"Duplicate key {link_key} for option lifecycle event lookup. "
-                    f"Existing event: {existing_event.event_id} ({existing_event.event_type.name}), "
-                    f"New event: {opt_event.event_id} ({opt_event.event_type.name}). Overwriting with new event. "
-                    "This might indicate multiple option events leading to the same underlying stock movement on the same day."
+            queue = lookup.setdefault(link_key, [])
+            if queue:
+                logger.info(
+                    f"Multiple option lifecycle events share key {link_key} "
+                    f"(now {len(queue) + 1}). Each will be matched to a distinct stock "
+                    f"trade in FIFO order (event {opt_event.event_id} appended)."
                 )
-            lookup[link_key] = opt_event
-        logger.debug(f"Built option event lookup map with {len(lookup)} entries.")
+            queue.append(opt_event)
+        logger.debug(f"Built option event lookup map with {len(lookup)} keys.")
         return lookup
 
     def link_trades(self,
                     stock_trades_to_link: List[TradeEvent],
-                    option_event_lookup: Dict[Tuple[str, str, str], OptionLifecycleEvent]
+                    option_event_lookup: Dict[Tuple[str, str, str], List[OptionLifecycleEvent]]
                     ):
         """
         Attempts to link stock trades to option lifecycle events.
         Modifies stock_trades_to_link in place by setting related_option_event_id.
+        Each matched option event is CONSUMED (popped) so it links to exactly one
+        stock trade.
         """
         linked_count = 0
         if not stock_trades_to_link:
@@ -85,7 +92,8 @@ class OptionTradeLinker:
                 stock_qty_abs_str
             )
 
-            matched_option_event = option_event_lookup.get(link_key_for_stock_trade)
+            queue = option_event_lookup.get(link_key_for_stock_trade)
+            matched_option_event = queue.pop(0) if queue else None
 
             if matched_option_event:
                 stock_trade.related_option_event_id = matched_option_event.event_id

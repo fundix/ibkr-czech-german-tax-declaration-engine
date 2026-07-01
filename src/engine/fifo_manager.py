@@ -11,7 +11,7 @@ from src.domain.results import RealizedGainLoss
 from src.domain.enums import AssetCategory, FinancialEventType, TaxReportingCategory, RealizationType, InvestmentFundType
 from src.utils.currency_converter import CurrencyConverter
 from src.utils.exchange_rate_provider import ECBExchangeRateProvider
-from src.utils.type_utils import parse_ibkr_date, safe_decimal
+from src.utils.type_utils import parse_ibkr_date, safe_decimal, numeric_tx_sort_key
 from src.utils.tax_utils import get_teilfreistellung_rate_for_fund_type
 import src.config as global_config
 
@@ -267,11 +267,11 @@ class FifoLedger:
                 self._create_fallback_short_lot(asset, reported_soy_qty.copy_abs(), tax_year)
 
         if self.lots:
-            self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), lot.source_transaction_id))
+            self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
             if any((parse_ibkr_date(lot.acquisition_date) is None) for lot in self.lots):
                  raise ValueError(f"Unparseable acquisition date found in final SOY lots for asset {self.asset_internal_id}.")
         if self.short_lots:
-            self.short_lots.sort(key=lambda lot: (parse_ibkr_date(lot.opening_date) or datetime.min.date(), lot.source_transaction_id))
+            self.short_lots.sort(key=lambda lot: (parse_ibkr_date(lot.opening_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
             if any((parse_ibkr_date(lot.opening_date) is None) for lot in self.short_lots):
                  raise ValueError(f"Unparseable opening date found in final SOY short lots for asset {self.asset_internal_id}.")
 
@@ -368,7 +368,7 @@ class FifoLedger:
             source_transaction_id=trade_event.ibkr_transaction_id
         )
         self.lots.append(new_lot)
-        self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), lot.source_transaction_id))
+        self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
         if any((parse_ibkr_date(lot.acquisition_date) is None) for lot in self.lots):
              raise ValueError(f"Unparseable acquisition date found in FIFO lots for asset {self.asset_internal_id} after adding lot.")
 
@@ -396,7 +396,7 @@ class FifoLedger:
             source_transaction_id=trade_event.ibkr_transaction_id
         )
         self.short_lots.append(new_short_lot)
-        self.short_lots.sort(key=lambda lot: (parse_ibkr_date(lot.opening_date) or datetime.min.date(), lot.source_transaction_id))
+        self.short_lots.sort(key=lambda lot: (parse_ibkr_date(lot.opening_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
         if any((parse_ibkr_date(lot.opening_date) is None) for lot in self.short_lots):
              raise ValueError(f"Unparseable opening date found in Short FIFO lots for asset {self.asset_internal_id} after adding lot.")
 
@@ -614,6 +614,17 @@ class FifoLedger:
         realized_gains_losses: List[RealizedGainLoss] = []
         realization_value_eur_per_unit_for_event = event.cash_per_share_eur
 
+        # For options, lot quantity is in CONTRACTS and cost basis is stored
+        # per-contract (already reflecting the contract multiplier). cash_per_share_eur
+        # is a per-underlying-share figure, so it must be scaled by the multiplier to
+        # be on the same per-contract basis as the cost basis; otherwise the gain/loss
+        # is off by the multiplier factor (e.g. 100x).
+        if self.asset_category == AssetCategory.OPTION:
+            option_multiplier = self.asset_multiplier_info if self.asset_multiplier_info is not None else Decimal(100)
+            realization_value_eur_per_unit_for_event = self.ctx.multiply(
+                event.cash_per_share_eur, option_multiplier
+            )
+
         for current_lot in list(self.lots):
             quantity_from_this_lot = current_lot.quantity
 
@@ -674,7 +685,7 @@ class FifoLedger:
             total_cost_basis_eur=new_lot_total_cost, source_transaction_id=source_id
         )
         self.lots.append(new_lot)
-        self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), lot.source_transaction_id))
+        self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
         if any((parse_ibkr_date(lot.acquisition_date) is None) for lot in self.lots):
              raise ValueError(f"Unparseable acquisition date found after adding stock dividend lot for asset {self.asset_internal_id}.")
 

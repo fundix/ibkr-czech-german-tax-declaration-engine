@@ -159,6 +159,15 @@ class CzTaxItem:
     qualifies_for_annual_limit: bool = False   # eligible for the 100k test
     exempt_due_to_annual_limit: bool = False    # actually exempted by it
 
+    # --- FX conversion status ---
+    # Set by the item builder when an FX converter IS configured but the
+    # foreign→CZK conversion could not be performed (unparseable date, or no
+    # ČNB rate even after fallback).  The CZK amounts are left as ``None`` in
+    # that case — they must NOT be filled with the un-converted foreign amount.
+    # Downstream (time test) marks such items PENDING_MANUAL_REVIEW so a wrong
+    # CZK figure never silently enters the tax base.
+    fx_conversion_failed: bool = False
+
     def total_wht_czk(self) -> Decimal:
         """Sum of all linked WHT amounts in CZK."""
         return sum(
@@ -202,6 +211,7 @@ class CzTaxItem:
         d["tax_review_note"] = self.tax_review_note
         d["qualifies_for_annual_limit"] = self.qualifies_for_annual_limit
         d["exempt_due_to_annual_limit"] = self.exempt_due_to_annual_limit
+        d["fx_conversion_failed"] = self.fx_conversion_failed
         # --- Source country (from first WHT record) ---
         src_country = None
         for r in self.wht_records:

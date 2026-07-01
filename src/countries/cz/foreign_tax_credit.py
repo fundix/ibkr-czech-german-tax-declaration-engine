@@ -169,9 +169,28 @@ def evaluate_foreign_tax_credit(
         summary.item_count += 1
 
         gross = (it.amount_czk if has_fx else it.amount_eur) or ZERO
-        wht_paid = it.total_wht_czk() if has_fx else sum(
-            (r.original_amount for r in it.wht_records if r.original_amount is not None), ZERO
-        )
+        skipped_foreign_wht = False
+        if has_fx:
+            wht_paid = it.total_wht_czk()
+        else:
+            # No FX converter: gross is in EUR. Only WHT already denominated in EUR
+            # can be capped against a EUR gross; summing a foreign-currency WHT here
+            # would compare e.g. USD against a EUR cap (unit mismatch). Include only
+            # EUR WHT and flag the item if any foreign-currency WHT had to be skipped.
+            wht_paid = sum(
+                (
+                    r.original_amount
+                    for r in it.wht_records
+                    if r.original_amount is not None
+                    and (r.original_currency or "EUR").upper() == "EUR"
+                ),
+                ZERO,
+            )
+            skipped_foreign_wht = any(
+                r.original_amount is not None
+                and (r.original_currency or "EUR").upper() != "EUR"
+                for r in it.wht_records
+            )
 
         # Determine source country (from first WHT record, or item itself)
         source_country: Optional[str] = None
@@ -206,6 +225,14 @@ def evaluate_foreign_tax_credit(
 
         if wht_paid == ZERO:
             review_note = "No linked WHT — zero credit"
+
+        if skipped_foreign_wht:
+            review_status = "PENDING_MANUAL_REVIEW"
+            review_note = (
+                (review_note + "; " if review_note else "")
+                + "Foreign-currency WHT excluded from EUR-mode credit cap "
+                "(no FX converter) — manual review required"
+            )
 
         record = CzForeignTaxCreditRecord(
             source_event_id=str(it.source_event_id),
