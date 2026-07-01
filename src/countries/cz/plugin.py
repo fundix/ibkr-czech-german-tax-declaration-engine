@@ -135,10 +135,10 @@ class CzechTaxAggregator:
         evaluate_time_test(items, self.config)
 
         # --- Phase 3: Apply annual exempt limit (after time test) ---
-        annual_limit_proceeds = evaluate_annual_limit(items, self.config)
+        has_fx = self._fx is not None
+        annual_limit_proceeds = evaluate_annual_limit(items, self.config, has_fx)
 
         # --- Phase 4: Compute §10 loss offsetting ---
-        has_fx = self._fx is not None
         netting = compute_loss_offsetting(items, has_fx)
         netting.annual_limit_eligible_proceeds = annual_limit_proceeds
         netting.annual_limit_threshold = self.config.annual_exempt_limit_czk

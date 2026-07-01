@@ -1,7 +1,32 @@
 # src/utils/type_utils.py
+import logging
 from decimal import Decimal, InvalidOperation
-from typing import Any, Optional, Union
+from typing import Any, Optional, Tuple, Union
 from datetime import datetime, date
+
+logger = logging.getLogger(__name__)
+
+
+def numeric_tx_sort_key(tx_id: Optional[str]) -> Tuple[int, int, str]:
+    """
+    Build a numeric-aware sort key for an IBKR transaction / lot source id.
+
+    IBKR transaction IDs are sequential integers, but are stored as strings.
+    A plain string sort orders them lexicographically, so once the ids differ in
+    digit length a *later* transaction can sort *before* an earlier one
+    (e.g. "10000000001" < "9999999999"), corrupting chronological FIFO ordering.
+
+    This key sorts purely-numeric ids numerically, before any non-numeric id
+    (fallback markers like "SOY_FALLBACK_…"), and uses the raw string as the final
+    tie-break so ordering stays fully deterministic:
+
+        - numeric  "42"          -> (0, 42, "")
+        - non-num  "SOY_FALLBACK" -> (1, 0, "SOY_FALLBACK")
+        - empty/None              -> (1, 0, "")
+    """
+    if tx_id and tx_id.isdigit():
+        return (0, int(tx_id), "")
+    return (1, 0, tx_id or "")
 
 def safe_decimal(value: Any, default: Optional[Decimal] = None, raise_error: bool = False) -> Optional[Decimal]:
     """
@@ -33,7 +58,13 @@ def safe_decimal(value: Any, default: Optional[Decimal] = None, raise_error: boo
     except InvalidOperation as e:
         if raise_error:
             raise e
-        # print(f"Warning: Could not parse decimal from '{value}', using default {default}. Error: {e}")
+        # A NON-EMPTY value that fails to parse is a data-corruption signal (e.g. a
+        # malformed Quantity/TradePrice silently becoming 0). Surface it at WARNING
+        # so it is not lost — empty values were already handled above and are normal.
+        logger.warning(
+            f"safe_decimal: could not parse Decimal from {value!r}; "
+            f"falling back to default {default!r}. Error: {e}"
+        )
         return default
 
 def parse_ibkr_date(date_str: Optional[str], default: Optional[date] = None) -> Optional[date]:

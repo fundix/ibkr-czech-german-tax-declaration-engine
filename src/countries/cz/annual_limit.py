@@ -45,6 +45,7 @@ _ANNUAL_LIMIT_ELIGIBLE_TYPES = {
 def evaluate_annual_limit(
     items: List[CzTaxItem],
     config: CzTaxConfig,
+    has_fx: bool = True,
 ) -> Decimal:
     """
     Evaluate the CZK annual exempt limit on *items* **in-place**.
@@ -53,12 +54,33 @@ def evaluate_annual_limit(
     (for audit / summary purposes).
 
     Precondition: ``evaluate_time_test()`` has already run on *items*.
+
+    ``has_fx`` must be ``True`` for the exemption to be applied: the threshold
+    is denominated in CZK, so it is only meaningful once ``proceeds_czk`` holds a
+    real CZK figure.  When ``has_fx`` is ``False`` the pipeline runs in EUR mode
+    and ``proceeds_czk`` actually carries EUR proceeds — comparing those to a
+    100,000 CZK threshold would wrongly exempt (or tax) items on a unit mismatch,
+    so the exemption is skipped and eligible items are kept taxable.
     """
     if not config.annual_exempt_limit_enabled:
         # Mark all eligible items as qualifies but not exempted
         for it in items:
             if _is_eligible(it):
                 it.qualifies_for_annual_limit = True
+        return Decimal(0)
+
+    if not has_fx:
+        # No FX converter: proceeds are in EUR, not CZK. Do NOT compare EUR
+        # proceeds against a CZK threshold. Mark eligibility for audit but keep
+        # items taxable (conservative — no exemption without a valid CZK amount).
+        for it in items:
+            if _is_eligible(it):
+                it.qualifies_for_annual_limit = True
+        logger.warning(
+            "Annual exempt limit NOT applied: no FX converter configured, so "
+            "proceeds are in EUR and cannot be compared to the CZK threshold. "
+            "Eligible security disposals kept taxable."
+        )
         return Decimal(0)
 
     threshold = config.annual_exempt_limit_czk
