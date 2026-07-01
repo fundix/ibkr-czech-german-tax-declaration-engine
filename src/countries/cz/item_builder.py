@@ -394,16 +394,19 @@ def _build_disposal_items(
         else:
             item_type = CzTaxItemType.SECURITY_DISPOSAL
 
-        # FX conversion — RGLs have EUR amounts; convert cost basis and proceeds separately
-        cost_czk, fx_cost = _convert_eur(rgl.total_cost_basis_eur, rgl.realization_date, fx, fx_records)
+        # FX conversion (NSS 2 Afs 4/2019-35): the acquisition cost (výdaj) is
+        # converted at the ACQUISITION-date rate and the sale proceeds (příjem) at
+        # the DISPOSAL-date rate, so the currency movement between purchase and sale
+        # is reflected in the §10 gain. A single sale-date rate applied to BOTH legs
+        # (the prior practice the Supreme Administrative Court rejected) is NOT used.
+        cost_date = rgl.acquisition_date or rgl.realization_date
+        cost_czk, fx_cost = _convert_eur(rgl.total_cost_basis_eur, cost_date, fx, fx_records)
         proceeds_czk, fx_proceeds = _convert_eur(rgl.total_realization_value_eur, rgl.realization_date, fx, fx_records)
 
+        # §10 gain in CZK = proceeds(@sale) − cost(@acquisition).
         gl_czk: Optional[Decimal] = None
-        fx_gl: Optional[FxConversionRecord] = None
         if cost_czk is not None and proceeds_czk is not None:
             gl_czk = proceeds_czk - cost_czk
-        # Also convert the gain/loss directly for the main amount_czk field
-        gl_czk_direct, fx_gl = _convert_eur(rgl.gross_gain_loss_eur, rgl.realization_date, fx, fx_records)
 
         asset = resolver.get_asset_by_id(rgl.asset_internal_id)
         meta = _asset_meta(asset)
@@ -418,20 +421,20 @@ def _build_disposal_items(
             original_amount=rgl.gross_gain_loss_eur,
             original_currency="EUR",
             amount_eur=rgl.gross_gain_loss_eur,
-            amount_czk=gl_czk_direct,
+            amount_czk=gl_czk,
             cost_basis_eur=rgl.total_cost_basis_eur,
             proceeds_eur=rgl.total_realization_value_eur,
             gain_loss_eur=rgl.gross_gain_loss_eur,
             cost_basis_czk=cost_czk,
             proceeds_czk=proceeds_czk,
             gain_loss_czk=gl_czk,
-            fx=fx_gl,
+            fx=fx_proceeds,
             fx_cost_basis=fx_cost,
             fx_proceeds=fx_proceeds,
             quantity=rgl.quantity_realized,
             **meta,
         )
-        if fx is not None and (cost_czk is None or proceeds_czk is None or gl_czk_direct is None):
+        if fx is not None and (cost_czk is None or proceeds_czk is None):
             item.fx_conversion_failed = True
         items.append(item)
 

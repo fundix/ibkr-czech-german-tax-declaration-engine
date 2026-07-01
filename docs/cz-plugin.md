@@ -35,8 +35,10 @@ IBKR data → Core FIFO/enrichment → CzTaxItems
 
 - **Default:** Daily ČNB rates (`CnbFxProvider`)
 - **Method:** Per-event, direct foreign→CZK (not through EUR as intermediate)
+- **Disposals:** acquisition cost (výdaj) converted at the **acquisition-date** rate, sale proceeds (příjem) at the **disposal-date** rate — so the currency movement between purchase and sale is reflected in the §10 gain (per NSS judgment 2 Afs 4/2019-35; a single sale-date rate for both legs is *not* used)
 - **Fallback:** Last valid rate for weekends/holidays
 - Every conversion produces an `FxConversionRecord` with full audit trail
+- If a ČNB rate cannot be obtained, the CZK amount is left empty and the item is flagged `PENDING_MANUAL_REVIEW` (the un-converted foreign amount is never treated as CZK)
 
 ### Time Test (§4/1/w ZDP)
 

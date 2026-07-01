@@ -59,7 +59,10 @@ class MockCNB(CNBExchangeRateProvider):
         super().__init__(**kw)
 
     def _fetch_rates_for_date(self, query_date):
-        text = self._mock_responses.get(query_date)
+        # Fall back to the sample rate for any date not explicitly mocked, so
+        # acquisition-date conversions (cost basis) resolve like the real ČNB
+        # provider would instead of spuriously failing.
+        text = self._mock_responses.get(query_date) or SAMPLE_CNB
         return self._parse_cnb_text(text, query_date) if text else None
 
 

@@ -340,6 +340,67 @@ class TestM4OptionLinkerQueue:
 
 
 # ---------------------------------------------------------------------------
+# N1 — disposal cost basis is converted at the ACQUISITION-date rate
+#      (NSS 2 Afs 4/2019-35), not the disposal-date rate
+# ---------------------------------------------------------------------------
+
+class _DatedEurToCzkProvider:
+    """CNB-convention provider (EUR units per 1 CZK) keyed by date string."""
+
+    def __init__(self, eur_per_czk_by_date):
+        self._r = eur_per_czk_by_date
+
+    def get_rate(self, d, currency):
+        if currency.upper() == "CZK":
+            return Decimal("1")
+        return self._r.get(d.strftime("%Y-%m-%d"))
+
+
+class _NoneResolver:
+    def get_asset_by_id(self, _id):
+        return None
+
+
+class TestN1CostBasisAcquisitionDateRate:
+    def test_cost_converted_at_acquisition_not_sale(self):
+        from src.domain.results import RealizedGainLoss
+        from src.domain.enums import RealizationType
+
+        # Acquisition: 1 EUR = 25 CZK (rate 0.04). Sale: 1 EUR = 20 CZK (rate 0.05).
+        provider = _DatedEurToCzkProvider({
+            "2023-01-15": Decimal("0.04"),   # acquisition
+            "2023-11-20": Decimal("0.05"),   # disposal
+        })
+        fx = CzCurrencyConverter(provider=provider, policy=CzFxPolicyConfig())
+
+        rgl = RealizedGainLoss(
+            originating_event_id=uuid.uuid4(),
+            asset_internal_id=uuid.uuid4(),
+            asset_category_at_realization=AssetCategory.STOCK,
+            acquisition_date="2023-01-15",
+            realization_date="2023-11-20",
+            realization_type=RealizationType.LONG_POSITION_SALE,
+            quantity_realized=Decimal("10"),
+            unit_cost_basis_eur=Decimal("100"),
+            unit_realization_value_eur=Decimal("120"),
+            total_cost_basis_eur=Decimal("1000"),
+            total_realization_value_eur=Decimal("1200"),
+            gross_gain_loss_eur=Decimal("200"),
+        )
+
+        items = item_builder._build_disposal_items([rgl], _NoneResolver(), fx, [])
+        it = items[0]
+        # Cost at acquisition-date rate: 1000 / 0.04 = 25000 (NOT 1000 / 0.05 = 20000).
+        assert it.cost_basis_czk == Decimal("25000")
+        # Proceeds at disposal-date rate: 1200 / 0.05 = 24000.
+        assert it.proceeds_czk == Decimal("24000")
+        # CZK gain reflects the FX move: 24000 − 25000 = −1000 (despite a +200 EUR gain).
+        assert it.gain_loss_czk == Decimal("-1000")
+        assert it.amount_czk == Decimal("-1000")
+        assert it.fx_conversion_failed is False
+
+
+# ---------------------------------------------------------------------------
 # M6 — excess-repayment dividend event is currency-consistent (EUR)
 # ---------------------------------------------------------------------------
 

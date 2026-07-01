@@ -15,6 +15,7 @@ Definitive reference for Czech tax rules as implemented in this project. Each ru
 | Per-event conversion (not aggregate) | **IMPLEMENTED** |
 | Direct foreign→CZK (not via EUR intermediate) for §8 events | **IMPLEMENTED** |
 | EUR→CZK for RGL disposals (core pipeline converts to EUR first) | **PARTIAL** — EUR intermediate unavoidable for disposal amounts |
+| Disposal cost basis converted at ACQUISITION-date rate, proceeds at DISPOSAL-date rate (captures FX gain/loss; per NSS 2 Afs 4/2019-35) | **IMPLEMENTED** |
 | Weekend/holiday fallback to last valid rate | **IMPLEMENTED** — `max_fallback_days=7` |
 | Jednotný kurz (annual uniform rate) | **NOT IMPLEMENTED** — `CzFxMode.UNIFORM` raises `NotImplementedError` |
 | FxConversionRecord audit trail on every conversion | **IMPLEMENTED** |
