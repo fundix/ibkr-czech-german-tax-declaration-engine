@@ -19,7 +19,9 @@
 
 **Opraveno v dávce 9 (další 3 nálezy, 523 testů zelených):** L9 (get_rate_info → skutečné datum kurzu ve fx_date_used + conversion_note při fallbacku), L11 (odmítnutí budoucího data — ČNB by tiše vrátila dnešní listek), L13 (standalone úroková WHT do sekce úroků; sekce úroků má vlastní wht_paid řádek).
 
-**Zbývá — mechanické, vyžaduje rozhodnutí/data od uživatele:**
+**Opraveno v dávkách 10–11 (dalších 6 nálezů dle rozhodnutí uživatele, 537 testů zelených):** M6 (stock dividenda = §8 příjem v FMV + zero-cost lot místo ztráty kvantity), M12 (pro-rata repatriace po akciích), M15 (REVIEW REQUIRED poznámka při konverzích měn), M22 (PRIVATE_SALE/neznámé kategorie → PENDING místo tichých exempcí), L4 (§4/3 40M cap 2025+ flaguje osvobozené položky), M19 („C;O" flip zavře pozici a otevře protipozici místo pádu).
+
+**Zbývá — mechanické, vyžaduje rozhodnutí/data od uživatele (zapsáno i v docs/future-work.md):**
 - **M9** (opční prémie v historické SOY simulaci): korektní oprava = přehrát historii globálně chronologicky přes procesory (dnes se přehrává per-asset bez lifecycle událostí, prémie kříží assety) — refactor historické větve engine, dopad i na DE. Alternativa: dokumentovat jako známou mezeru.
 - **M11** (cash-in-lieu u frakcí po reverse splitu): potřeba vidět, jak CIL vypadá v reálných IBKR datech uživatele (cash transaction řádek? corporate action detail?), aby šel navázat na disposal frakce.
 - **L14** (benevolentní tolerance WHT párování): zpřísnění hrozí false negatives — ladit proti reálným výpisům uživatele.
