@@ -285,7 +285,22 @@ def run_main_calculations(
 
 
     logger.info("Finished processing current year events.")
-    logger.info(f"Pending option adjustments stored: {len(pending_option_adjustments)}")
+    if pending_option_adjustments:
+        # Any adjustment left here means an option premium is NOT reflected
+        # anywhere (neither an RGL nor a stock-basis adjustment) — the linked
+        # delivery trade was never processed (missing data, cash settlement,
+        # or a linking failure). This silently misstates the tax base.
+        for opt_event_id, adj in pending_option_adjustments.items():
+            logger.error(
+                f"UNCONSUMED option premium adjustment for option event {opt_event_id}: "
+                f"remaining premium {adj['premium_remaining_eur']} EUR, "
+                f"option asset {adj['option_asset_id']} (type {adj['option_type']}), "
+                f"undelivered stock qty {adj['remaining_stock_qty']} of {adj['expected_stock_qty']}. "
+                "The premium is missing from the results — review the input data "
+                "(partial fills, cash settlement, missing delivery trades)."
+            )
+    else:
+        logger.info("All pending option adjustments were consumed.")
 
 
     logger.info("Performing End-of-Year (EOY) quantity validation...")

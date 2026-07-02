@@ -498,6 +498,148 @@ class TestM1TimeTestCalendarYears:
 
 
 # ---------------------------------------------------------------------------
+# M5 — option premiums survive partial delivery fills and Decimal-format
+# differences; M10 — 0DTE: a same-day option BUY sorts before its expiry
+# ---------------------------------------------------------------------------
+
+class _MapResolver:
+    def __init__(self, assets):
+        self._by_id = {a.internal_asset_id: a for a in assets}
+
+    def get_asset_by_id(self, aid):
+        return self._by_id.get(aid)
+
+
+def _option_stock_pair():
+    from src.domain.assets import Option, Stock
+
+    stock = Stock(ibkr_symbol="ABC")
+    stock.ibkr_conid = "111"
+    option = Option(
+        option_type="C", strike_price=Decimal("50"),
+        expiry_date="2024-06-21", ibkr_symbol="ABC 240621C50",
+    )
+    option.underlying_ibkr_conid = "111"
+    option.multiplier = Decimal("100")
+    option.underlying_asset_internal_id = stock.internal_asset_id
+    return option, stock
+
+
+class TestM5OptionPremiumLinking:
+    def _fill(self, stock, qty, tx_id):
+        from src.domain.enums import FinancialEventType
+        from src.domain.events import TradeEvent
+
+        return TradeEvent(
+            asset_internal_id=stock.internal_asset_id,
+            event_date="2024-06-21",
+            quantity=qty,
+            price_foreign_currency=Decimal("50"),
+            event_type=FinancialEventType.TRADE_BUY_LONG,
+            ibkr_transaction_id=tx_id,
+        )
+
+    def test_partial_fills_link_to_same_exercise(self):
+        from src.domain.events import OptionExerciseEvent
+        from src.processing.option_trade_linker import OptionTradeLinker
+
+        option, stock = _option_stock_pair()
+        resolver = _MapResolver([option, stock])
+        # quantity "1.0" → expected qty 100.0: the old string key ("100.0")
+        # never matched a fill quantity of "100", and partial fills (50+50)
+        # never matched the exact-quantity key at all.
+        exercise = OptionExerciseEvent(
+            asset_internal_id=option.internal_asset_id,
+            event_date="2024-06-21",
+            quantity_contracts=Decimal("1.0"),
+        )
+        fills = [self._fill(stock, Decimal("50"), "1"), self._fill(stock, Decimal("50"), "2")]
+
+        linker = OptionTradeLinker(resolver)
+        lookup = linker._build_option_event_lookup([exercise])
+        linker.link_trades(fills, lookup)
+
+        assert all(f.related_option_event_id == exercise.event_id for f in fills)
+
+    def test_premium_allocated_pro_rata_across_fills(self):
+        from src.engine.event_processors.trade_processor import TradeProcessor
+        from tests.test_audit_fixes import _make_ledger
+
+        option, stock = _option_stock_pair()
+        resolver = _MapResolver([option, stock])
+        opt_event_id = uuid.uuid4()
+        pending = {opt_event_id: {
+            "premium_eur": Decimal("200"),
+            "premium_remaining_eur": Decimal("200"),
+            "option_asset_id": option.internal_asset_id,
+            "option_type": "C",
+            "expected_stock_qty": Decimal("100"),
+            "remaining_stock_qty": Decimal("100"),
+        }}
+        context = {
+            "asset_resolver": resolver,
+            "pending_option_adjustments": pending,
+            "tax_classifier": None,
+        }
+        ledger = _make_ledger()
+
+        fills = [self._fill(stock, Decimal("50"), "1"), self._fill(stock, Decimal("50"), "2")]
+        for f in fills:
+            f.net_proceeds_or_cost_basis_eur = Decimal("2500")
+            f.related_option_event_id = opt_event_id
+
+        TradeProcessor().process(fills[0], ledger, context)
+        # Long-call exercise premium raises the buy cost pro-rata: +200×50/100.
+        assert fills[0].net_proceeds_or_cost_basis_eur == Decimal("2600")
+        assert opt_event_id in pending   # half the delivery still outstanding
+
+        TradeProcessor().process(fills[1], ledger, context)
+        assert fills[1].net_proceeds_or_cost_basis_eur == Decimal("2600")
+        assert pending == {}             # fully consumed, nothing lost
+
+
+class TestM10ZeroDteOrdering:
+    def test_same_day_option_buy_sorts_before_expiry(self):
+        from src.domain.enums import FinancialEventType
+        from src.domain.events import OptionExpirationWorthlessEvent, TradeEvent
+        from src.utils.sorting_utils import get_event_sort_key
+
+        option, stock = _option_stock_pair()
+        resolver = _MapResolver([option, stock])
+
+        buy = TradeEvent(
+            asset_internal_id=option.internal_asset_id,
+            event_date="2024-06-21",
+            quantity=Decimal("1"),
+            price_foreign_currency=Decimal("1.50"),
+            event_type=FinancialEventType.TRADE_BUY_LONG,
+            ibkr_transaction_id="200",
+        )
+        expiry = OptionExpirationWorthlessEvent(
+            asset_internal_id=option.internal_asset_id,
+            event_date="2024-06-21",
+            quantity_contracts=Decimal("1"),
+        )
+        expiry.ibkr_transaction_id = "100"   # lower tx id — order must still hold
+
+        # The opening trade must process first, else the expiry hits an empty
+        # ledger and the premium loss is never realized.
+        assert get_event_sort_key(buy, resolver) < get_event_sort_key(expiry, resolver)
+
+        # A same-day STOCK (delivery) trade still sorts AFTER the lifecycle
+        # event, which stores the pending premium adjustment it consumes.
+        stock_trade = TradeEvent(
+            asset_internal_id=stock.internal_asset_id,
+            event_date="2024-06-21",
+            quantity=Decimal("100"),
+            price_foreign_currency=Decimal("50"),
+            event_type=FinancialEventType.TRADE_BUY_LONG,
+            ibkr_transaction_id="50",
+        )
+        assert get_event_sort_key(expiry, resolver) < get_event_sort_key(stock_trade, resolver)
+
+
+# ---------------------------------------------------------------------------
 # M16 — paid Stückzinsen (accrued interest on a bond purchase) reduce §8
 # interest income instead of silently vanishing
 # ---------------------------------------------------------------------------

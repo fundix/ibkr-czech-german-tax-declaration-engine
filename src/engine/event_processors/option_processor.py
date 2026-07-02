@@ -19,6 +19,26 @@ from src.utils.type_utils import parse_ibkr_date # For holding period calculatio
 
 logger = logging.getLogger(__name__)
 
+
+def _make_pending_adjustment(premium_eur: Decimal, event, option_asset: Option) -> Dict[str, Any]:
+    """Pending premium adjustment for the delivery stock trade(s).
+
+    Carries the expected/remaining stock quantity so the premium can be
+    allocated PRO-RATA when the delivery arrives in multiple partial fills
+    (the linker links each fill to this same option event).
+    """
+    multiplier = option_asset.multiplier if option_asset.multiplier else Decimal("100")
+    expected_stock_qty = (event.quantity_contracts * multiplier).copy_abs()
+    return {
+        "premium_eur": premium_eur,
+        "premium_remaining_eur": premium_eur,
+        "option_asset_id": event.asset_internal_id,
+        "option_type": option_asset.option_type,
+        "expected_stock_qty": expected_stock_qty,
+        "remaining_stock_qty": expected_stock_qty,
+    }
+
+
 class OptionExerciseProcessor(EventProcessor):
     def process(self, event: FinancialEvent, ledger: FifoLedger, context: Dict[str, Any]) -> List[RealizedGainLoss]:
         if not isinstance(event, OptionExerciseEvent):
@@ -63,7 +83,9 @@ class OptionExerciseProcessor(EventProcessor):
 
             logger.debug(f"  Total premium paid (cost) for exercised option {option_asset.get_classification_key()}: {total_premium_paid_eur} EUR from {len(consumed_lot_details)} consumed lot details.")
 
-            pending_adjustments[event.event_id] = (total_premium_paid_eur, event.asset_internal_id, option_asset.option_type)
+            pending_adjustments[event.event_id] = _make_pending_adjustment(
+                total_premium_paid_eur, event, option_asset
+            )
             logger.info(f"  Stored pending adjustment for stock trade linked to exercise event {event.event_id}. "
                         f"Total Premium Paid (Cost): {total_premium_paid_eur} EUR, Option Type: {option_asset.option_type}")
 
@@ -117,7 +139,9 @@ class OptionAssignmentProcessor(EventProcessor):
 
             logger.debug(f"  Total premium received (proceeds) for assigned option {option_asset.get_classification_key()}: {total_premium_received_eur} EUR from {len(consumed_lot_details)} consumed lot details.")
 
-            pending_adjustments[event.event_id] = (total_premium_received_eur, event.asset_internal_id, option_asset.option_type)
+            pending_adjustments[event.event_id] = _make_pending_adjustment(
+                total_premium_received_eur, event, option_asset
+            )
             logger.info(f"  Stored pending adjustment for stock trade linked to assignment event {event.event_id}. "
                         f"Total Premium Received (Proceeds): {total_premium_received_eur} EUR, Option Type: {option_asset.option_type}")
 
