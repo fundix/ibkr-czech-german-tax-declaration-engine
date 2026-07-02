@@ -13,12 +13,6 @@
 - UI / web interface
 ## Open audit findings (AUDIT_REPORT_2026-07, awaiting design/data)
 
-- **M9 — option premiums in historical SOY reconstruction**: prior-year
-  exercise/assignment premiums are not applied to reconstructed stock lots.
-  Correct fix = replay history globally in chronological order through the
-  event processors (today the replay is per-asset and skips option lifecycle
-  events, while premiums cross assets). Touches the DE branch too — approved,
-  planned as a standalone refactor.
 - **M11 — cash-in-lieu for split fractions**: a reverse split leaving a
   fraction keeps it in the ledger forever; the CIL cash is never taxed and
   the fraction's cost basis is lost. Needs a sample of how CIL appears in

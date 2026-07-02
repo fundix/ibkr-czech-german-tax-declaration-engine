@@ -21,6 +21,8 @@
 
 **Opraveno v dávce 12 (539 testů zelených):** L3 (§38f/8 — prostý zápočet stropován za každý stát samostatně, ne agregátně; fallback na agregát bez per-country dat).
 
+**Opraveno v dávce 13 (542 testů zelených):** M9 — globální chronologický pre-pass promítá prior-year opční prémie do navázaných historických stock tradů před SOY rekonstrukcí (pro-rata přes částečné fily); per-asset replay opcí nově konzumuje exercise/assignment/expiraci, takže rekonstruovaná opční pozice sedí s reportovanou SOY.
+
 **Opraveno v dávkách 10–11 (dalších 6 nálezů dle rozhodnutí uživatele, 537 testů zelených):** M6 (stock dividenda = §8 příjem v FMV + zero-cost lot místo ztráty kvantity), M12 (pro-rata repatriace po akciích), M15 (REVIEW REQUIRED poznámka při konverzích měn), M22 (PRIVATE_SALE/neznámé kategorie → PENDING místo tichých exempcí), L4 (§4/3 40M cap 2025+ flaguje osvobozené položky), M19 („C;O" flip zavře pozici a otevře protipozici místo pádu).
 
 **Zbývá — mechanické, vyžaduje rozhodnutí/data od uživatele (zapsáno i v docs/future-work.md):**
