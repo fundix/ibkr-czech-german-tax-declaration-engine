@@ -12,7 +12,12 @@
 - Dávka 4: M4 (rozdělení stejnodenních WHT), M20 (reversal dividendy drží znaménko), L1 (FTC strop max(0, gross))
 - Dávka 5: M16 (Stückzinsen snižují §8 úroky), L7 (řaditelné kategorie), L8 (měnová konzistence mutace)
 
-**Zbývá — mechanické (další dávky):** M5 (ztracené opční prémie), M7–M9 (SOY rekonstrukce), M10 (0DTE řazení), M11 (cash-in-lieu), M13 (FX-fail tiché vypuštění z FIFO), L5, L6, L9–L14.
+**Opraveno v dávkách 6–8 (dalších 9 nálezů, 519 testů zelených):**
+- Dávka 6: M5 (opční prémie přežijí částečné fily — numerický klíč, pro-rata alokace, ERROR pro zbytky), M10 (0DTE: nákup opce se řadí před její expiraci/exercise)
+- Dávka 7: M7 (SOY přebytek nechává NEJNOVĚJŠÍ loty + warning), M8 (příznak odhadnutého data nabytí z SOY fallbacku → PENDING v časovém testu), M13 (FX-fail vypuštěné obchody: ERROR per obchod + souhrnný ERROR za běh)
+- Dávka 8: L5 (záporné čisté proceeds drží znaménko), L6 (cash merger konzumuje jen quantity_disposed; short pozice → warning), L10 (prefetch plní cache), L12 (EUR-mode wht_paid jen EUR záznamy)
+
+**Zbývá — mechanické, vyžaduje návrhové rozhodnutí:** M9 (replay opčních prémií v historické SOY simulaci — zásah do historické větve engine), M11 (cash-in-lieu u frakcí — závisí, jak CIL přichází ve vstupních datech), L9 (skutečné datum kurzu ve fx_date_used — změna API provideru), L11 (validace data hlavičky ČNB listku), L13 (sekce standalone WHT), L14 (tolerance párování WHT — ladit proti reálným datům).
 **Zbývá — čeká na rozhodnutí uživatele (⚖):** M6 (stock dividendy v §8), M12 (pro-rata repatriace), M15 (kurzové zisky konverzí), M22 (PRIVATE_SALE fallback), M17/M18 (oddělené datum prémie — návrh datového modelu), M19 (C;O flip — sémantika FIFO), L4 (40M cap 2025+).
 
 ## Stav auditu
