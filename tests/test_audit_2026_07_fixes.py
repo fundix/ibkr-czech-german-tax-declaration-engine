@@ -1402,6 +1402,77 @@ class TestM14PendingLossExcluded:
         assert result.securities.net_taxable == Decimal("50000")
 
 
+# ---------------------------------------------------------------------------
+# L3 — §38f/8: the simple foreign tax credit is capped PER STATE, not on the
+# aggregate — excess credit from one state must not use another's headroom
+# ---------------------------------------------------------------------------
+
+class TestL3PerStateFtcCap:
+    def _summary(self, with_per_country=True):
+        from src.countries.cz.foreign_tax_credit import (
+            CzCountryCreditAggregate,
+            CzForeignTaxCreditSummary,
+        )
+
+        s = CzForeignTaxCreditSummary()
+        s.foreign_income_total_czk = Decimal("200000")
+        s.foreign_tax_creditable_total_czk = Decimal("26000")
+        s.foreign_tax_paid_total_czk = Decimal("26000")
+        if with_per_country:
+            s.per_country = {
+                "DE": CzCountryCreditAggregate(
+                    country="DE",
+                    gross_income_czk=Decimal("100000"),
+                    foreign_tax_paid_czk=Decimal("26000"),
+                    creditable_czk=Decimal("26000"),
+                ),
+                "US": CzCountryCreditAggregate(
+                    country="US",
+                    gross_income_czk=Decimal("100000"),
+                    foreign_tax_paid_czk=Decimal("0"),
+                    creditable_czk=Decimal("0"),
+                ),
+            }
+        return s
+
+    def test_per_state_cap_blocks_cross_subsidy(self):
+        from src.countries.cz.foreign_tax_credit import CzForeignTaxCreditSummary
+        from src.countries.cz.loss_offsetting import CzLossOffsettingResult
+        from src.countries.cz.tax_liability import compute_tax_liability
+
+        # DE dividends 100k with 26k creditable WHT (26 % treaty-style cap) +
+        # US income 100k with none. Base 200k → gross tax 30k. The aggregate
+        # cap (30k) would allow the full 26k; per-state the DE cap is
+        # 30k × 100k/200k = 15k.
+        result = compute_tax_liability(
+            taxable_dividends=Decimal("200000"),
+            taxable_interest=Decimal("0"),
+            netting=CzLossOffsettingResult(),
+            ftc_summary=self._summary(),
+            config=CzTaxConfig(),
+            tax_year=2024,
+            has_fx=True,
+        )
+        assert result.gross_czech_tax == Decimal("30000.00")
+        assert result.final_creditable_ftc == Decimal("15000.00")
+        assert any("§38f/8" in n for n in result.limitation_notes)
+
+    def test_aggregate_fallback_without_per_country(self):
+        from src.countries.cz.loss_offsetting import CzLossOffsettingResult
+        from src.countries.cz.tax_liability import compute_tax_liability
+
+        result = compute_tax_liability(
+            taxable_dividends=Decimal("200000"),
+            taxable_interest=Decimal("0"),
+            netting=CzLossOffsettingResult(),
+            ftc_summary=self._summary(with_per_country=False),
+            config=CzTaxConfig(),
+            tax_year=2024,
+            has_fx=True,
+        )
+        assert result.final_creditable_ftc == Decimal("26000")
+
+
 class TestM21EurModeGuards:
     def test_eur_mode_skips_threshold_and_rounding(self):
         # 2 000 000 EUR ≈ 50M CZK is far above any CZK threshold, but in EUR

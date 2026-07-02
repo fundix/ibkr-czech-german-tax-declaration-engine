@@ -227,10 +227,37 @@ def compute_tax_liability(
     else:
         result.czech_tax_on_foreign_income = ZERO
 
-    result.final_creditable_ftc = min(
-        result.preliminary_ftc,
-        result.czech_tax_on_foreign_income,
-    )
+    # §38f odst. 8 ZDP: the simple-credit cap is computed FOR EACH STATE
+    # SEPARATELY — a single aggregate cap would let excess credit from a
+    # high-WHT state ride on another state's unused headroom. Falls back to
+    # the aggregate method when no per-country breakdown is available.
+    if ftc_summary.per_country and result.combined_taxable_base > ZERO:
+        per_state_credit = ZERO
+        for country in sorted(ftc_summary.per_country):
+            agg = ftc_summary.per_country[country]
+            if agg.gross_income_czk <= ZERO or agg.creditable_czk <= ZERO:
+                continue
+            state_ratio = min(
+                agg.gross_income_czk / result.combined_taxable_base, Decimal("1")
+            )
+            state_cap = (result.gross_czech_tax * state_ratio).quantize(
+                TWO, rounding=ROUND_HALF_UP
+            )
+            state_credit = min(agg.creditable_czk, state_cap)
+            per_state_credit += state_credit
+            if agg.creditable_czk > state_cap:
+                notes.append(
+                    f"FTC {country}: per-state cap (§38f/8) limits credit to "
+                    f"{state_cap} (preliminary {agg.creditable_czk})"
+                )
+        result.final_creditable_ftc = min(
+            per_state_credit, result.czech_tax_on_foreign_income
+        )
+    else:
+        result.final_creditable_ftc = min(
+            result.preliminary_ftc,
+            result.czech_tax_on_foreign_income,
+        )
     result.non_creditable_ftc = (
         ftc_summary.foreign_tax_paid_total_czk - result.final_creditable_ftc
     )
