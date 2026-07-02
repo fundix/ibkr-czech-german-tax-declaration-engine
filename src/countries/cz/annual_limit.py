@@ -99,11 +99,41 @@ def evaluate_annual_limit(
         total_proceeds += proceeds
         eligible.append(it)
 
+    # Disposals whose CZK proceeds are missing (failed FX conversion) make
+    # the annual total unknowable: their proceeds are absent from the sum,
+    # so granting the "≤ threshold" exemption to the remaining items could
+    # exempt a year that is actually over the limit.
+    fx_failed_disposals = [
+        it for it in items
+        if it.item_type in _ANNUAL_LIMIT_ELIGIBLE_TYPES
+        and not it.is_exempt
+        and it.proceeds_czk is None
+    ]
+
     if not eligible:
         return ZERO
 
     # --- Phase 2: apply the all-or-nothing rule ---
-    if total_proceeds <= threshold:
+    if total_proceeds <= threshold and fx_failed_disposals:
+        # Total is under the threshold but incomplete — do NOT exempt.
+        for it in eligible:
+            it.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+            note = it.tax_review_note or ""
+            it.tax_review_note = (
+                f"{note + '; ' if note else ''}"
+                f"Annual limit undeterminable: {len(fx_failed_disposals)} "
+                f"disposal(s) missing CZK proceeds (FX conversion failed) — "
+                f"known proceeds {total_proceeds} CZK ≤ {threshold} CZK, but "
+                "the true total may exceed the limit. Exemption NOT granted; "
+                "item kept taxable pending manual review."
+            )
+        logger.warning(
+            f"Annual limit NOT applied: known proceeds {total_proceeds} CZK ≤ "
+            f"{threshold} CZK but {len(fx_failed_disposals)} disposal(s) have "
+            "no CZK proceeds (FX failed) — total unknowable, eligible items "
+            "kept taxable and flagged for review."
+        )
+    elif total_proceeds <= threshold:
         # All eligible items are exempt
         for it in eligible:
             it.is_taxable = False
@@ -137,6 +167,55 @@ def evaluate_annual_limit(
         )
 
     return total_proceeds
+
+
+def evaluate_exempt_income_cap(
+    items: List[CzTaxItem],
+    config: CzTaxConfig,
+    tax_year: int,
+    has_fx: bool = True,
+) -> Decimal:
+    """§4/3 ZDP (2025+): cap on time-test-exempt income, evaluated in-place.
+
+    When the sum of proceeds exempted by the time test exceeds the annual
+    cap (40M CZK), the exemption applies only proportionally. The engine
+    FLAGS all affected items ``PENDING_MANUAL_REVIEW`` with the computed
+    ratio — the proportional mechanics (including the optional cost
+    step-up) are left to the preparer.
+
+    Returns the total time-test-exempt proceeds (audit figure).
+    """
+    ZERO = Decimal(0)
+    if tax_year < config.exempt_income_cap_start_year or not has_fx:
+        return ZERO
+
+    exempt_items = [
+        it for it in items
+        if it.is_exempt
+        and it.exemption_reason == CzExemptionReason.TIME_TEST_PASSED
+        and it.proceeds_czk is not None
+    ]
+    total_exempt_proceeds = sum((it.proceeds_czk for it in exempt_items), ZERO)
+    cap = config.exempt_income_cap_czk
+
+    if total_exempt_proceeds > cap:
+        ratio = (total_exempt_proceeds - cap) / total_exempt_proceeds
+        for it in exempt_items:
+            it.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+            note = it.tax_review_note or ""
+            it.tax_review_note = (
+                f"{note + '; ' if note else ''}"
+                f"§4/3 ZDP cap exceeded: time-test-exempt proceeds total "
+                f"{total_exempt_proceeds} CZK > {cap} CZK — approx. "
+                f"{(ratio * 100).quantize(Decimal('0.01'))} % of the gain is "
+                "NOT exempt (optional cost step-up may apply). Resolve manually."
+            )
+        logger.warning(
+            f"§4/3 ZDP exemption cap exceeded: {total_exempt_proceeds} CZK "
+            f"time-test-exempt proceeds > {cap} CZK — "
+            f"{len(exempt_items)} item(s) flagged for manual review."
+        )
+    return total_exempt_proceeds
 
 
 def _is_eligible(it: CzTaxItem) -> bool:

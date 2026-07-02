@@ -32,7 +32,7 @@ from src.countries.cz.fx_policy import (
     CzFxPolicyConfig,
     FxConversionRecord,
 )
-from src.countries.cz.annual_limit import evaluate_annual_limit
+from src.countries.cz.annual_limit import evaluate_annual_limit, evaluate_exempt_income_cap
 from src.countries.cz.foreign_tax_credit import CzForeignTaxCreditSummary, evaluate_foreign_tax_credit
 from src.countries.cz.item_builder import build_tax_items
 from src.countries.cz.loss_offsetting import CzLossOffsettingResult, compute_loss_offsetting
@@ -138,6 +138,9 @@ class CzechTaxAggregator:
         has_fx = self._fx is not None
         annual_limit_proceeds = evaluate_annual_limit(items, self.config, has_fx)
 
+        # --- Phase 3b: §4/3 ZDP cap on time-test-exempt income (2025+) ---
+        evaluate_exempt_income_cap(items, self.config, tax_year, has_fx)
+
         # --- Phase 4: Compute §10 loss offsetting ---
         netting = compute_loss_offsetting(items, has_fx)
         netting.annual_limit_eligible_proceeds = annual_limit_proceeds
@@ -153,26 +156,63 @@ class CzechTaxAggregator:
         div_wht = ZERO
         div_count = 0
         int_taxable = ZERO
+        int_wht = ZERO
         int_count = 0
+
+        def _eur_wht_sum(records):
+            # EUR mode: only EUR-denominated WHT can be summed (unit mismatch
+            # otherwise) — mirrors the FTC guard.
+            return sum(
+                (
+                    r.original_amount
+                    for r in records
+                    if r.original_amount is not None
+                    and (r.original_currency or "EUR").upper() == "EUR"
+                ),
+                ZERO,
+            )
 
         for it in items:
             if it.section == CzTaxSection.CZ_8_DIVIDENDS:
                 if it.item_type == CzTaxItemType.OTHER:
                     # Unlinked WHT standalone item — count WHT only, not as income
                     div_wht += it.total_wht_czk() if has_fx else sum(
-                        (r.original_amount for r in it.wht_records), ZERO
+                        (
+                            # EUR mode: summing across currencies would mix
+                            # units (USD 15 + EUR 10 ≠ "25 EUR") — count only
+                            # EUR-denominated WHT, mirroring the FTC guard.
+                            r.original_amount
+                            for r in it.wht_records
+                            if r.original_amount is not None
+                            and (r.original_currency or "EUR").upper() == "EUR"
+                        ),
+                        ZERO,
                     )
                     continue
                 div_count += 1
                 if it.included_in_tax_base:
                     div_taxable += (it.amount_czk if has_fx else it.amount_eur) or ZERO
                     div_wht += it.total_wht_czk() if has_fx else sum(
-                        (r.original_amount for r in it.wht_records), ZERO
+                        (
+                            # EUR mode: summing across currencies would mix
+                            # units (USD 15 + EUR 10 ≠ "25 EUR") — count only
+                            # EUR-denominated WHT, mirroring the FTC guard.
+                            r.original_amount
+                            for r in it.wht_records
+                            if r.original_amount is not None
+                            and (r.original_currency or "EUR").upper() == "EUR"
+                        ),
+                        ZERO,
                     )
             elif it.section == CzTaxSection.CZ_8_INTEREST:
+                if it.item_type == CzTaxItemType.OTHER:
+                    # Unlinked interest-style WHT — count WHT only, not income
+                    int_wht += it.total_wht_czk() if has_fx else _eur_wht_sum(it.wht_records)
+                    continue
                 int_count += 1
                 if it.included_in_tax_base:
                     int_taxable += (it.amount_czk if has_fx else it.amount_eur) or ZERO
+                    int_wht += it.total_wht_czk() if has_fx else _eur_wht_sum(it.wht_records)
 
         cur = "CZK" if has_fx else "EUR"
         c = cur.lower()
@@ -196,6 +236,7 @@ class CzechTaxAggregator:
             label=self.config.section_labels.get("cz_8_interest", "§8 – Úroky"),
             line_items={
                 f"gross_interest_{c}": int_taxable.quantize(TWO),
+                f"wht_paid_{c}": int_wht.quantize(TWO),
                 "item_count": Decimal(int_count),
             },
             notes=([] if has_fx else ["no FX converter — amounts in EUR"]),
@@ -206,11 +247,28 @@ class CzechTaxAggregator:
 
         # §10 netting summary (from loss_offsetting module)
         netting_items = netting.to_line_items(cur)
+        cz10_notes = ["PLACEHOLDER: expense deduction rules (§10/4 ZDP) not applied"]
+        # M15: FX gains from currency conversions are NOT computed (no cash-
+        # balance FIFO). They are taxable §10 income in CZ — make the gap
+        # loud whenever conversions exist in the data.
+        conversion_count = sum(
+            1 for ev in financial_events
+            if getattr(ev, "event_type", None) == FinancialEventType.CURRENCY_CONVERSION
+        )
+        if conversion_count:
+            note = (
+                f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found — "
+                "FX gains/losses from currency conversions are NOT computed by this "
+                "engine and are taxable §10 income. Assess them manually."
+            )
+            cz10_notes.append(note)
+            logger.warning(note)
+
         sections["cz_10_summary"] = TaxResultSection(
             section_key="cz_10_summary",
             label="§10 ZDP – Souhrnný přehled",
             line_items=netting_items,
-            notes=["PLACEHOLDER: expense deduction rules (§10/4 ZDP) not applied"],
+            notes=cz10_notes,
         )
 
         # Foreign tax credit summary (preliminary per-item caps)
@@ -229,6 +287,8 @@ class CzechTaxAggregator:
             netting=netting,
             ftc_summary=ftc_summary,
             config=self.config,
+            tax_year=tax_year,
+            has_fx=has_fx,
         )
 
         liability_items = liability.to_line_items(cur)

@@ -92,9 +92,84 @@ class WithholdingTaxLinker:
             else:
                 unlinked_wht_events.append(wht_event)
                 logger.warning(f"Could not link WHT event {wht_event.event_id} (Date: {wht_event.event_date}, Amount: {wht_event.gross_amount_foreign_currency} {wht_event.local_currency})")
-        
+
+        unlinked_wht_events = self._link_refunds_to_prior_charges(
+            unlinked_wht_events, successful_links, wht_events
+        )
+
         logger.info(f"Linking complete: {len(successful_links)} successful links, {len(unlinked_wht_events)} unlinked WHT events")
         return successful_links, unlinked_wht_events
+
+    def _link_refunds_to_prior_charges(
+        self,
+        unlinked_wht_events: List[WithholdingTaxEvent],
+        successful_links: List[WithholdingTaxLink],
+        wht_events: List[WithholdingTaxEvent],
+    ) -> List[WithholdingTaxEvent]:
+        """Second pass: attach late WHT refunds to previously linked charges.
+
+        A refund/reversal (negative amount after sign normalisation) often
+        arrives days or months after the original withholding (e.g. a rate
+        true-up), so the date-based strategies cannot link it. Attach it to
+        the same income event as an earlier linked WHT charge on the same
+        asset and currency, so the refund nets against the original charge
+        downstream instead of standing alone. A refund larger than any single
+        prior charge is left unlinked (conservative — flagged for review).
+        """
+        still_unlinked: List[WithholdingTaxEvent] = []
+        wht_by_id = {w.event_id: w for w in wht_events}
+
+        for wht_event in unlinked_wht_events:
+            amount = wht_event.gross_amount_foreign_currency
+            if amount is None or amount >= Decimal(0):
+                still_unlinked.append(wht_event)
+                continue
+
+            best_link: Optional[WithholdingTaxLink] = None
+            best_charge_date = ""
+            for link in successful_links:
+                charge = wht_by_id.get(link.withholding_tax_event_id)
+                if charge is None:
+                    continue
+                charge_amount = charge.gross_amount_foreign_currency or Decimal(0)
+                if (
+                    charge.asset_internal_id != wht_event.asset_internal_id
+                    or charge.local_currency != wht_event.local_currency
+                    or charge_amount <= Decimal(0)
+                    or amount.copy_abs() > charge_amount
+                    or charge.event_date > wht_event.event_date
+                ):
+                    continue
+                # Prefer the most recent prior charge (dates are YYYY-MM-DD strings)
+                if best_link is None or charge.event_date > best_charge_date:
+                    best_link = link
+                    best_charge_date = charge.event_date
+
+            if best_link is None:
+                still_unlinked.append(wht_event)
+                continue
+
+            refund_link = WithholdingTaxLink(
+                withholding_tax_event_id=wht_event.event_id,
+                linked_income_event_id=best_link.linked_income_event_id,
+                link_confidence_score=55,
+                match_criteria=["refund_of_prior_wht"],
+                effective_tax_rate=None,
+                linking_notes=(
+                    "Refund/reversal netted against a previously linked WHT "
+                    "charge on the same asset and currency"
+                ),
+            )
+            successful_links.append(refund_link)
+            wht_event.taxed_income_event_id = best_link.linked_income_event_id
+            wht_event.link_confidence_score = 55
+            logger.info(
+                f"Linked WHT refund {wht_event.event_id} "
+                f"({wht_event.gross_amount_foreign_currency} {wht_event.local_currency}) "
+                f"to income event {best_link.linked_income_event_id} via prior charge."
+            )
+
+        return still_unlinked
     
     def _is_potential_income_event(self, event: FinancialEvent) -> bool:
         """Check if an event could generate income subject to withholding tax."""
@@ -133,15 +208,24 @@ class WithholdingTaxLinker:
                 candidate_matches.append(match)
         
         # Return the match with highest confidence score.
-        # Tie-break deterministically on the candidate income event id so that
-        # equal-confidence candidates (e.g. two same-day, same-currency dividends
-        # on one asset) always resolve to the SAME income event regardless of the
-        # order events were parsed in — instead of "whichever appeared first".
+        # Equal-confidence candidates (e.g. two same-day, same-currency
+        # dividends on one asset) are tie-broken by how close the implied
+        # WHT/income ratio is to the most common treaty rate (15 %) — an
+        # id-only tie-break sent BOTH same-day WHTs to the same dividend,
+        # and the per-item FTC cap then swallowed part of the credit. The
+        # anchor is a tie-break only; it plays no role in validation. The
+        # event id remains as the final deterministic fallback.
         if candidate_matches:
-            return max(
-                candidate_matches,
-                key=lambda m: (m.confidence_score, str(m.candidate_event_id)),
-            )
+            anchor = Decimal("0.15")
+
+            def _match_key(m: LinkingCriteriaMatch):
+                if m.effective_tax_rate is None:
+                    rate_closeness = Decimal("-999")
+                else:
+                    rate_closeness = -(m.effective_tax_rate.copy_abs() - anchor).copy_abs()
+                return (m.confidence_score, rate_closeness, str(m.candidate_event_id))
+
+            return max(candidate_matches, key=_match_key)
 
         return None
     
@@ -391,13 +475,15 @@ class WithholdingTaxLinker:
             
         if income_event.gross_amount_foreign_currency <= Decimal('0'):
             return False
-            
-        tax_rate = wht_event.gross_amount_foreign_currency / income_event.gross_amount_foreign_currency
-        
+
+        # Use the absolute WHT amount so refunds/reversals (negative amounts)
+        # validate against the income exactly like the original charge did.
+        tax_rate = wht_event.gross_amount_foreign_currency.copy_abs() / income_event.gross_amount_foreign_currency
+
         # Reasonable tax rates: 5% to 50%
         min_rate = Decimal('0.05') - Decimal(str(tolerance))
         max_rate = Decimal('0.50') + Decimal(str(tolerance))
-        
+
         return min_rate <= tax_rate <= max_rate
     
     def _validate_interest_tax_rate(
@@ -411,9 +497,9 @@ class WithholdingTaxLinker:
             
         if income_event.gross_amount_foreign_currency <= Decimal('0'):
             return False
-            
-        tax_rate = wht_event.gross_amount_foreign_currency / income_event.gross_amount_foreign_currency
-        
+
+        tax_rate = wht_event.gross_amount_foreign_currency.copy_abs() / income_event.gross_amount_foreign_currency
+
         # Interest withholding is typically 20% (+/- 2%)
         return Decimal('0.18') <= tax_rate <= Decimal('0.22')
     

@@ -117,6 +117,10 @@ class CzTaxItem:
     event_date: str = ""                  # primary date (trade / payment date)
     acquisition_date: Optional[str] = None  # for disposals: lot acquisition date
     holding_period_days: Optional[int] = None
+    # True when acquisition_date is a synthetic SOY fallback (31 Dec of the
+    # prior year) — the real purchase date is unknown; the time test flags
+    # such items for manual review instead of trusting the date.
+    acquisition_date_estimated: bool = False
 
     # --- Original amounts (transaction currency) ---
     original_amount: Optional[Decimal] = None
@@ -146,6 +150,20 @@ class CzTaxItem:
 
     # --- Quantity (for disposals) ---
     quantity: Optional[Decimal] = None
+
+    # --- Category confidence ---
+    # True when the asset category (PRIVATE_SALE_ASSET, unknown, …) may not
+    # be a security — the time test must flag the item for manual review
+    # instead of granting securities exemptions by default.
+    category_needs_review: bool = False
+
+    # --- Short positions ---
+    # True when the item realizes a SHORT position (short cover, closing or
+    # expiry of a written option). The §4/1/w holding-period time test can
+    # never exempt such items: the security is not held between acquisition
+    # and transfer (the sale precedes the purchase), and acquisition_date on
+    # the item is the short OPENING date, not an ownership start.
+    is_short_position: bool = False
 
     # --- Taxability classification (set by time_test + annual_limit evaluators) ---
     is_taxable: bool = True

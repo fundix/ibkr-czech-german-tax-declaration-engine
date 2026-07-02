@@ -66,9 +66,14 @@ class DomainEventFactory:
         open_close_ind = (raw_trade.open_close_indicator or "").upper()
         trade_quantity = safe_decimal(raw_trade.quantity, default=Decimal(0))
 
+        oc_parts = {p.strip() for p in open_close_ind.split(";") if p.strip()}
+        is_flip = "C" in oc_parts and "O" in oc_parts
+
         if buy_sell == "BUY":
             if open_close_ind == "O": return FinancialEventType.TRADE_BUY_LONG
-            if open_close_ind == "C": return FinancialEventType.TRADE_BUY_SHORT_COVER
+            # "C" or "C;O" (flip): the trade first CLOSES the short position;
+            # for a flip the remainder opens a long position in FIFO.
+            if open_close_ind == "C" or is_flip: return FinancialEventType.TRADE_BUY_SHORT_COVER
             logger.warning(
                 f"Trade ID {raw_trade.transaction_id or raw_trade.trade_id} (BUY): "
                 f"Missing or unexpected Open/Close Indicator: '{raw_trade.open_close_indicator}'. Notes/Codes was: '{raw_trade.notes_codes}'. "
@@ -77,7 +82,9 @@ class DomainEventFactory:
             return FinancialEventType.TRADE_BUY_LONG
         elif buy_sell == "SELL":
             if open_close_ind == "O": return FinancialEventType.TRADE_SELL_SHORT_OPEN
-            if open_close_ind == "C": return FinancialEventType.TRADE_SELL_LONG
+            # "C" or "C;O" (flip): the trade first CLOSES the long position;
+            # for a flip the remainder opens a short position in FIFO.
+            if open_close_ind == "C" or is_flip: return FinancialEventType.TRADE_SELL_LONG
             logger.warning(
                 f"Trade ID {raw_trade.transaction_id or raw_trade.trade_id} (SELL): "
                 f"Missing or unexpected Open/Close Indicator: '{raw_trade.open_close_indicator}'. Notes/Codes was: '{raw_trade.notes_codes}'. "
@@ -361,6 +368,19 @@ class DomainEventFactory:
                     ibkr_notes_codes=rt.notes_codes
                 )
 
+                # "C;O" indicator: one trade CLOSES the existing position and
+                # OPENS the opposite one (flip). The type above is the CLOSE
+                # part; the flag lets FIFO open the opposite position with the
+                # remainder instead of failing on insufficient lots.
+                oc_parts = {p.strip() for p in (rt.open_close_indicator or "").upper().split(";") if p.strip()}
+                if "C" in oc_parts and "O" in oc_parts:
+                    trade_event.allows_position_flip = True
+                    logger.info(
+                        f"Trade {tx_id_primary}: Open/CloseIndicator '{rt.open_close_indicator}' "
+                        "marks a position FLIP — remainder beyond the closed position "
+                        "will open the opposite position in FIFO."
+                    )
+
                 if isinstance(asset, Stock) and rt.notes_codes:
                     notes_codes_parts_stock = {part.strip() for part in (rt.notes_codes or "").upper().split(';') if part.strip()}
                     # Exclude "IA" codes which are Internalized + Automatically Allocated (not option assignments)
@@ -436,10 +456,12 @@ class DomainEventFactory:
             # (or its absolute if the convention for that field is always positive value + type).
             # For simplicity, and to align with existing TradeEvent creation, let's use absolute amount + type.
 
-            event_amount_for_storage = raw_amount # Keep sign for some events.
-            if event_type_str_upper in ["DIVIDEND", "INTEREST", "PAYMENT IN LIEU"] or \
-               code_upper in ["DI", "IN", "PO"]: # Types that are generally income
-                event_amount_for_storage = raw_amount.copy_abs()
+            # Keep the reported sign. Income rows (dividends, interest, PIL)
+            # are positive as reported by IBKR; a NEGATIVE row is a reversal/
+            # correction and must stay negative so it nets against the
+            # original income downstream — copy_abs() would double-count it
+            # as more income.
+            event_amount_for_storage = raw_amount
 
             event_params_kw = {
                 "gross_amount_foreign_currency": event_amount_for_storage,
@@ -509,9 +531,13 @@ class DomainEventFactory:
                     if match_country_in_desc: source_country_for_wht = match_country_in_desc.group(1)
                     elif asset_for_event.asset_category == AssetCategory.CASH_BALANCE: source_country_for_wht = "IE"
                 
-                # WHT amount should be stored as a positive value representing the tax paid.
-                # raw_amount for WHT is typically negative in IBKR reports.
-                event_params_kw["gross_amount_foreign_currency"] = raw_amount.copy_abs()
+                # WHT is stored with positive = tax paid. IBKR reports withholding
+                # as negative cash amounts, so the sign is flipped: a negative row
+                # (tax withheld) becomes positive, and a positive row (refund /
+                # reversal of prior withholding, e.g. a rate true-up) becomes
+                # NEGATIVE so it nets against the original charge downstream
+                # instead of counting as additional tax paid.
+                event_params_kw["gross_amount_foreign_currency"] = raw_amount.copy_negate()
 
                 domain_event_instance = WithholdingTaxEvent(
                     asset_internal_id=asset_for_event.internal_asset_id, event_date=event_date_str,

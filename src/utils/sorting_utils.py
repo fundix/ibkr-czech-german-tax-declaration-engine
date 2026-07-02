@@ -21,9 +21,13 @@ logger = logging.getLogger(__name__)
 # or logical processing flow for events happening on the *exact same day*.
 # This does NOT override the primary date sort.
 _INTRA_DAY_SORT_ORDER_CORP_ACTION = 0  # Corporate actions (e.g., splits) first
-_INTRA_DAY_SORT_ORDER_OPTION_LIFECYCLE = 1 # Option Ex, As, Ep before resulting trades
-_INTRA_DAY_SORT_ORDER_TRADE = 2          # Trades / Currency Conversions
-_INTRA_DAY_SORT_ORDER_CASH = 3           # Dividends, Interest, WHT, Fees
+_INTRA_DAY_SORT_ORDER_TRADE_OPTION = 1 # Trades on OPTION assets before lifecycle events:
+                                       # a same-day buy + expiry/exercise of the SAME
+                                       # option (0DTE) must add the lot before the
+                                       # lifecycle event consumes it
+_INTRA_DAY_SORT_ORDER_OPTION_LIFECYCLE = 2 # Option Ex, As, Ep before resulting STOCK trades
+_INTRA_DAY_SORT_ORDER_TRADE = 3          # Stock trades / Currency Conversions
+_INTRA_DAY_SORT_ORDER_CASH = 4           # Dividends, Interest, WHT, Fees
 _INTRA_DAY_SORT_ORDER_UNKNOWN = 99       # Fallback
 
 def get_event_sort_key(event: FinancialEvent, asset_resolver: AssetResolver) -> Tuple[date, Tuple[Any, ...]]:
@@ -63,17 +67,20 @@ def get_event_sort_key(event: FinancialEvent, asset_resolver: AssetResolver) -> 
              logger.warning(f"OptionLifecycle Event {event.event_id} on {parsed_date} lacks ibkr_transaction_id. Using placeholder.")
         specific_secondary_elements = (
             event.ibkr_transaction_id or "", 
-            asset.asset_category, 
+            asset.asset_category.name, 
             event.event_id
         )
     elif isinstance(event, (TradeEvent, CurrencyConversionEvent)): # Trade and Currency Conversion share structure
-        intra_day_order = _INTRA_DAY_SORT_ORDER_TRADE
+        if isinstance(event, TradeEvent) and asset.asset_category == AssetCategory.OPTION:
+            intra_day_order = _INTRA_DAY_SORT_ORDER_TRADE_OPTION
+        else:
+            intra_day_order = _INTRA_DAY_SORT_ORDER_TRADE
         # PRD: (event.ibkr_transaction_id, asset.asset_category, event.event_id)
         if not event.ibkr_transaction_id:
              logger.warning(f"Trade/CurrencyConversion Event {event.event_id} on {parsed_date} lacks ibkr_transaction_id. Using placeholder.")
         specific_secondary_elements = (
             event.ibkr_transaction_id or "", 
-            asset.asset_category, 
+            asset.asset_category.name, 
             event.event_id
         )
     elif isinstance(event, (CashFlowEvent, WithholdingTaxEvent, FeeEvent)):
@@ -84,7 +91,7 @@ def get_event_sort_key(event: FinancialEvent, asset_resolver: AssetResolver) -> 
         gross_amount_for_sort = event.gross_amount_foreign_currency if event.gross_amount_foreign_currency is not None else Decimal('0')
         specific_secondary_elements = (
             event.ibkr_transaction_id or "", 
-            asset.asset_category,
+            asset.asset_category.name,
             gross_amount_for_sort,
             event.event_id
         )
@@ -93,7 +100,7 @@ def get_event_sort_key(event: FinancialEvent, asset_resolver: AssetResolver) -> 
         intra_day_order = _INTRA_DAY_SORT_ORDER_UNKNOWN
         specific_secondary_elements = ( # Minimal structure for unknown
             event.ibkr_transaction_id or "", 
-            asset.asset_category, 
+            asset.asset_category.name, 
             event.event_id
         )
     

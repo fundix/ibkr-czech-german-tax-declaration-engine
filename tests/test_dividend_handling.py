@@ -100,8 +100,8 @@ class TestDividendHandling(FifoTestCaseBase):
         - 2024-07-15: Sell all 150 shares at €85 each = €12750 total proceeds
         
         Expected FIFO calculation:
-        - First lot after dividend adjustment: 100 shares, cost €5500 - €245 = €5255 (€52.55 per share)
-        - Second lot unchanged: 50 shares, cost €4000 (€80 per share)
+        - Pro-rata basis reduction: €245 across 150 shares (lot1 −€163.33, lot2 −€81.67)
+        - Adjusted lots: €5336.67 + €3918.33 = €9255 total
         - Total adjusted cost: €5255 + €4000 = €9255
         - Realized gain: €12750 - €9255 = €3495
         """
@@ -169,29 +169,32 @@ class TestDividendHandling(FifoTestCaseBase):
 
         # Expected realized gain calculation:
         # Original cost basis: 100 * €55 + 50 * €80 = €5500 + €4000 = €9500
-        # Dividend adjustment: €9500 - €245 = €9255 (first lot reduced by €245)
+        # Dividend adjustment: €9500 − €245 = €9255 (pro-rata across 150 shares)
         # Sale proceeds: 150 * €85 = €12750
         # Expected realized gain: €12750 - €9255 = €3495
         expected_outcome = ScenarioExpectedOutput(
             test_description="LEG Dividend Rights: Verify FIFO adjustment via sale realized gains",
             expected_rgls=[
-                # First FIFO lot: 100 shares with dividend-adjusted cost basis
+                # The €245 repayment is paid PER SHARE, so it reduces the
+                # basis PRO-RATA across the 150 held shares (245/150 per
+                # share) — not sequentially against the first lot only.
+                # First FIFO lot: 100 shares, reduction 245×100/150 = 163.33
                 ExpectedRealizedGainLoss(
                     asset_identifier=f"ISIN:{leg_isin}",
                     realization_date="2024-07-15",
                     quantity_realized=Decimal("100"),
-                    total_cost_basis_eur=Decimal("5255.00"),  # €5500 - €245 dividend adjustment
+                    total_cost_basis_eur=Decimal("5336.67"),  # €5500 − €163.33
                     total_realization_value_eur=Decimal("8500.00"),
-                    gross_gain_loss_eur=Decimal("3245.00")
+                    gross_gain_loss_eur=Decimal("3163.33")
                 ),
-                # Second FIFO lot: 50 shares with unchanged cost basis
+                # Second FIFO lot: 50 shares, reduction 245×50/150 = 81.67
                 ExpectedRealizedGainLoss(
                     asset_identifier=f"ISIN:{leg_isin}",
                     realization_date="2024-07-15",
                     quantity_realized=Decimal("50"),
-                    total_cost_basis_eur=Decimal("4000.00"),  # Unchanged
+                    total_cost_basis_eur=Decimal("3918.33"),  # €4000 − €81.67
                     total_realization_value_eur=Decimal("4250.00"),
-                    gross_gain_loss_eur=Decimal("250.00")
+                    gross_gain_loss_eur=Decimal("331.67")
                 )
             ],
             expected_eoy_states=[
@@ -614,8 +617,8 @@ class TestDividendHandling(FifoTestCaseBase):
         - 2024-07-15: Sell all 150 shares at €85 each = €12750 total proceeds
 
         Expected FIFO calculation:
-        - First lot after dividend adjustment: 100 shares, cost €5500 - €245 = €5255 (€52.55 per share)
-        - Second lot unchanged: 50 shares, cost €4000 (€80 per share)
+        - Pro-rata basis reduction: €245 across 150 shares (lot1 −€163.33, lot2 −€81.67)
+        - Adjusted lots: €5336.67 + €3918.33 = €9255 total
         - Total adjusted cost: €5255 + €4000 = €9255
         - Realized gain: €12750 - €9255 = €3495
         """
@@ -682,29 +685,32 @@ class TestDividendHandling(FifoTestCaseBase):
 
         # Expected realized gain calculation:
         # Original cost basis: 100 * €55 + 50 * €80 = €5500 + €4000 = €9500
-        # Dividend adjustment: €9500 - €245 = €9255 (first lot reduced by €245)
+        # Dividend adjustment: €9500 − €245 = €9255 (pro-rata across 150 shares)
         # Sale proceeds: 150 * €85 = €12750
         # Expected realized gain: €12750 - €9255 = €3495
         expected_outcome = ScenarioExpectedOutput(
             test_description="LEG Dividend Rights (Payment In Lieu): Verify FIFO adjustment via sale realized gains",
             expected_rgls=[
-                # First FIFO lot: 100 shares with dividend-adjusted cost basis
+                # The €245 repayment is paid PER SHARE, so it reduces the
+                # basis PRO-RATA across the 150 held shares (245/150 per
+                # share) — not sequentially against the first lot only.
+                # First FIFO lot: 100 shares, reduction 245×100/150 = 163.33
                 ExpectedRealizedGainLoss(
                     asset_identifier=f"ISIN:{leg_isin}",
                     realization_date="2024-07-15",
                     quantity_realized=Decimal("100"),
-                    total_cost_basis_eur=Decimal("5255.00"),  # €5500 - €245 dividend adjustment
+                    total_cost_basis_eur=Decimal("5336.67"),  # €5500 − €163.33
                     total_realization_value_eur=Decimal("8500.00"),
-                    gross_gain_loss_eur=Decimal("3245.00")
+                    gross_gain_loss_eur=Decimal("3163.33")
                 ),
-                # Second FIFO lot: 50 shares with unchanged cost basis
+                # Second FIFO lot: 50 shares, reduction 245×50/150 = 81.67
                 ExpectedRealizedGainLoss(
                     asset_identifier=f"ISIN:{leg_isin}",
                     realization_date="2024-07-15",
                     quantity_realized=Decimal("50"),
-                    total_cost_basis_eur=Decimal("4000.00"),  # Unchanged
+                    total_cost_basis_eur=Decimal("3918.33"),  # €4000 − €81.67
                     total_realization_value_eur=Decimal("4250.00"),
-                    gross_gain_loss_eur=Decimal("250.00")
+                    gross_gain_loss_eur=Decimal("331.67")
                 )
             ],
             expected_eoy_states=[

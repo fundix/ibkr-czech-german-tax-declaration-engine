@@ -3,6 +3,34 @@
 > Netrackovaný pracovní soubor. Průběžně aktualizován během auditu; na konci obsahuje finální report.
 > Stav repa: HEAD 7fccf79, čistý working tree.
 
+## Stav oprav (větev fix/audit-2026-07-batch1, 2026-07-02)
+
+**Opraveno (15 nálezů, 6 commitů, 508 testů zelených):**
+- Dávka 1: H1 (short FX swap + časový test shortů), H2 (zapojení ČNB provideru v CLI), H3 (WHT refundy netting + druhý průchod linkeru)
+- Dávka 2: M1 (časový test kalendářními roky), M2 (práh 23 % per rok), L2 (zaokrouhlení DAP), M21 (EUR-mode guard sazeb)
+- Dávka 3: M3 (FX-fail blokuje 100k exempci), M14 (PENDING ztráta mimo základ)
+- Dávka 4: M4 (rozdělení stejnodenních WHT), M20 (reversal dividendy drží znaménko), L1 (FTC strop max(0, gross))
+- Dávka 5: M16 (Stückzinsen snižují §8 úroky), L7 (řaditelné kategorie), L8 (měnová konzistence mutace)
+
+**Opraveno v dávkách 6–8 (dalších 9 nálezů, 519 testů zelených):**
+- Dávka 6: M5 (opční prémie přežijí částečné fily — numerický klíč, pro-rata alokace, ERROR pro zbytky), M10 (0DTE: nákup opce se řadí před její expiraci/exercise)
+- Dávka 7: M7 (SOY přebytek nechává NEJNOVĚJŠÍ loty + warning), M8 (příznak odhadnutého data nabytí z SOY fallbacku → PENDING v časovém testu), M13 (FX-fail vypuštěné obchody: ERROR per obchod + souhrnný ERROR za běh)
+- Dávka 8: L5 (záporné čisté proceeds drží znaménko), L6 (cash merger konzumuje jen quantity_disposed; short pozice → warning), L10 (prefetch plní cache), L12 (EUR-mode wht_paid jen EUR záznamy)
+
+**Opraveno v dávce 9 (další 3 nálezy, 523 testů zelených):** L9 (get_rate_info → skutečné datum kurzu ve fx_date_used + conversion_note při fallbacku), L11 (odmítnutí budoucího data — ČNB by tiše vrátila dnešní listek), L13 (standalone úroková WHT do sekce úroků; sekce úroků má vlastní wht_paid řádek).
+
+**Opraveno v dávce 12 (539 testů zelených):** L3 (§38f/8 — prostý zápočet stropován za každý stát samostatně, ne agregátně; fallback na agregát bez per-country dat).
+
+**Opraveno v dávce 13 (542 testů zelených):** M9 — globální chronologický pre-pass promítá prior-year opční prémie do navázaných historických stock tradů před SOY rekonstrukcí (pro-rata přes částečné fily); per-asset replay opcí nově konzumuje exercise/assignment/expiraci, takže rekonstruovaná opční pozice sedí s reportovanou SOY.
+
+**Opraveno v dávkách 10–11 (dalších 6 nálezů dle rozhodnutí uživatele, 537 testů zelených):** M6 (stock dividenda = §8 příjem v FMV + zero-cost lot místo ztráty kvantity), M12 (pro-rata repatriace po akciích), M15 (REVIEW REQUIRED poznámka při konverzích měn), M22 (PRIVATE_SALE/neznámé kategorie → PENDING místo tichých exempcí), L4 (§4/3 40M cap 2025+ flaguje osvobozené položky), M19 („C;O" flip zavře pozici a otevře protipozici místo pádu).
+
+**Zbývá — mechanické, vyžaduje rozhodnutí/data od uživatele (zapsáno i v docs/future-work.md):**
+- **M9** (opční prémie v historické SOY simulaci): korektní oprava = přehrát historii globálně chronologicky přes procesory (dnes se přehrává per-asset bez lifecycle událostí, prémie kříží assety) — refactor historické větve engine, dopad i na DE. Alternativa: dokumentovat jako známou mezeru.
+- **M11** (cash-in-lieu u frakcí po reverse splitu): potřeba vidět, jak CIL vypadá v reálných IBKR datech uživatele (cash transaction řádek? corporate action detail?), aby šel navázat na disposal frakce.
+- **L14** (benevolentní tolerance WHT párování): zpřísnění hrozí false negatives — ladit proti reálným výpisům uživatele.
+**Zbývá — čeká na rozhodnutí uživatele (⚖):** M6 (stock dividendy v §8), M12 (pro-rata repatriace), M15 (kurzové zisky konverzí), M22 (PRIVATE_SALE fallback), M17/M18 (oddělené datum prémie — návrh datového modelu), M19 (C;O flip — sémantika FIFO), L4 (40M cap 2025+).
+
 ## Stav auditu
 
 - [x] Krok 0: checkpoint soubor založen

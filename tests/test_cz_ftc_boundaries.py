@@ -151,11 +151,11 @@ class TestNegativeGrossIncome:
         summary = evaluate_foreign_tax_credit([item], cfg, has_fx=True)
         rec = summary.records[0]
 
-        # gross.copy_abs() * 0.15 = 500 * 0.15 = 75 → max_creditable = 75
-        # actual = min(75, 75) = 75, non_creditable = 0
-        assert rec.max_creditable_czk == Decimal("75.00")
-        assert rec.actual_creditable_czk == Decimal("75")
-        assert rec.non_creditable_czk == Decimal("0")
+        # Negative income bears no Czech tax → cap clamps to zero and the
+        # WHT is entirely non-creditable.
+        assert rec.max_creditable_czk == Decimal("0.00")
+        assert rec.actual_creditable_czk == Decimal("0.00")
+        assert rec.non_creditable_czk == Decimal("75")
 
 
 # =========================================================================

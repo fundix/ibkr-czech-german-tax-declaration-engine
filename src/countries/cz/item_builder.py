@@ -15,17 +15,23 @@ WHT credit calculation — those are downstream consumers of the items.
 from __future__ import annotations
 
 import logging
+import re
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 import uuid
 
-from src.countries.cz.enums import CzTaxSection, category_to_cz_section
+from src.countries.cz.enums import (
+    CzTaxSection,
+    category_requires_manual_review,
+    category_to_cz_section,
+)
 from src.countries.cz.fx_policy import CzCurrencyConverter, FxConversionRecord
 from src.countries.cz.tax_items import CzTaxItem, CzTaxItemType, CzWhtRecord
 from src.domain.assets import Asset
 from src.domain.enums import AssetCategory, FinancialEventType, RealizationType
 from src.domain.events import (
     CashFlowEvent,
+    CorpActionStockDividend,
     FinancialEvent,
     WithholdingTaxEvent,
 )
@@ -168,6 +174,15 @@ def _build_income_items(
             wht_events[ev.event_id] = ev
             continue
 
+        if isinstance(ev, CorpActionStockDividend):
+            # A taxable stock/scrip dividend is income at the FMV of the
+            # received shares (the FIFO lot gets the same FMV as cost basis,
+            # so skipping it here meant the income was never taxed at all).
+            item = _build_stock_dividend_item(ev, resolver, fx, fx_records)
+            if item is not None:
+                items.append(item)
+            continue
+
         if not isinstance(ev, CashFlowEvent):
             continue
 
@@ -180,22 +195,39 @@ def _build_income_items(
         elif ev.event_type == FinancialEventType.INTEREST_RECEIVED:
             item_type = CzTaxItemType.INTEREST
             section = CzTaxSection.CZ_8_INTEREST
+        elif ev.event_type == FinancialEventType.INTEREST_PAID_STUECKZINSEN:
+            # Accrued interest PAID on a bond purchase reduces §8 interest
+            # income. The event stores the cost as a positive number, so it
+            # enters as a NEGATIVE interest item (previously it silently
+            # vanished and §8 interest was overstated by the paid accrual).
+            item_type = CzTaxItemType.INTEREST
+            section = CzTaxSection.CZ_8_INTEREST
         else:
             continue
+
+        sign = (
+            Decimal("-1")
+            if ev.event_type == FinancialEventType.INTEREST_PAID_STUECKZINSEN
+            else Decimal("1")
+        )
 
         # Prefer original currency for direct conversion
         orig_amt = ev.gross_amount_foreign_currency
         orig_cur = ev.local_currency
         if orig_amt is not None and orig_cur is not None:
+            orig_amt = sign * orig_amt
             czk, fx_rec = _convert(orig_amt, orig_cur, ev.event_date, fx, fx_records)
         else:
-            orig_amt = ev.gross_amount_eur
+            orig_amt = sign * ev.gross_amount_eur if ev.gross_amount_eur is not None else None
             orig_cur = "EUR"
-            czk, fx_rec = _convert_eur(ev.gross_amount_eur, ev.event_date, fx, fx_records)
+            czk, fx_rec = _convert_eur(orig_amt, ev.event_date, fx, fx_records)
 
         asset = resolver.get_asset_by_id(ev.asset_internal_id)
         meta = _asset_meta(asset)
 
+        amount_eur = (
+            sign * ev.gross_amount_eur if ev.gross_amount_eur is not None else None
+        )
         item = CzTaxItem(
             item_type=item_type,
             section=section,
@@ -203,7 +235,7 @@ def _build_income_items(
             event_date=ev.event_date,
             original_amount=orig_amt,
             original_currency=orig_cur,
-            amount_eur=ev.gross_amount_eur,
+            amount_eur=amount_eur,
             amount_czk=czk,
             fx=fx_rec,
             **meta,
@@ -215,7 +247,81 @@ def _build_income_items(
     return items, wht_events
 
 
+def _build_stock_dividend_item(
+    ev: CorpActionStockDividend,
+    resolver: AssetResolver,
+    fx: Optional[CzCurrencyConverter],
+    fx_records: List[FxConversionRecord],
+) -> Optional[CzTaxItem]:
+    """§8 dividend item for a taxable stock/scrip dividend, valued at FMV."""
+    if ev.quantity_new_shares_received is None or ev.quantity_new_shares_received <= Decimal(0):
+        return None
+    if ev.fmv_per_new_share_eur is None:
+        logger.error(
+            f"Stock dividend event {ev.event_id}: missing fmv_per_new_share_eur — "
+            "cannot value the dividend income. Review FMV data."
+        )
+        return None
+
+    total_fmv_eur = ev.quantity_new_shares_received * ev.fmv_per_new_share_eur
+    czk, fx_rec = _convert_eur(total_fmv_eur, ev.event_date, fx, fx_records)
+
+    asset = resolver.get_asset_by_id(ev.asset_internal_id)
+    meta = _asset_meta(asset)
+
+    item = CzTaxItem(
+        item_type=CzTaxItemType.DIVIDEND,
+        section=CzTaxSection.CZ_8_DIVIDENDS,
+        source_event_id=ev.event_id,
+        event_date=ev.event_date,
+        original_amount=total_fmv_eur,
+        original_currency="EUR",
+        amount_eur=total_fmv_eur,
+        amount_czk=czk,
+        fx=fx_rec,
+        quantity=ev.quantity_new_shares_received,
+        **meta,
+    )
+    item.tax_review_note = (
+        f"Stock dividend: {ev.quantity_new_shares_received} share(s) valued at "
+        f"FMV {ev.fmv_per_new_share_eur} EUR/share (the FIFO lot carries the "
+        "same FMV as cost basis)."
+    )
+    if fx is not None and czk is None:
+        item.fx_conversion_failed = True
+    return item
+
+
 # --- WHT linking -----------------------------------------------------------
+
+# Most common treaty WHT rate — used ONLY as a tie-break when several
+# same-day income items are plausible targets for one WHT event.
+_WHT_RATE_ANCHOR = Decimal("0.15")
+
+
+def _pick_wht_target(
+    wht: WithholdingTaxEvent,
+    candidates: List[CzTaxItem],
+) -> CzTaxItem:
+    """Choose the income item a WHT event most plausibly belongs to.
+
+    Prefer items without a WHT already attached, then the item whose
+    implied WHT/income ratio is closest to the most common treaty rate.
+    (A dict-overwrite previously sent every same-day WHT to one item,
+    where the per-item FTC cap swallowed part of the credit.)
+    """
+    wht_amount = wht.gross_amount_foreign_currency
+
+    def _key(it: CzTaxItem):
+        income = it.original_amount or it.amount_eur
+        if wht_amount is not None and income is not None and income > Decimal(0):
+            closeness = ((wht_amount.copy_abs() / income) - _WHT_RATE_ANCHOR).copy_abs()
+        else:
+            closeness = Decimal("999")
+        return (len(it.wht_records) > 0, closeness)
+
+    return min(candidates, key=_key)
+
 
 def _link_wht(
     income_items: List[CzTaxItem],
@@ -239,11 +345,11 @@ def _link_wht(
     by_event_id: Dict[uuid.UUID, CzTaxItem] = {
         it.source_event_id: it for it in income_items
     }
-    by_asset_date: Dict[Tuple, CzTaxItem] = {}
+    by_asset_date: Dict[Tuple, List[CzTaxItem]] = {}
     by_asset: Dict[uuid.UUID, List[CzTaxItem]] = {}
     for it in income_items:
         if it.asset_id is not None:
-            by_asset_date[(it.asset_id, it.event_date)] = it
+            by_asset_date.setdefault((it.asset_id, it.event_date), []).append(it)
             by_asset.setdefault(it.asset_id, []).append(it)
 
     for wht_id, wht in wht_events.items():
@@ -253,9 +359,12 @@ def _link_wht(
         if wht.taxed_income_event_id and wht.taxed_income_event_id in by_event_id:
             target = by_event_id[wht.taxed_income_event_id]
 
-        # Strategy 2: same asset + same date
+        # Strategy 2: same asset + same date (multiple same-day income items
+        # are possible — pick the most plausible, don't overwrite)
         if target is None:
-            target = by_asset_date.get((wht.asset_internal_id, wht.event_date))
+            candidates = by_asset_date.get((wht.asset_internal_id, wht.event_date))
+            if candidates:
+                target = _pick_wht_target(wht, candidates)
 
         # Strategy 3: same asset, nearest date within ±3 days
         if target is None and wht.asset_internal_id in by_asset:
@@ -307,6 +416,12 @@ def _link_wht(
 
 # --- Unlinked WHT items ----------------------------------------------------
 
+# Interest-withholding description pattern (mirrors the core WHT linker).
+_INTEREST_WHT_PATTERN = re.compile(
+    r"WITHHOLDING\s*(?:@\s*\d{1,3}(?:\.\d+)?%)?\s*ON\s*(?:CREDIT\s*)?INT",
+    re.IGNORECASE,
+)
+
 def _build_unlinked_wht_items(
     unlinked_ids: set,
     wht_events: Dict[uuid.UUID, WithholdingTaxEvent],
@@ -347,9 +462,22 @@ def _build_unlinked_wht_items(
             source_country=getattr(wht, "source_country_code", None),
         )
 
+        # Classify by likely underlying income: interest-style WHT (broker
+        # interest on cash balances, "WITHHOLDING ... ON CREDIT INT" rows)
+        # belongs to the interest section — hardcoding dividends misstated
+        # the per-section wht_paid figures.
+        desc = (wht.ibkr_activity_description or "").upper()
+        is_interest_like = bool(_INTEREST_WHT_PATTERN.search(desc)) or (
+            getattr(asset, "asset_category", None) == AssetCategory.CASH_BALANCE
+        )
+        section = (
+            CzTaxSection.CZ_8_INTEREST if is_interest_like
+            else CzTaxSection.CZ_8_DIVIDENDS
+        )
+
         item = CzTaxItem(
             item_type=CzTaxItemType.OTHER,
-            section=CzTaxSection.CZ_8_DIVIDENDS,  # WHT most commonly relates to dividends
+            section=section,
             source_event_id=wht.event_id,
             event_date=wht.event_date,
             original_amount=orig_amt,
@@ -369,6 +497,17 @@ def _build_unlinked_wht_items(
 
 
 # --- Disposal items --------------------------------------------------------
+
+# Realization types where the position was opened by a SALE and closed by a
+# purchase (or expiry): the cash flows are reversed relative to a long
+# position — proceeds were received at rgl.acquisition_date (opening) and the
+# cost was paid at rgl.realization_date (cover/close).
+_SHORT_REALIZATION_TYPES = {
+    RealizationType.SHORT_POSITION_COVER,
+    RealizationType.OPTION_TRADE_CLOSE_SHORT,
+    RealizationType.OPTION_EXPIRED_SHORT,
+}
+
 
 def _build_disposal_items(
     rgls: List[RealizedGainLoss],
@@ -394,14 +533,27 @@ def _build_disposal_items(
         else:
             item_type = CzTaxItemType.SECURITY_DISPOSAL
 
-        # FX conversion (NSS 2 Afs 4/2019-35): the acquisition cost (výdaj) is
-        # converted at the ACQUISITION-date rate and the sale proceeds (příjem) at
-        # the DISPOSAL-date rate, so the currency movement between purchase and sale
-        # is reflected in the §10 gain. A single sale-date rate applied to BOTH legs
-        # (the prior practice the Supreme Administrative Court rejected) is NOT used.
-        cost_date = rgl.acquisition_date or rgl.realization_date
+        # FX conversion (NSS 2 Afs 4/2019-35): each cash flow is converted at
+        # the rate of the day it actually occurred, so the currency movement
+        # between the two legs is reflected in the §10 gain. A single
+        # sale-date rate applied to BOTH legs (the prior practice the Supreme
+        # Administrative Court rejected) is NOT used.
+        #
+        # For LONG positions the cost was paid at acquisition and the proceeds
+        # received at disposal. For SHORT positions (short cover, closing or
+        # expiry of a written option) the RGL date semantics are reversed:
+        # the proceeds were received when the position was OPENED
+        # (= rgl.acquisition_date) and the cost was paid at the COVER
+        # (= rgl.realization_date).
+        is_short = rgl.realization_type in _SHORT_REALIZATION_TYPES
+        if is_short:
+            cost_date = rgl.realization_date
+            proceeds_date = rgl.acquisition_date or rgl.realization_date
+        else:
+            cost_date = rgl.acquisition_date or rgl.realization_date
+            proceeds_date = rgl.realization_date
         cost_czk, fx_cost = _convert_eur(rgl.total_cost_basis_eur, cost_date, fx, fx_records)
-        proceeds_czk, fx_proceeds = _convert_eur(rgl.total_realization_value_eur, rgl.realization_date, fx, fx_records)
+        proceeds_czk, fx_proceeds = _convert_eur(rgl.total_realization_value_eur, proceeds_date, fx, fx_records)
 
         # §10 gain in CZK = proceeds(@sale) − cost(@acquisition).
         gl_czk: Optional[Decimal] = None
@@ -432,6 +584,9 @@ def _build_disposal_items(
             fx_cost_basis=fx_cost,
             fx_proceeds=fx_proceeds,
             quantity=rgl.quantity_realized,
+            is_short_position=is_short,
+            acquisition_date_estimated=getattr(rgl, "is_acquisition_estimated", False),
+            category_needs_review=category_requires_manual_review(cat.name),
             **meta,
         )
         if fx is not None and (cost_czk is None or proceeds_czk is None):

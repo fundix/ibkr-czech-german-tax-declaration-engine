@@ -19,6 +19,7 @@ import json
 import os
 import tempfile
 import uuid
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import List
 
@@ -57,11 +58,16 @@ def _resolver():
 
 
 def _make_rgl(gross, cat=AssetCategory.STOCK, holding_days=200, proceeds=Decimal("1500")):
+    # Keep dates consistent with holding_days — the time test decides from
+    # the DATES (calendar years), holding_period_days is audit/fallback only.
+    acquisition_date = (
+        date.fromisoformat("2025-03-25") - timedelta(days=holding_days)
+    ).isoformat()
     return RealizedGainLoss(
         originating_event_id=uuid.uuid4(),
         asset_internal_id=uuid.uuid4(),
         asset_category_at_realization=cat,
-        acquisition_date="2024-06-15",
+        acquisition_date=acquisition_date,
         realization_date="2025-03-25",
         realization_type=RealizationType.LONG_POSITION_SALE if cat != AssetCategory.OPTION
             else RealizationType.OPTION_TRADE_CLOSE_LONG,

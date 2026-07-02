@@ -167,7 +167,18 @@ def main_application():
         if args.country == "cz":
             # Build CZ TaxResult for export
             from src.countries.registry import get_tax_plugin
-            cz_plugin = get_tax_plugin("cz")
+            from src.countries.cz.config import CzTaxConfig
+            from src.utils.fx_provider_factory import create_fx_provider
+
+            # Without an FX provider the plugin degrades to EUR-only output
+            # (no CZK figures, annual limit and rate threshold inactive), so
+            # the ČNB provider must be wired in for a real CZ run.
+            cz_config = CzTaxConfig()
+            cnb_provider = create_fx_provider(
+                cz_config.fx_policy.source,
+                cache_file_path=cz_config.cnb_cache_file_path,
+            )
+            cz_plugin = get_tax_plugin("cz", config=cz_config, fx_provider=cnb_provider)
             cz_aggregator = cz_plugin.get_tax_aggregator()
             cz_result = cz_aggregator.aggregate(
                 realized_gains_losses=processing_results.realized_gains_losses,

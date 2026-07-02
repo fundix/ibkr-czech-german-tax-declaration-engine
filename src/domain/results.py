@@ -44,6 +44,10 @@ class RealizedGainLoss:
 
     _: KW_ONLY
     holding_period_days: Optional[int] = None
+    # True when acquisition_date comes from a synthetic SOY fallback lot
+    # (31 Dec of the prior year) — the real purchase date is unknown, so
+    # holding-period tests must not treat the date as real.
+    is_acquisition_estimated: bool = False
     is_within_speculation_period: bool = False
     is_taxable_under_section_23: bool = False # Changed default to False
 

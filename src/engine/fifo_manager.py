@@ -6,7 +6,11 @@ import uuid
 from datetime import date as date_obj, datetime
 
 from src.domain.assets import Asset, Option
-from src.domain.events import FinancialEvent, TradeEvent, CorpActionSplitForward, CorpActionMergerCash, CorpActionStockDividend
+from src.domain.events import (
+    FinancialEvent, TradeEvent, CorpActionSplitForward, CorpActionMergerCash,
+    CorpActionStockDividend, OptionAssignmentEvent, OptionExerciseEvent,
+    OptionExpirationWorthlessEvent, OptionLifecycleEvent,
+)
 from src.domain.results import RealizedGainLoss
 from src.domain.enums import AssetCategory, FinancialEventType, TaxReportingCategory, RealizationType, InvestmentFundType
 from src.utils.currency_converter import CurrencyConverter
@@ -110,6 +114,10 @@ class FifoLedger:
         self.asset_internal_id: uuid.UUID = asset_internal_id
         self.asset_category: AssetCategory = asset_category
         self.fund_type: Optional[InvestmentFundType] = fund_type
+        # Trades excluded from FIFO because enrichment left their EUR value
+        # None (missing FX rate). Each exclusion silently removes a taxable
+        # trade from the results — the engine surfaces the total at the end.
+        self.dropped_unenriched_events: int = 0
 
         if self.asset_category == AssetCategory.INVESTMENT_FUND and self.fund_type is None:
             logger.warning(f"FifoLedger for Investment Fund {asset_internal_id} initialized without a specific fund_type. Defaulting to InvestmentFundType.NONE. This may impact tax calculations if not intended.")
@@ -179,6 +187,31 @@ class FifoLedger:
                     self.adjust_lots_for_split(hist_event)
                 elif isinstance(hist_event, CorpActionStockDividend):
                      self.add_lot_for_stock_dividend(hist_event)
+                elif isinstance(hist_event, OptionLifecycleEvent) and self.asset_category == AssetCategory.OPTION:
+                    # Exercised/assigned/expired contracts left the position
+                    # before SOY — without consuming them the reconstructed
+                    # option quantity is overstated and falls back needlessly.
+                    try:
+                        qty = hist_event.quantity_contracts
+                        if isinstance(hist_event, OptionExerciseEvent):
+                            self.consume_long_option_get_cost(qty)
+                        elif isinstance(hist_event, OptionAssignmentEvent):
+                            self.consume_short_option_get_proceeds(qty)
+                        elif isinstance(hist_event, OptionExpirationWorthlessEvent):
+                            if sum(l.quantity for l in self.lots) >= qty:
+                                self.consume_long_option_get_cost(qty)
+                            elif sum(l.quantity_shorted for l in self.short_lots) >= qty:
+                                self.consume_short_option_get_proceeds(qty)
+                            else:
+                                raise ValueError(
+                                    f"insufficient option lots for historical expiration of {qty} contracts"
+                                )
+                    except ValueError as ve:
+                        logger.warning(
+                            f"Historical simulation: option lifecycle event {hist_event.event_id} "
+                            f"could not be applied: {ve}"
+                        )
+                        historical_simulation_inconsistent = True
             except UserWarning as uw:
                 logger.warning(f"Historical simulation warning for asset {asset.internal_asset_id} processing event {hist_event.event_id}: {uw}")
                 historical_simulation_inconsistent = True
@@ -213,7 +246,22 @@ class FifoLedger:
                 if reconstructed_total_long_qty >= reported_soy_qty and reconstructed_total_short_qty_abs == Decimal(0):
                     logger.info(f"Asset {asset.get_classification_key()}: Using reconstructed FIFO long lots and costs.")
                     qty_to_assign = reported_soy_qty
-                    for lot in reconstructed_long_lots_snapshot:
+                    lots_source = reconstructed_long_lots_snapshot
+                    excess_qty = reconstructed_total_long_qty - reported_soy_qty
+                    if excess_qty > Decimal(0):
+                        # More reconstructed history than the reported SOY position:
+                        # an unreported historical disposal likely consumed lots —
+                        # per FIFO it would have consumed the OLDEST ones, so the
+                        # surviving position consists of the NEWEST lots. Assign
+                        # from the end (the final sort restores chronology).
+                        logger.warning(
+                            f"Asset {asset.get_classification_key()}: reconstructed long qty "
+                            f"{reconstructed_total_long_qty} exceeds reported SOY {reported_soy_qty} "
+                            f"by {excess_qty} — an unreported historical disposal is likely. "
+                            "Keeping the NEWEST lots per FIFO; review acquisition dates/costs."
+                        )
+                        lots_source = list(reversed(reconstructed_long_lots_snapshot))
+                    for lot in lots_source:
                         if qty_to_assign <= Decimal(0): break
                         qty_from_this_lot = min(lot.quantity, qty_to_assign)
                         final_lot = FifoLot(
@@ -235,7 +283,19 @@ class FifoLedger:
                 if reconstructed_total_short_qty_abs >= reported_soy_qty_abs and reconstructed_total_long_qty == Decimal(0):
                     logger.info(f"Asset {asset.get_classification_key()}: Using reconstructed FIFO short lots and proceeds.")
                     qty_to_assign = reported_soy_qty_abs
-                    for lot in reconstructed_short_lots_snapshot:
+                    short_lots_source = reconstructed_short_lots_snapshot
+                    excess_short_qty = reconstructed_total_short_qty_abs - reported_soy_qty_abs
+                    if excess_short_qty > Decimal(0):
+                        # Same reasoning as the long branch: an unreported cover
+                        # would have closed the OLDEST short lots first.
+                        logger.warning(
+                            f"Asset {asset.get_classification_key()}: reconstructed short qty "
+                            f"{reconstructed_total_short_qty_abs} exceeds reported SOY {reported_soy_qty_abs} "
+                            f"by {excess_short_qty} — an unreported historical cover is likely. "
+                            "Keeping the NEWEST short lots per FIFO; review opening dates/proceeds."
+                        )
+                        short_lots_source = list(reversed(reconstructed_short_lots_snapshot))
+                    for lot in short_lots_source:
                         if qty_to_assign <= Decimal(0): break
                         qty_from_this_lot = min(lot.quantity_shorted, qty_to_assign)
                         final_short_lot = ShortFifoLot(
@@ -349,7 +409,15 @@ class FifoLedger:
     def add_long_lot(self, trade_event: TradeEvent):
         if trade_event.event_type != FinancialEventType.TRADE_BUY_LONG: return
         if trade_event.quantity is None or trade_event.quantity <= Decimal(0): return
-        if trade_event.net_proceeds_or_cost_basis_eur is None: return
+        if trade_event.net_proceeds_or_cost_basis_eur is None:
+            self.dropped_unenriched_events += 1
+            logger.error(
+                f"BUY trade {trade_event.ibkr_transaction_id or trade_event.event_id} "
+                f"({trade_event.event_date}, qty {trade_event.quantity}) for asset {self.asset_internal_id} "
+                "has no EUR value (FX conversion failed) — lot NOT created and EXCLUDED from FIFO. "
+                "A later sale of this quantity may fail or realize against wrong lots."
+            )
+            return
         if not trade_event.ibkr_transaction_id:
             raise ValueError(f"Missing ibkr_transaction_id for trade {trade_event.event_id} needed for FIFO lot creation.")
 
@@ -376,12 +444,16 @@ class FifoLedger:
         if trade_event.event_type != FinancialEventType.TRADE_SELL_SHORT_OPEN: return
         if trade_event.quantity is None or trade_event.quantity >= Decimal(0): return
         if trade_event.net_proceeds_or_cost_basis_eur is None:
-            logger.error(f"Cannot add short lot for trade {trade_event.ibkr_transaction_id} - net_proceeds_or_cost_basis_eur is None. Event must be enriched before FIFO processing.")
+            self.dropped_unenriched_events += 1
+            logger.error(f"Cannot add short lot for trade {trade_event.ibkr_transaction_id} - net_proceeds_or_cost_basis_eur is None (FX conversion failed). Trade EXCLUDED from FIFO.")
             return
         if not trade_event.ibkr_transaction_id:
             raise ValueError(f"Missing ibkr_transaction_id for trade {trade_event.event_id} needed for Short FIFO lot creation.")
 
-        total_sale_proceeds_eur = self.ctx.create_decimal(trade_event.net_proceeds_or_cost_basis_eur).copy_abs()
+        # Keep the sign: net proceeds are negative when commissions exceed the
+        # gross amount (e.g. closing a near-worthless option) — copy_abs()
+        # would flip a real cost into fictitious proceeds.
+        total_sale_proceeds_eur = self.ctx.create_decimal(trade_event.net_proceeds_or_cost_basis_eur)
         lot_qty_shorted_contracts_or_units = trade_event.quantity.copy_abs().quantize(global_config.PRECISION_QUANTITY, context=self.ctx)
 
         if lot_qty_shorted_contracts_or_units == Decimal(0):
@@ -404,10 +476,20 @@ class FifoLedger:
     def consume_long_lots_for_sale(self, sale_event: TradeEvent, is_historical_simulation: bool = False) -> List[RealizedGainLoss]:
         if sale_event.event_type != FinancialEventType.TRADE_SELL_LONG: return []
         if sale_event.quantity is None or sale_event.quantity >= Decimal(0): return []
-        if sale_event.net_proceeds_or_cost_basis_eur is None: return []
+        if sale_event.net_proceeds_or_cost_basis_eur is None:
+            self.dropped_unenriched_events += 1
+            logger.error(
+                f"SELL trade {sale_event.ibkr_transaction_id or sale_event.event_id} "
+                f"({sale_event.event_date}, qty {sale_event.quantity}) for asset {self.asset_internal_id} "
+                "has no EUR value (FX conversion failed) — the TAXABLE DISPOSAL is EXCLUDED "
+                "from FIFO results. Review input data / FX rates."
+            )
+            return []
 
         quantity_to_realize = sale_event.quantity.copy_abs().quantize(global_config.PRECISION_QUANTITY, context=self.ctx)
-        total_sale_proceeds_for_event = self.ctx.create_decimal(sale_event.net_proceeds_or_cost_basis_eur).copy_abs()
+        # Keep the sign: net proceeds are negative when commissions exceed the
+        # gross amount — copy_abs() overstated the proceeds by 2× commission.
+        total_sale_proceeds_for_event = self.ctx.create_decimal(sale_event.net_proceeds_or_cost_basis_eur)
 
         if quantity_to_realize == Decimal(0): return []
         sale_proceeds_eur_per_unit_for_event = self.ctx.divide(total_sale_proceeds_for_event, quantity_to_realize)
@@ -460,6 +542,7 @@ class FifoLedger:
                     total_realization_value_eur=realization_value_for_portion,
                     gross_gain_loss_eur=gross_gain_loss, holding_period_days=holding_period_days,
                     fund_type_at_sale=self.fund_type if self.asset_category == AssetCategory.INVESTMENT_FUND else None,
+                    is_acquisition_estimated=str(current_lot.source_transaction_id or "").startswith("SOY_FALLBACK"),
                 )
                 if self._tax_classifier is not None:
                     self._tax_classifier(rgl)
@@ -469,6 +552,28 @@ class FifoLedger:
 
         small_tolerance_qty = Decimal('1e-10')
         if quantity_remaining_to_realize.copy_abs() > small_tolerance_qty:
+            if getattr(sale_event, "allows_position_flip", False) and not is_historical_simulation:
+                # "C;O" flip: the remainder beyond the closed long position
+                # OPENS a short position at the same per-unit proceeds.
+                flip_proceeds_total = self.ctx.multiply(
+                    quantity_remaining_to_realize, sale_proceeds_eur_per_unit_for_event
+                )
+                flip_lot = ShortFifoLot(
+                    opening_date=sale_event.event_date,
+                    quantity_shorted=quantity_remaining_to_realize,
+                    unit_sale_proceeds_eur=sale_proceeds_eur_per_unit_for_event,
+                    total_sale_proceeds_eur=flip_proceeds_total,
+                    source_transaction_id=sale_event.ibkr_transaction_id or str(sale_event.event_id),
+                )
+                self.short_lots.append(flip_lot)
+                self.short_lots.sort(key=lambda lot: (parse_ibkr_date(lot.opening_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
+                logger.info(
+                    f"Position FLIP (C;O) for sale {sale_event.ibkr_transaction_id or sale_event.event_id}: "
+                    f"closed {quantity_to_realize - quantity_remaining_to_realize} long, "
+                    f"opened SHORT {quantity_remaining_to_realize} @ {sale_proceeds_eur_per_unit_for_event} EUR/unit."
+                )
+                return realized_gains_losses
+
             msg = (f"Insufficient long lots for sale event {sale_event.ibkr_transaction_id or sale_event.event_id} "
                    f"for asset {self.asset_internal_id}. Required to sell: {quantity_to_realize}, "
                    f"Total available in lots before this sale: {current_available_qty_in_lots}, "
@@ -483,7 +588,15 @@ class FifoLedger:
     def consume_short_lots_for_cover(self, cover_event: TradeEvent, is_historical_simulation: bool = False) -> List[RealizedGainLoss]:
         if cover_event.event_type != FinancialEventType.TRADE_BUY_SHORT_COVER: return []
         if cover_event.quantity is None or cover_event.quantity <= Decimal(0): return []
-        if cover_event.net_proceeds_or_cost_basis_eur is None: return []
+        if cover_event.net_proceeds_or_cost_basis_eur is None:
+            self.dropped_unenriched_events += 1
+            logger.error(
+                f"COVER trade {cover_event.ibkr_transaction_id or cover_event.event_id} "
+                f"({cover_event.event_date}) for asset {self.asset_internal_id} "
+                "has no EUR value (FX conversion failed) — the TAXABLE SHORT COVER is "
+                "EXCLUDED from FIFO results. Review input data / FX rates."
+            )
+            return []
 
         quantity_to_realize = cover_event.quantity.quantize(global_config.PRECISION_QUANTITY, context=self.ctx)
         total_cost_for_cover_event = self.ctx.create_decimal(cover_event.net_proceeds_or_cost_basis_eur)
@@ -540,6 +653,7 @@ class FifoLedger:
                     total_realization_value_eur=realization_value_for_portion,
                     gross_gain_loss_eur=gross_gain_loss, holding_period_days=holding_period_days,
                     fund_type_at_sale=self.fund_type if self.asset_category == AssetCategory.INVESTMENT_FUND else None,
+                    is_acquisition_estimated=str(current_short_lot.source_transaction_id or "").startswith("SOY_FALLBACK"),
                 )
                 if self._tax_classifier is not None:
                     self._tax_classifier(rgl)
@@ -549,6 +663,28 @@ class FifoLedger:
 
         small_tolerance_qty = Decimal('1e-10')
         if quantity_remaining_to_realize.copy_abs() > small_tolerance_qty:
+            if getattr(cover_event, "allows_position_flip", False) and not is_historical_simulation:
+                # "C;O" flip: the remainder beyond the covered short position
+                # OPENS a long position at the same per-unit cost.
+                flip_cost_total = self.ctx.multiply(
+                    quantity_remaining_to_realize, cost_eur_per_unit_for_cover_event
+                )
+                flip_lot = FifoLot(
+                    acquisition_date=cover_event.event_date,
+                    quantity=quantity_remaining_to_realize,
+                    unit_cost_basis_eur=cost_eur_per_unit_for_cover_event,
+                    total_cost_basis_eur=flip_cost_total,
+                    source_transaction_id=cover_event.ibkr_transaction_id or str(cover_event.event_id),
+                )
+                self.lots.append(flip_lot)
+                self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
+                logger.info(
+                    f"Position FLIP (C;O) for cover {cover_event.ibkr_transaction_id or cover_event.event_id}: "
+                    f"covered {quantity_to_realize - quantity_remaining_to_realize} short, "
+                    f"opened LONG {quantity_remaining_to_realize} @ {cost_eur_per_unit_for_cover_event} EUR/unit."
+                )
+                return realized_gains_losses
+
             msg = (f"Insufficient short lots for cover event {cover_event.ibkr_transaction_id or cover_event.event_id} "
                    f"for asset {self.asset_internal_id}. Required to cover: {quantity_to_realize}, "
                    f"Total available in short lots before this cover: {current_available_qty_in_short_lots}, "
@@ -605,11 +741,17 @@ class FifoLedger:
         if event.cash_per_share_eur is None:
              logger.error(f"Cash merger event {event.event_id} for asset {self.asset_internal_id} missing cash_per_share_eur. Cannot process.")
              return []
+        if self.short_lots:
+            logger.warning(
+                f"Cash merger event {event.event_id} for asset {self.asset_internal_id}: "
+                f"SHORT lots exist (qty {sum(l.quantity_shorted for l in self.short_lots)}) "
+                "and are NOT handled by cash merger processing — review manually."
+            )
         if not self.lots:
             logger.info(f"Cash merger event {event.event_id} for asset {self.asset_internal_id}, but no long lots to consume.")
             return []
 
-        logger.info(f"Processing cash merger for asset {self.asset_internal_id} from event {event.event_id}, selling all lots at {event.cash_per_share_eur} EUR per {'contract' if self.asset_category == AssetCategory.OPTION else 'unit'}.")
+        logger.info(f"Processing cash merger for asset {self.asset_internal_id} from event {event.event_id}, at {event.cash_per_share_eur} EUR per {'contract' if self.asset_category == AssetCategory.OPTION else 'unit'}.")
 
         realized_gains_losses: List[RealizedGainLoss] = []
         realization_value_eur_per_unit_for_event = event.cash_per_share_eur
@@ -625,10 +767,38 @@ class FifoLedger:
                 event.cash_per_share_eur, option_multiplier
             )
 
-        for current_lot in list(self.lots):
-            quantity_from_this_lot = current_lot.quantity
+        # Consume only the DISPOSED quantity (partial tenders / buybacks exist);
+        # quantity_disposed ≤ 0 or exceeding the held quantity falls back to all.
+        total_long_qty = sum(l.quantity for l in self.lots)
+        qty_remaining = getattr(event, "quantity_disposed", None)
+        if qty_remaining is None or qty_remaining <= Decimal(0):
+            qty_remaining = total_long_qty
+        elif qty_remaining > total_long_qty:
+            logger.warning(
+                f"Cash merger event {event.event_id}: quantity_disposed {qty_remaining} exceeds "
+                f"held quantity {total_long_qty} — consuming all held lots."
+            )
+            qty_remaining = total_long_qty
+        elif qty_remaining < total_long_qty:
+            logger.info(
+                f"Cash merger event {event.event_id}: PARTIAL disposal of {qty_remaining} "
+                f"out of {total_long_qty} held — remaining lots are kept."
+            )
 
-            cost_basis_for_portion = current_lot.total_cost_basis_eur
+        lots_to_remove_indices: List[int] = []
+        for i, current_lot in enumerate(self.lots):
+            if qty_remaining <= Decimal(0): break
+            if current_lot.quantity <= qty_remaining:
+                quantity_from_this_lot = current_lot.quantity
+                cost_basis_for_portion = current_lot.total_cost_basis_eur
+                lots_to_remove_indices.append(i)
+            else:
+                quantity_from_this_lot = qty_remaining
+                cost_basis_for_portion = self.ctx.multiply(quantity_from_this_lot, current_lot.unit_cost_basis_eur)
+                current_lot.quantity = self.ctx.subtract(current_lot.quantity, quantity_from_this_lot)
+                current_lot.total_cost_basis_eur = self.ctx.multiply(current_lot.quantity, current_lot.unit_cost_basis_eur)
+            qty_remaining = self.ctx.subtract(qty_remaining, quantity_from_this_lot)
+
             realization_value_for_portion = self.ctx.multiply(quantity_from_this_lot, realization_value_eur_per_unit_for_event)
             gross_gain_loss = self.ctx.subtract(realization_value_for_portion, cost_basis_for_portion)
 
@@ -656,8 +826,11 @@ class FifoLedger:
             realized_gains_losses.append(rgl)
             logger.debug(f"  Generated RGL from cash merger for lot (Src: {current_lot.source_transaction_id}): Realized {quantity_from_this_lot}, Gross G/L={gross_gain_loss}")
 
-        self.lots.clear()
-        logger.info(f"Cleared all long lots for asset {self.asset_internal_id} due to cash merger.")
+        for i in sorted(lots_to_remove_indices, reverse=True): del self.lots[i]
+        logger.info(
+            f"Cash merger for asset {self.asset_internal_id} consumed "
+            f"{len(realized_gains_losses)} lot portion(s); {len(self.lots)} lot(s) remain."
+        )
         return realized_gains_losses
 
     def add_lot_for_stock_dividend(self, event: CorpActionStockDividend):
@@ -665,7 +838,24 @@ class FifoLedger:
             logger.info(f"Stock dividend event {event.event_id} for asset {self.asset_internal_id} has zero or negative new shares ({event.quantity_new_shares_received}). No lot added.")
             return
         if event.fmv_per_new_share_eur is None:
-            logger.error(f"Stock dividend event {event.event_id} for asset {self.asset_internal_id} missing fmv_per_new_share_eur. Cannot create lot.")
+            # Never lose quantity: a missing FMV must not make the shares
+            # vanish from the ledger (a later sale would crash or realize
+            # against wrong lots). Create a ZERO-cost lot and complain.
+            logger.error(
+                f"Stock dividend event {event.event_id} for asset {self.asset_internal_id} "
+                f"missing fmv_per_new_share_eur — creating ZERO-cost lot for "
+                f"{event.quantity_new_shares_received} shares. Review FMV data."
+            )
+            zero = self.ctx.create_decimal(0)
+            fallback_lot = FifoLot(
+                acquisition_date=event.event_date,
+                quantity=event.quantity_new_shares_received.quantize(global_config.PRECISION_QUANTITY, context=self.ctx),
+                unit_cost_basis_eur=zero,
+                total_cost_basis_eur=zero,
+                source_transaction_id=event.ca_action_id_ibkr or event.ibkr_transaction_id or f"STOCKDIV_{event.event_id}",
+            )
+            self.lots.append(fallback_lot)
+            self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
             return
 
         if self.asset_category == AssetCategory.OPTION:
@@ -813,19 +1003,45 @@ class FifoLedger:
         """
         Reduces cost basis of FIFO lots for tax-free capital repayments.
         Returns excess amount that becomes taxable income.
+
+        The repayment is paid PER SHARE, so the reduction is allocated
+        PRO-RATA by lot quantity — a sequential oldest-first reduction
+        misallocated basis between (potentially exempt) old lots and
+        taxable new ones even though the totals matched. A lot's basis
+        floors at zero; whatever cannot be absorbed by any lot's basis
+        is returned as taxable excess.
         """
         if repayment_amount_eur <= Decimal('0') or not self.lots:
             return repayment_amount_eur
 
+        total_qty = sum(lot.quantity for lot in self.lots)
+        if total_qty <= Decimal('0'):
+            return repayment_amount_eur
+
+        per_unit = self.ctx.divide(repayment_amount_eur, total_qty)
         remaining_repayment = repayment_amount_eur
 
-        for lot in self.lots:
-            if remaining_repayment <= Decimal('0'):
-                break
-
-            reduction = min(remaining_repayment, lot.total_cost_basis_eur)
+        def _reduce(lot, amount):
+            nonlocal remaining_repayment
+            reduction = min(amount, lot.total_cost_basis_eur)
+            if reduction <= Decimal('0'):
+                return
             lot.total_cost_basis_eur = self.ctx.subtract(lot.total_cost_basis_eur, reduction)
             lot.unit_cost_basis_eur = self.ctx.divide(lot.total_cost_basis_eur, lot.quantity) if lot.quantity > Decimal('0') else Decimal('0')
             remaining_repayment = self.ctx.subtract(remaining_repayment, reduction)
 
+        # Pass 1: pro-rata by quantity.
+        for lot in self.lots:
+            _reduce(lot, self.ctx.multiply(per_unit, lot.quantity))
+
+        # Pass 2: remainder left by exhausted lots (or rounding) is absorbed
+        # by whatever basis is still available before becoming excess.
+        if remaining_repayment > Decimal('0'):
+            for lot in self.lots:
+                if remaining_repayment <= Decimal('0'):
+                    break
+                _reduce(lot, remaining_repayment)
+
+        if remaining_repayment < Decimal('1e-9'):
+            remaining_repayment = Decimal('0')
         return remaining_repayment  # Excess that becomes taxable income

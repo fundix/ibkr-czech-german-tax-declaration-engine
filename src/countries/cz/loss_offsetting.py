@@ -112,12 +112,14 @@ def compute_loss_offsetting(
             if it.tax_review_status == CzTaxReviewStatus.PENDING_MANUAL_REVIEW:
                 sec.item_count_pending += 1
                 sec.pending_total += gl.copy_abs()
-                # Pending items are conservatively included in tax base
-                if it.included_in_tax_base:
-                    if gl >= ZERO:
-                        sec.taxable_gains += gl
-                    else:
-                        sec.taxable_losses += gl.copy_abs()
+                # Conservative defaults are asymmetric: a pending GAIN stays
+                # in the tax base, but a pending LOSS must NOT reduce it —
+                # if the position actually passed the time test, the loss
+                # belongs to exempt income and cannot be claimed (§10 nets
+                # losses only within taxable income). The amount stays
+                # visible via pending_total for manual review.
+                if it.included_in_tax_base and gl >= ZERO:
+                    sec.taxable_gains += gl
                     sec.item_count_taxable += 1
 
             elif it.is_exempt:

@@ -205,9 +205,14 @@ def evaluate_foreign_tax_credit(
         else:
             cap_rate = config.default_max_credit_rate
 
-        # Compute cap
-        max_creditable = (gross.copy_abs() * cap_rate).quantize(TWO)
-        actual_creditable = min(wht_paid, max_creditable)
+        # Compute cap. Negative gross income (a reversal/correction) bears no
+        # Czech tax, so it can never support a credit — clamp to zero rather
+        # than taking the absolute value.
+        max_creditable = (max(gross, ZERO) * cap_rate).quantize(TWO)
+        # Net WHT paid can be negative when refunds exceed charges on this
+        # item (data anomaly) — a credit can never be negative, so floor at 0.
+        # The invariant paid = creditable + non_creditable is preserved.
+        actual_creditable = min(max(wht_paid, ZERO), max_creditable)
         non_creditable = wht_paid - actual_creditable
 
         # Review status

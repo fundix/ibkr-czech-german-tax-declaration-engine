@@ -72,7 +72,7 @@ class TradeProcessor(EventProcessor):
             stock_asset_obj = event_asset_obj # To avoid confusion with option_asset_obj
             logger.info(f"Stock trade event {event.event_id} ({event.event_type.name}) for asset {asset_symbol} (ID: {event.asset_internal_id}) is linked to option event {event.related_option_event_id}. Attempting adjustment.")
 
-            pending_adjustments: Optional[Dict[uuid.UUID, Tuple[Decimal, uuid.UUID, str]]] = context.get('pending_option_adjustments')
+            pending_adjustments: Optional[Dict[uuid.UUID, Dict[str, Any]]] = context.get('pending_option_adjustments')
 
             if pending_adjustments is None:
                 logger.critical(f"Missing 'pending_option_adjustments' in context for TradeProcessor. Cannot adjust stock trade {event.event_id}.")
@@ -85,7 +85,23 @@ class TradeProcessor(EventProcessor):
                                 f"[Stock Trade CSV Context: Date={event.event_date}, Symbol={asset_symbol}, Qty={event.quantity}, Price={event.price_foreign_currency}, TxID={event.ibkr_transaction_id or 'N/A'}, Desc='{event.ibkr_activity_description or 'N/A'}']")
                 raise ValueError(f"Missing pending adjustment data for option event {event.related_option_event_id}.")
 
-            total_premium_eur, option_asset_id_from_adj, option_type_str = adjustment_data
+            option_asset_id_from_adj = adjustment_data["option_asset_id"]
+            option_type_str = adjustment_data["option_type"]
+
+            # Allocate the premium PRO-RATA to this delivery fill. A single
+            # exercise/assignment can be delivered in several partial stock
+            # fills — each linked fill takes premium × (fill qty / expected
+            # qty); the last fill takes the remainder so the shares always
+            # sum to the full premium.
+            trade_qty_abs = (event.quantity or Decimal(0)).copy_abs()
+            expected_qty = adjustment_data["expected_stock_qty"]
+            remaining_qty = adjustment_data["remaining_stock_qty"]
+            if expected_qty <= Decimal(0) or trade_qty_abs >= remaining_qty:
+                total_premium_eur = adjustment_data["premium_remaining_eur"]
+            else:
+                total_premium_eur = (
+                    adjustment_data["premium_eur"] * trade_qty_abs / expected_qty
+                )
             option_asset_from_adj = asset_resolver.get_asset_by_id(option_asset_id_from_adj)
             option_asset_symbol_for_log = "UNKNOWN_OPTION_SYMBOL"
             if option_asset_from_adj:
@@ -157,8 +173,18 @@ class TradeProcessor(EventProcessor):
                 event.net_proceeds_or_cost_basis_eur = adjusted_value_eur
                 
                 if event.related_option_event_id in pending_adjustments:
-                    del pending_adjustments[event.related_option_event_id]
-                    logger.debug(f"  Removed pending adjustment for option event {event.related_option_event_id}.")
+                    adjustment_data["premium_remaining_eur"] -= total_premium_eur
+                    adjustment_data["remaining_stock_qty"] = max(
+                        Decimal(0), remaining_qty - trade_qty_abs
+                    )
+                    if adjustment_data["remaining_stock_qty"] <= Decimal(0):
+                        del pending_adjustments[event.related_option_event_id]
+                        logger.debug(f"  Consumed pending adjustment for option event {event.related_option_event_id} (fully delivered).")
+                    else:
+                        logger.debug(
+                            f"  Partially consumed pending adjustment for option event {event.related_option_event_id}: "
+                            f"remaining qty {adjustment_data['remaining_stock_qty']}, remaining premium {adjustment_data['premium_remaining_eur']} EUR."
+                        )
                 else: # Should ideally not happen if linking and processing order is correct
                     logger.warning(f"Attempted to remove pending adjustment for option event {event.related_option_event_id}, but it was not found. Stock event: {event.event_id}.")
         
