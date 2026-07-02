@@ -17,7 +17,7 @@ Covers:
 import os
 import tempfile
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import List
 
@@ -79,9 +79,15 @@ def _sec_item(
     proceeds_czk: Decimal,
     gain_loss_czk: Decimal,
     holding_days: int = 200,
-    acquisition_date: str = "2024-06-15",
+    acquisition_date: str = None,
 ) -> CzTaxItem:
     """Create a SECURITY_DISPOSAL item with known CZK amounts."""
+    # Keep dates consistent with holding_days — the time test decides from
+    # the DATES (calendar years), holding_period_days is audit/fallback only.
+    if acquisition_date is None:
+        acquisition_date = (
+            date.fromisoformat("2025-03-25") - timedelta(days=holding_days)
+        ).isoformat()
     return CzTaxItem(
         item_type=CzTaxItemType.SECURITY_DISPOSAL,
         section=CzTaxSection.CZ_10_SECURITIES,

@@ -229,6 +229,8 @@ class CzechTaxAggregator:
             netting=netting,
             ftc_summary=ftc_summary,
             config=self.config,
+            tax_year=tax_year,
+            has_fx=has_fx,
         )
 
         liability_items = liability.to_line_items(cur)

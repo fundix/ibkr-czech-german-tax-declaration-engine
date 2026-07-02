@@ -12,6 +12,7 @@ Verifies:
 7. End-to-end: classifier → aggregator → TaxResult has correct structure
 """
 import uuid
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import List
 
@@ -52,11 +53,16 @@ def _make_rgl(
     realization_type: RealizationType = RealizationType.LONG_POSITION_SALE,
 ) -> RealizedGainLoss:
     """Create a minimal RealizedGainLoss for CZ classification tests."""
+    # Keep dates consistent with holding_period_days — the time test decides
+    # from the DATES (calendar years), the day count is audit/fallback only.
+    acquisition_date = (
+        date.fromisoformat("2023-06-20") - timedelta(days=holding_period_days)
+    ).isoformat()
     return RealizedGainLoss(
         originating_event_id=uuid.uuid4(),
         asset_internal_id=uuid.uuid4(),
         asset_category_at_realization=asset_category,
-        acquisition_date="2023-01-15",
+        acquisition_date=acquisition_date,
         realization_date="2023-06-20",
         realization_type=realization_type,
         quantity_realized=Decimal("10"),

@@ -327,3 +327,123 @@ class TestH3FtcNetting:
         assert rec.actual_creditable_czk == Decimal("0")
         # Invariant paid = creditable + non_creditable still holds.
         assert rec.foreign_tax_paid_czk == rec.actual_creditable_czk + rec.non_creditable_czk
+
+
+# ---------------------------------------------------------------------------
+# M1 — time test compares CALENDAR years, not a fixed 1095-day count
+# ---------------------------------------------------------------------------
+
+class TestM1TimeTestCalendarYears:
+    def _item(self, acquisition: str, event: str) -> CzTaxItem:
+        return CzTaxItem(
+            item_type=CzTaxItemType.SECURITY_DISPOSAL,
+            section=CzTaxSection.CZ_10_SECURITIES,
+            source_event_id=uuid.uuid4(),
+            event_date=event,
+            acquisition_date=acquisition,
+        )
+
+    def test_third_anniversary_across_leap_day_is_taxable(self):
+        # 2021-06-01 → 2024-06-01 is 1096 days (window contains 2024-02-29),
+        # but the holding period is EXACTLY 3 years — not exceeded → taxable.
+        item = self._item("2021-06-01", "2024-06-01")
+        evaluate_time_test([item], CzTaxConfig())
+        assert item.is_exempt is False
+        assert item.is_taxable is True
+
+    def test_day_after_third_anniversary_is_exempt(self):
+        item = self._item("2021-06-01", "2024-06-02")
+        evaluate_time_test([item], CzTaxConfig())
+        assert item.is_exempt is True
+
+    def test_feb29_acquisition_anniversary_is_feb28(self):
+        # Feb 29 acquisition: the 3-year period ends on 2027-02-28 (§33 DŘ) —
+        # selling that day is still within the period → taxable.
+        item = self._item("2024-02-29", "2027-02-28")
+        evaluate_time_test([item], CzTaxConfig())
+        assert item.is_exempt is False
+
+        item = self._item("2024-02-29", "2027-03-01")
+        evaluate_time_test([item], CzTaxConfig())
+        assert item.is_exempt is True
+
+    def test_non_leap_window_boundary_unchanged(self):
+        # Control: no Feb 29 in the window — anniversary day still taxable,
+        # the day after exempt (same as the old 1095-day behaviour).
+        item = self._item("2021-03-01", "2024-03-01")
+        evaluate_time_test([item], CzTaxConfig())
+        assert item.is_exempt is False
+
+        item = self._item("2021-03-02", "2024-03-03")
+        evaluate_time_test([item], CzTaxConfig())
+        assert item.is_exempt is True
+
+
+# ---------------------------------------------------------------------------
+# M2 — 23 % threshold is a per-year statutory value (1 935 552 was 2023 only)
+# L2 — statutory DAP rounding (§16/2 ZDP base, §146/1 DŘ tax)
+# M21 — EUR mode must not compare a EUR base against the CZK threshold
+# ---------------------------------------------------------------------------
+
+def _liability(base_czk, tax_year=2024, has_fx=True, config=None):
+    from src.countries.cz.foreign_tax_credit import CzForeignTaxCreditSummary
+    from src.countries.cz.loss_offsetting import CzLossOffsettingResult
+    from src.countries.cz.tax_liability import compute_tax_liability
+
+    netting = CzLossOffsettingResult()
+    netting.securities.taxable_gains = base_czk
+    netting.compute_combined()
+    return compute_tax_liability(
+        taxable_dividends=Decimal("0"),
+        taxable_interest=Decimal("0"),
+        netting=netting,
+        ftc_summary=CzForeignTaxCreditSummary(),
+        config=config or CzTaxConfig(),
+        tax_year=tax_year,
+        has_fx=has_fx,
+    )
+
+
+class TestM2ThresholdPerYear:
+    def test_statutory_values(self):
+        cfg = CzTaxConfig()
+        assert cfg.elevated_rate_threshold_for_year(2023) == Decimal("1935552")
+        assert cfg.elevated_rate_threshold_for_year(2024) == Decimal("1582812")
+        assert cfg.elevated_rate_threshold_for_year(2025) == Decimal("1676052")
+
+    def test_unknown_year_falls_back_to_nearest_earlier(self):
+        cfg = CzTaxConfig()
+        assert cfg.elevated_rate_threshold_for_year(2027) == Decimal("1676052")
+
+    def test_explicit_override_wins(self):
+        cfg = CzTaxConfig(elevated_rate_threshold_czk=Decimal("100000"))
+        assert cfg.elevated_rate_threshold_for_year(2024) == Decimal("100000")
+
+    def test_2024_base_above_new_threshold_hits_23_percent(self):
+        # Base 1 600 000 was below the old (2023) threshold of 1 935 552 —
+        # for 2024 the portion above 1 582 812 must be taxed at 23 %.
+        result = _liability(Decimal("1600000"), tax_year=2024)
+        assert result.threshold == Decimal("1582812")
+        assert result.base_for_elevated_rate == Decimal("17188")
+        # 1 582 812 × 15 % + 17 188 × 23 % = 237 421.80 + 3 953.24 → ceil
+        assert result.final_czech_tax_after_credit == Decimal("241376")
+
+
+class TestL2DapRounding:
+    def test_base_rounded_down_to_hundreds_tax_up_to_whole_czk(self):
+        result = _liability(Decimal("123456.78"), tax_year=2024)
+        assert result.combined_taxable_base_rounded == Decimal("123400")
+        # 123 400 × 15 % = 18 510 exactly.
+        assert result.final_czech_tax_after_credit == Decimal("18510")
+
+
+class TestM21EurModeGuards:
+    def test_eur_mode_skips_threshold_and_rounding(self):
+        # 2 000 000 EUR ≈ 50M CZK is far above any CZK threshold, but in EUR
+        # mode the 23 % bracket must not fire (and must be flagged) instead
+        # of comparing EUR against a CZK constant.
+        result = _liability(Decimal("2000000"), tax_year=2024, has_fx=False)
+        assert result.base_for_elevated_rate == Decimal("0")
+        assert result.combined_taxable_base_rounded == Decimal("2000000")
+        assert result.final_czech_tax_after_credit == Decimal("300000.00")
+        assert any("no FX provider" in n for n in result.limitation_notes)

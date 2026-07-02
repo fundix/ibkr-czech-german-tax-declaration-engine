@@ -26,7 +26,7 @@ Policy assumptions (explicitly documented):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
 from src.countries.cz.config import CzTaxConfig
@@ -53,6 +53,9 @@ class CzTaxLiabilitySummary:
 
     # --- Combined ---
     combined_taxable_base: Decimal = ZERO
+    # §16/2 ZDP: base rounded down to whole hundreds CZK before applying
+    # rates (equals combined_taxable_base in EUR mode).
+    combined_taxable_base_rounded: Decimal = ZERO
 
     # --- Rate application ---
     base_rate: Decimal = Decimal("0.15")
@@ -109,6 +112,8 @@ def compute_tax_liability(
     netting: CzLossOffsettingResult,
     ftc_summary: CzForeignTaxCreditSummary,
     config: CzTaxConfig,
+    tax_year: Optional[int] = None,
+    has_fx: bool = True,
 ) -> CzTaxLiabilitySummary:
     """
     Compute Czech tax liability from pre-aggregated figures.
@@ -119,6 +124,10 @@ def compute_tax_liability(
         netting: §10 loss-offsetting result.
         ftc_summary: Preliminary foreign tax credit summary.
         config: CZ tax plugin configuration.
+        tax_year: Selects the statutory 23 % threshold for that year.
+        has_fx: ``False`` when the plugin runs without an FX provider, i.e.
+            the bases are EUR. The CZK-denominated 23 % threshold and the
+            statutory CZK rounding are then skipped (diagnostic output only).
 
     Returns:
         ``CzTaxLiabilitySummary`` with full audit trail.
@@ -157,11 +166,30 @@ def compute_tax_liability(
     # --- 3. Rate application ---
     result.base_rate = config.base_tax_rate
     result.elevated_rate = config.elevated_tax_rate
-    result.threshold = config.elevated_rate_threshold_czk
+    result.threshold = config.elevated_rate_threshold_for_year(tax_year)
 
-    base = result.combined_taxable_base
+    if has_fx:
+        # §16 odst. 2 ZDP: tax is computed from the base rounded DOWN to
+        # whole hundreds of CZK.
+        base = (result.combined_taxable_base / Decimal("100")).to_integral_value(
+            rounding=ROUND_FLOOR
+        ) * Decimal("100")
+    else:
+        base = result.combined_taxable_base
+    result.combined_taxable_base_rounded = base
 
-    if base <= result.threshold:
+    if not has_fx:
+        # EUR mode: the CZK threshold cannot be compared against a EUR base —
+        # apply the base rate to everything and say so, instead of silently
+        # never (or wrongly) triggering the 23 % bracket.
+        result.base_for_base_rate = base
+        result.base_for_elevated_rate = ZERO
+        notes.append(
+            "LIMITATION: no FX provider — bases are EUR, so the CZK 23% "
+            "threshold and statutory CZK rounding are NOT applied. "
+            "Figures are diagnostic only."
+        )
+    elif base <= result.threshold:
         result.base_for_base_rate = base
         result.base_for_elevated_rate = ZERO
     else:
@@ -219,6 +247,13 @@ def compute_tax_liability(
     result.final_czech_tax_after_credit = max(
         ZERO, result.gross_czech_tax - result.final_creditable_ftc
     )
+    if has_fx:
+        # §146 odst. 1 daňového řádu: the tax is rounded UP to whole CZK.
+        result.final_czech_tax_after_credit = (
+            result.final_czech_tax_after_credit.to_integral_value(
+                rounding=ROUND_CEILING
+            )
+        )
 
     result.limitation_notes = notes
     return result

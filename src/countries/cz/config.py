@@ -27,12 +27,38 @@ class CzTaxConfig:
     # --- FX policy ---
     fx_policy: CzFxPolicyConfig = field(default_factory=CzFxPolicyConfig)
 
-    # --- Tax rates (§36 ZDP) ---
-    # PLACEHOLDER: 15 % base rate; 23 % above CZK 1 935 552 (2024).
+    # --- Tax rates (§16 ZDP) ---
+    # 15 % base rate; 23 % on the base portion above the year's threshold.
     # For IBKR income this is almost always 15 %.
     base_tax_rate: Decimal = Decimal("0.15")
     elevated_tax_rate: Decimal = Decimal("0.23")
-    elevated_rate_threshold_czk: Decimal = Decimal("1935552")
+    # Explicit override of the 23 % threshold. Leave as None to use the
+    # statutory per-year value from elevated_rate_thresholds_by_year.
+    elevated_rate_threshold_czk: Optional[Decimal] = None
+    # Statutory thresholds: 2023 = 48× average wage; 2024+ = 36× average
+    # wage (konsolidační balíček). Extend this table as new years are set.
+    elevated_rate_thresholds_by_year: Dict[int, Decimal] = field(default_factory=lambda: {
+        2023: Decimal("1935552"),   # 48 × 40 324
+        2024: Decimal("1582812"),   # 36 × 43 967
+        2025: Decimal("1676052"),   # 36 × 46 557
+    })
+
+    def elevated_rate_threshold_for_year(self, tax_year: Optional[int] = None) -> Decimal:
+        """23 % threshold for *tax_year* (explicit override wins).
+
+        Unknown years fall back to the nearest known EARLIER year (or the
+        earliest known year) — extend the table when new values are set.
+        """
+        if self.elevated_rate_threshold_czk is not None:
+            return self.elevated_rate_threshold_czk
+        table = self.elevated_rate_thresholds_by_year
+        if tax_year in table:
+            return table[tax_year]
+        known = sorted(table)
+        if tax_year is None:
+            return table[known[-1]]
+        earlier = [y for y in known if y < tax_year]
+        return table[earlier[-1]] if earlier else table[known[0]]
 
     # --- Holding-period time test (§4/1/w ZDP) ---
     # Securities acquired after 2014-01-01: exempt if held > 3 years.
