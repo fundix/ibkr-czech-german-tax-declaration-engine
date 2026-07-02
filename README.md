@@ -21,17 +21,24 @@ A Python tool that automates the tedious parts of preparing tax declarations fro
 
 | Component | Status |
 |-----------|--------|
-| Core FIFO/enrichment | Stable — validated with 182 spec-driven tests |
+| Core FIFO/enrichment | Stable — spec-driven FIFO/options/loss-offsetting test groups |
 | German plugin (DE) | Production — validated for tax year 2023 |
-| Czech plugin (CZ) | Beta — functional but policy placeholders remain (see [known limitations](docs/cz-plugin.md#known-limitations)) |
-| Test suite | 444 tests passing |
+| Czech plugin (CZ) | Beta — calculation audit 2026-07 complete; policy placeholders remain (see [known limitations](docs/cz-plugin.md#known-limitations)) |
+| Test suite | 542 tests passing |
+
+The CZ calculation path went through a full audit in 2026-07 (39 findings,
+35 fixed, 4 open pending real data / design decisions — see
+[AUDIT_REPORT_2026-07.md](AUDIT_REPORT_2026-07.md)) and was end-to-end
+validated against an independently hand-computed synthetic scenario
+(FIFO, time test, annual limit, §38f FTC caps and final tax all matched).
+Planned next steps live in [docs/future-work.md](docs/future-work.md).
 
 ## Supported Countries
 
 | Country | Plugin | Status | Output formats |
 |---------|--------|--------|----------------|
 | **Germany (DE)** | `countries/de/` | Production — validated for 2023 | Console, PDF |
-| **Czech Republic (CZ)** | `countries/cz/` | Beta — policy placeholders remain | Console, JSON, XLSX |
+| **Czech Republic (CZ)** | `countries/cz/` | Beta — audited 2026-07; policy placeholders remain | Console, JSON, XLSX |
 
 ### Germany (DE)
 - Anlage KAP, KAP-INV, SO form figures
@@ -45,7 +52,7 @@ A Python tool that automates the tedious parts of preparing tax declarations fro
 - Holding-period time test (§4/1/w ZDP, 3-year rule)
 - Annual exempt limit (CZK 100k, 2025+ amendment)
 - §10 loss offsetting
-- Foreign tax credit (§38f ZDP, proportional method)
+- Foreign tax credit (§38f ZDP, per-item treaty caps, per-state §38f/8 cap + proportional finalization)
 - Tax liability computation (15 % / 23 % rates)
 - DAP-oriented form mapping
 - Per-event CZK conversion via ČNB daily rates
@@ -67,7 +74,7 @@ git clone https://github.com/fundix/ibkr-german-tax-declaration-engine-czech.git
 cd ibkr-german-tax-declaration-engine-czech
 uv sync
 
-# Run tests (444 tests)
+# Run tests
 uv run pytest
 
 # Run for Germany (default)
@@ -125,6 +132,8 @@ src/
 |----------|----------|
 | [Architecture](docs/architecture.md) | Developers, contributors |
 | [CZ Plugin](docs/cz-plugin.md) | CZ users, CZ contributors |
+| [Roadmap / Future Work](docs/future-work.md) | Contributors, planning |
+| [Audit Report 2026-07](AUDIT_REPORT_2026-07.md) | Reviewers, auditors |
 | [Development & Testing](docs/development.md) | All contributors |
 | [Contributing](CONTRIBUTING.md) | New contributors |
 | [CLAUDE.md](CLAUDE.md) | AI coding assistants |
