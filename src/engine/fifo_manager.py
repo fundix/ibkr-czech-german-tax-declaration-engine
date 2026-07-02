@@ -523,6 +523,28 @@ class FifoLedger:
 
         small_tolerance_qty = Decimal('1e-10')
         if quantity_remaining_to_realize.copy_abs() > small_tolerance_qty:
+            if getattr(sale_event, "allows_position_flip", False) and not is_historical_simulation:
+                # "C;O" flip: the remainder beyond the closed long position
+                # OPENS a short position at the same per-unit proceeds.
+                flip_proceeds_total = self.ctx.multiply(
+                    quantity_remaining_to_realize, sale_proceeds_eur_per_unit_for_event
+                )
+                flip_lot = ShortFifoLot(
+                    opening_date=sale_event.event_date,
+                    quantity_shorted=quantity_remaining_to_realize,
+                    unit_sale_proceeds_eur=sale_proceeds_eur_per_unit_for_event,
+                    total_sale_proceeds_eur=flip_proceeds_total,
+                    source_transaction_id=sale_event.ibkr_transaction_id or str(sale_event.event_id),
+                )
+                self.short_lots.append(flip_lot)
+                self.short_lots.sort(key=lambda lot: (parse_ibkr_date(lot.opening_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
+                logger.info(
+                    f"Position FLIP (C;O) for sale {sale_event.ibkr_transaction_id or sale_event.event_id}: "
+                    f"closed {quantity_to_realize - quantity_remaining_to_realize} long, "
+                    f"opened SHORT {quantity_remaining_to_realize} @ {sale_proceeds_eur_per_unit_for_event} EUR/unit."
+                )
+                return realized_gains_losses
+
             msg = (f"Insufficient long lots for sale event {sale_event.ibkr_transaction_id or sale_event.event_id} "
                    f"for asset {self.asset_internal_id}. Required to sell: {quantity_to_realize}, "
                    f"Total available in lots before this sale: {current_available_qty_in_lots}, "
@@ -612,6 +634,28 @@ class FifoLedger:
 
         small_tolerance_qty = Decimal('1e-10')
         if quantity_remaining_to_realize.copy_abs() > small_tolerance_qty:
+            if getattr(cover_event, "allows_position_flip", False) and not is_historical_simulation:
+                # "C;O" flip: the remainder beyond the covered short position
+                # OPENS a long position at the same per-unit cost.
+                flip_cost_total = self.ctx.multiply(
+                    quantity_remaining_to_realize, cost_eur_per_unit_for_cover_event
+                )
+                flip_lot = FifoLot(
+                    acquisition_date=cover_event.event_date,
+                    quantity=quantity_remaining_to_realize,
+                    unit_cost_basis_eur=cost_eur_per_unit_for_cover_event,
+                    total_cost_basis_eur=flip_cost_total,
+                    source_transaction_id=cover_event.ibkr_transaction_id or str(cover_event.event_id),
+                )
+                self.lots.append(flip_lot)
+                self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
+                logger.info(
+                    f"Position FLIP (C;O) for cover {cover_event.ibkr_transaction_id or cover_event.event_id}: "
+                    f"covered {quantity_to_realize - quantity_remaining_to_realize} short, "
+                    f"opened LONG {quantity_remaining_to_realize} @ {cost_eur_per_unit_for_cover_event} EUR/unit."
+                )
+                return realized_gains_losses
+
             msg = (f"Insufficient short lots for cover event {cover_event.ibkr_transaction_id or cover_event.event_id} "
                    f"for asset {self.asset_internal_id}. Required to cover: {quantity_to_realize}, "
                    f"Total available in short lots before this cover: {current_available_qty_in_short_lots}, "

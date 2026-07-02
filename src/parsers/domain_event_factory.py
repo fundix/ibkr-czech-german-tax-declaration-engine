@@ -66,9 +66,14 @@ class DomainEventFactory:
         open_close_ind = (raw_trade.open_close_indicator or "").upper()
         trade_quantity = safe_decimal(raw_trade.quantity, default=Decimal(0))
 
+        oc_parts = {p.strip() for p in open_close_ind.split(";") if p.strip()}
+        is_flip = "C" in oc_parts and "O" in oc_parts
+
         if buy_sell == "BUY":
             if open_close_ind == "O": return FinancialEventType.TRADE_BUY_LONG
-            if open_close_ind == "C": return FinancialEventType.TRADE_BUY_SHORT_COVER
+            # "C" or "C;O" (flip): the trade first CLOSES the short position;
+            # for a flip the remainder opens a long position in FIFO.
+            if open_close_ind == "C" or is_flip: return FinancialEventType.TRADE_BUY_SHORT_COVER
             logger.warning(
                 f"Trade ID {raw_trade.transaction_id or raw_trade.trade_id} (BUY): "
                 f"Missing or unexpected Open/Close Indicator: '{raw_trade.open_close_indicator}'. Notes/Codes was: '{raw_trade.notes_codes}'. "
@@ -77,7 +82,9 @@ class DomainEventFactory:
             return FinancialEventType.TRADE_BUY_LONG
         elif buy_sell == "SELL":
             if open_close_ind == "O": return FinancialEventType.TRADE_SELL_SHORT_OPEN
-            if open_close_ind == "C": return FinancialEventType.TRADE_SELL_LONG
+            # "C" or "C;O" (flip): the trade first CLOSES the long position;
+            # for a flip the remainder opens a short position in FIFO.
+            if open_close_ind == "C" or is_flip: return FinancialEventType.TRADE_SELL_LONG
             logger.warning(
                 f"Trade ID {raw_trade.transaction_id or raw_trade.trade_id} (SELL): "
                 f"Missing or unexpected Open/Close Indicator: '{raw_trade.open_close_indicator}'. Notes/Codes was: '{raw_trade.notes_codes}'. "
@@ -360,6 +367,19 @@ class DomainEventFactory:
                     ibkr_activity_description=rt.description,
                     ibkr_notes_codes=rt.notes_codes
                 )
+
+                # "C;O" indicator: one trade CLOSES the existing position and
+                # OPENS the opposite one (flip). The type above is the CLOSE
+                # part; the flag lets FIFO open the opposite position with the
+                # remainder instead of failing on insufficient lots.
+                oc_parts = {p.strip() for p in (rt.open_close_indicator or "").upper().split(";") if p.strip()}
+                if "C" in oc_parts and "O" in oc_parts:
+                    trade_event.allows_position_flip = True
+                    logger.info(
+                        f"Trade {tx_id_primary}: Open/CloseIndicator '{rt.open_close_indicator}' "
+                        "marks a position FLIP — remainder beyond the closed position "
+                        "will open the opposite position in FIFO."
+                    )
 
                 if isinstance(asset, Stock) and rt.notes_codes:
                     notes_codes_parts_stock = {part.strip() for part in (rt.notes_codes or "").upper().split(';') if part.strip()}

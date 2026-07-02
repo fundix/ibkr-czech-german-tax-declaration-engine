@@ -992,6 +992,100 @@ class TestM15ConversionWarning:
         result = aggregator.aggregate([], [conv], AssetResolver(AssetClassifier()), 2024)
         notes = result.sections["cz_10_summary"].notes
         assert any("currency conversion" in n for n in notes)
+
+
+# ---------------------------------------------------------------------------
+# M19 — "C;O" indicator (position flip in one trade): close the existing
+# position and open the opposite one instead of crashing the run
+# ---------------------------------------------------------------------------
+
+class TestM19PositionFlip:
+    def test_parser_flip_indicator_maps_to_close_type(self):
+        from types import SimpleNamespace
+
+        from src.classification.asset_classifier import AssetClassifier
+        from src.domain.enums import FinancialEventType
+        from src.identification.asset_resolver import AssetResolver
+        from src.parsers.domain_event_factory import DomainEventFactory
+
+        factory = DomainEventFactory(AssetResolver(AssetClassifier()))
+
+        def _rt(buy_sell):
+            return SimpleNamespace(
+                buy_sell=buy_sell, open_close_indicator="C;O",
+                quantity="150", transaction_id="1", trade_id="1", notes_codes="",
+            )
+
+        # The type is the CLOSE part; the remainder opens the opposite side.
+        assert factory._determine_trade_event_type(_rt("SELL")) == FinancialEventType.TRADE_SELL_LONG
+        assert factory._determine_trade_event_type(_rt("BUY")) == FinancialEventType.TRADE_BUY_SHORT_COVER
+
+    def test_sell_flip_closes_long_and_opens_short(self):
+        from src.domain.enums import FinancialEventType
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        aid = uuid.uuid4()
+        ledger.add_long_lot(_trade(aid, "2024-01-10", Decimal("10"), Decimal("100"), "1"))
+
+        sell = _trade(
+            aid, "2024-06-10", Decimal("-15"), Decimal("180"), "2",
+            event_type=FinancialEventType.TRADE_SELL_LONG,
+        )
+        sell.allows_position_flip = True   # parser sets this for "C;O"
+
+        rgls = ledger.consume_long_lots_for_sale(sell)   # previously ValueError
+        assert len(rgls) == 1
+        assert rgls[0].quantity_realized == Decimal("10")
+        assert rgls[0].total_realization_value_eur == Decimal("120")   # 10 × 12
+        # The remaining 5 opened a short position at the same per-unit proceeds.
+        assert len(ledger.short_lots) == 1
+        assert ledger.short_lots[0].quantity_shorted == Decimal("5")
+        assert ledger.short_lots[0].total_sale_proceeds_eur == Decimal("60")
+
+    def test_buy_flip_covers_short_and_opens_long(self):
+        from src.domain.enums import FinancialEventType
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        aid = uuid.uuid4()
+        ledger.add_short_lot(_trade(
+            aid, "2024-01-10", Decimal("-10"), Decimal("100"), "1",
+            event_type=FinancialEventType.TRADE_SELL_SHORT_OPEN,
+        ))
+
+        cover = _trade(
+            aid, "2024-06-10", Decimal("15"), Decimal("150"), "2",
+            event_type=FinancialEventType.TRADE_BUY_SHORT_COVER,
+        )
+        cover.allows_position_flip = True
+
+        rgls = ledger.consume_short_lots_for_cover(cover)
+        assert len(rgls) == 1
+        assert rgls[0].quantity_realized == Decimal("10")
+        # The remaining 5 opened a long position at the same per-unit cost.
+        assert len(ledger.lots) == 1
+        assert ledger.lots[0].quantity == Decimal("5")
+        assert ledger.lots[0].total_cost_basis_eur == Decimal("50")
+
+    def test_without_flag_insufficient_lots_still_fail(self):
+        import pytest as _pytest
+
+        from src.domain.enums import FinancialEventType
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        aid = uuid.uuid4()
+        ledger.add_long_lot(_trade(aid, "2024-01-10", Decimal("10"), Decimal("100"), "1"))
+        sell = _trade(
+            aid, "2024-06-10", Decimal("-15"), Decimal("180"), "2",
+            event_type=FinancialEventType.TRADE_SELL_LONG,
+        )
+        with _pytest.raises(ValueError):
+            ledger.consume_long_lots_for_sale(sell)
+
+
+# ---------------------------------------------------------------------------
 # L11 — a future-dated rate request is refused instead of silently served
 # L13 — standalone interest-style WHT lands in the interest section
 # ---------------------------------------------------------------------------
