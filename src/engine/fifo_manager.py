@@ -765,7 +765,24 @@ class FifoLedger:
             logger.info(f"Stock dividend event {event.event_id} for asset {self.asset_internal_id} has zero or negative new shares ({event.quantity_new_shares_received}). No lot added.")
             return
         if event.fmv_per_new_share_eur is None:
-            logger.error(f"Stock dividend event {event.event_id} for asset {self.asset_internal_id} missing fmv_per_new_share_eur. Cannot create lot.")
+            # Never lose quantity: a missing FMV must not make the shares
+            # vanish from the ledger (a later sale would crash or realize
+            # against wrong lots). Create a ZERO-cost lot and complain.
+            logger.error(
+                f"Stock dividend event {event.event_id} for asset {self.asset_internal_id} "
+                f"missing fmv_per_new_share_eur — creating ZERO-cost lot for "
+                f"{event.quantity_new_shares_received} shares. Review FMV data."
+            )
+            zero = self.ctx.create_decimal(0)
+            fallback_lot = FifoLot(
+                acquisition_date=event.event_date,
+                quantity=event.quantity_new_shares_received.quantize(global_config.PRECISION_QUANTITY, context=self.ctx),
+                unit_cost_basis_eur=zero,
+                total_cost_basis_eur=zero,
+                source_transaction_id=event.ca_action_id_ibkr or event.ibkr_transaction_id or f"STOCKDIV_{event.event_id}",
+            )
+            self.lots.append(fallback_lot)
+            self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
             return
 
         if self.asset_category == AssetCategory.OPTION:
@@ -913,19 +930,45 @@ class FifoLedger:
         """
         Reduces cost basis of FIFO lots for tax-free capital repayments.
         Returns excess amount that becomes taxable income.
+
+        The repayment is paid PER SHARE, so the reduction is allocated
+        PRO-RATA by lot quantity — a sequential oldest-first reduction
+        misallocated basis between (potentially exempt) old lots and
+        taxable new ones even though the totals matched. A lot's basis
+        floors at zero; whatever cannot be absorbed by any lot's basis
+        is returned as taxable excess.
         """
         if repayment_amount_eur <= Decimal('0') or not self.lots:
             return repayment_amount_eur
 
+        total_qty = sum(lot.quantity for lot in self.lots)
+        if total_qty <= Decimal('0'):
+            return repayment_amount_eur
+
+        per_unit = self.ctx.divide(repayment_amount_eur, total_qty)
         remaining_repayment = repayment_amount_eur
 
-        for lot in self.lots:
-            if remaining_repayment <= Decimal('0'):
-                break
-
-            reduction = min(remaining_repayment, lot.total_cost_basis_eur)
+        def _reduce(lot, amount):
+            nonlocal remaining_repayment
+            reduction = min(amount, lot.total_cost_basis_eur)
+            if reduction <= Decimal('0'):
+                return
             lot.total_cost_basis_eur = self.ctx.subtract(lot.total_cost_basis_eur, reduction)
             lot.unit_cost_basis_eur = self.ctx.divide(lot.total_cost_basis_eur, lot.quantity) if lot.quantity > Decimal('0') else Decimal('0')
             remaining_repayment = self.ctx.subtract(remaining_repayment, reduction)
 
+        # Pass 1: pro-rata by quantity.
+        for lot in self.lots:
+            _reduce(lot, self.ctx.multiply(per_unit, lot.quantity))
+
+        # Pass 2: remainder left by exhausted lots (or rounding) is absorbed
+        # by whatever basis is still available before becoming excess.
+        if remaining_repayment > Decimal('0'):
+            for lot in self.lots:
+                if remaining_repayment <= Decimal('0'):
+                    break
+                _reduce(lot, remaining_repayment)
+
+        if remaining_repayment < Decimal('1e-9'):
+            remaining_repayment = Decimal('0')
         return remaining_repayment  # Excess that becomes taxable income

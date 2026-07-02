@@ -112,6 +112,21 @@ def evaluate_time_test(
 
         # --- SECURITY_DISPOSAL: apply time test ---
 
+        if item.category_needs_review:
+            # PRIVATE_SALE_ASSET / unknown category: may not be a security,
+            # so the §4/1/w exemptions must not be granted silently.
+            item.is_taxable = True
+            item.is_exempt = False
+            item.exemption_reason = None
+            item.included_in_tax_base = True
+            item.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+            item.tax_review_note = (
+                f"Asset category '{item.asset_category}' may not be a security "
+                "— verify whether the §4/1/w time test and the 100k annual "
+                "limit apply. Item kept taxable as conservative default."
+            )
+            continue
+
         if item.is_short_position:
             # Short positions can never pass the time test: the security is
             # not held between acquisition and transfer (the sale precedes

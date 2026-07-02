@@ -836,7 +836,162 @@ class TestL10PrefetchFillsCache:
 
 
 # ---------------------------------------------------------------------------
-# L9 — FX audit trail records the REAL rate date on weekend fallback
+# M6 — taxable stock dividend produces a §8 income item at FMV (and a
+#      missing FMV never loses ledger quantity)
+# M12 — capital repayment reduces basis PRO-RATA by lot quantity
+# M22 — PRIVATE_SALE_ASSET / unknown categories get manual review, not
+#       silent securities exemptions
+# L4 — §4/3 ZDP 40M cap on time-test-exempt income (2025+)
+# ---------------------------------------------------------------------------
+
+class TestM6StockDividendIncome:
+    def _event(self, fmv_eur):
+        from src.domain.events import CorpActionStockDividend
+
+        ev = CorpActionStockDividend(
+            asset_internal_id=uuid.uuid4(),
+            event_date="2024-05-20",
+            quantity_new_shares_received=Decimal("10"),
+        )
+        ev.fmv_per_new_share_eur = fmv_eur
+        return ev
+
+    def test_stock_dividend_creates_dividend_item_at_fmv(self):
+        ev = self._event(Decimal("34.9"))
+        items, _ = item_builder.build_tax_items([], [ev], _NoneResolver(), None)
+        divs = [i for i in items if i.item_type == CzTaxItemType.DIVIDEND]
+        assert len(divs) == 1
+        assert divs[0].section == CzTaxSection.CZ_8_DIVIDENDS
+        assert divs[0].amount_eur == Decimal("349.0")
+
+    def test_missing_fmv_keeps_ledger_quantity(self):
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        ev = self._event(None)
+        ev.asset_internal_id = ledger.asset_internal_id
+        ledger.add_lot_for_stock_dividend(ev)
+        # The shares must not vanish — a zero-cost lot is created instead.
+        assert sum(l.quantity for l in ledger.lots) == Decimal("10")
+        assert sum(l.total_cost_basis_eur for l in ledger.lots) == Decimal("0")
+
+
+class TestM12ProRataCapitalRepayment:
+    def test_repayment_allocated_per_share(self):
+        from src.domain.enums import FinancialEventType
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        aid = uuid.uuid4()
+        ledger.add_long_lot(_trade(aid, "2020-01-02", Decimal("100"), Decimal("1000"), "1"))
+        ledger.add_long_lot(_trade(aid, "2024-01-02", Decimal("100"), Decimal("1000"), "2"))
+
+        excess = ledger.reduce_cost_basis_for_capital_repayment(Decimal("1000"))
+        assert excess == Decimal("0")
+        # 1000 across 200 shares = 5/share → each 100-share lot loses 500
+        # (the old sequential logic gave 0 / 1000).
+        assert [l.total_cost_basis_eur for l in ledger.lots] == [Decimal("500"), Decimal("500")]
+
+    def test_repayment_exceeding_basis_returns_excess(self):
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        aid = uuid.uuid4()
+        ledger.add_long_lot(_trade(aid, "2024-01-02", Decimal("100"), Decimal("2000"), "1"))
+        excess = ledger.reduce_cost_basis_for_capital_repayment(Decimal("2500"))
+        assert excess == Decimal("500")
+        assert ledger.lots[0].total_cost_basis_eur == Decimal("0")
+
+
+class TestM22CategoryReview:
+    def test_private_sale_asset_not_silently_exempted(self):
+        rgl = _make_rgl(
+            RealizationType.LONG_POSITION_SALE,
+            asset_category=AssetCategory.PRIVATE_SALE_ASSET,
+            acquisition_date="2020-01-05",
+            realization_date="2024-06-05",   # > 3 years — a security would be exempt
+        )
+        items = item_builder._build_disposal_items([rgl], _NoneResolver(), None, [])
+        item = items[0]
+        assert item.category_needs_review is True
+
+        evaluate_time_test([item], CzTaxConfig())
+        assert item.is_exempt is False
+        assert item.is_taxable is True
+        assert item.tax_review_status == CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+        assert "may not be a security" in (item.tax_review_note or "")
+
+    def test_regular_stock_unaffected(self):
+        rgl = _make_rgl(
+            RealizationType.LONG_POSITION_SALE,
+            acquisition_date="2020-01-05",
+            realization_date="2024-06-05",
+        )
+        items = item_builder._build_disposal_items([rgl], _NoneResolver(), None, [])
+        assert items[0].category_needs_review is False
+        evaluate_time_test(items, CzTaxConfig())
+        assert items[0].is_exempt is True
+
+
+class TestL4ExemptIncomeCap:
+    def _exempt_item(self, proceeds_czk) -> CzTaxItem:
+        from src.countries.cz.tax_items import CzExemptionReason
+
+        return CzTaxItem(
+            item_type=CzTaxItemType.SECURITY_DISPOSAL,
+            section=CzTaxSection.CZ_10_SECURITIES,
+            source_event_id=uuid.uuid4(),
+            event_date="2025-06-15",
+            proceeds_czk=proceeds_czk,
+            is_taxable=False,
+            is_exempt=True,
+            exemption_reason=CzExemptionReason.TIME_TEST_PASSED,
+            included_in_tax_base=False,
+        )
+
+    def test_cap_exceeded_flags_exempt_items(self):
+        from src.countries.cz.annual_limit import evaluate_exempt_income_cap
+
+        items = [self._exempt_item(Decimal("25000000")), self._exempt_item(Decimal("20000000"))]
+        total = evaluate_exempt_income_cap(items, CzTaxConfig(), tax_year=2025, has_fx=True)
+        assert total == Decimal("45000000")
+        for it in items:
+            assert it.tax_review_status == CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+            assert "§4/3" in (it.tax_review_note or "")
+
+    def test_cap_not_applied_before_2025(self):
+        from src.countries.cz.annual_limit import evaluate_exempt_income_cap
+
+        items = [self._exempt_item(Decimal("45000000"))]
+        evaluate_exempt_income_cap(items, CzTaxConfig(), tax_year=2024, has_fx=True)
+        assert items[0].tax_review_status == CzTaxReviewStatus.RESOLVED
+
+    def test_under_cap_untouched(self):
+        from src.countries.cz.annual_limit import evaluate_exempt_income_cap
+
+        items = [self._exempt_item(Decimal("39000000"))]
+        evaluate_exempt_income_cap(items, CzTaxConfig(), tax_year=2025, has_fx=True)
+        assert items[0].tax_review_status == CzTaxReviewStatus.RESOLVED
+
+
+class TestM15ConversionWarning:
+    def test_conversion_note_in_cz10_summary(self):
+        from src.countries.cz.plugin import CzechTaxAggregator
+        from src.domain.events import CurrencyConversionEvent
+        from src.identification.asset_resolver import AssetResolver
+        from src.classification.asset_classifier import AssetClassifier
+
+        conv = CurrencyConversionEvent(
+            asset_internal_id=uuid.uuid4(),
+            event_date="2024-04-02",
+            from_currency="CZK", from_amount=Decimal("220000"),
+            to_currency="USD", to_amount=Decimal("10000"),
+            exchange_rate=Decimal("22"),
+        )
+        aggregator = CzechTaxAggregator(config=CzTaxConfig())
+        result = aggregator.aggregate([], [conv], AssetResolver(AssetClassifier()), 2024)
+        notes = result.sections["cz_10_summary"].notes
+        assert any("currency conversion" in n for n in notes)
 # L11 — a future-dated rate request is refused instead of silently served
 # L13 — standalone interest-style WHT lands in the interest section
 # ---------------------------------------------------------------------------

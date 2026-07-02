@@ -169,6 +169,55 @@ def evaluate_annual_limit(
     return total_proceeds
 
 
+def evaluate_exempt_income_cap(
+    items: List[CzTaxItem],
+    config: CzTaxConfig,
+    tax_year: int,
+    has_fx: bool = True,
+) -> Decimal:
+    """§4/3 ZDP (2025+): cap on time-test-exempt income, evaluated in-place.
+
+    When the sum of proceeds exempted by the time test exceeds the annual
+    cap (40M CZK), the exemption applies only proportionally. The engine
+    FLAGS all affected items ``PENDING_MANUAL_REVIEW`` with the computed
+    ratio — the proportional mechanics (including the optional cost
+    step-up) are left to the preparer.
+
+    Returns the total time-test-exempt proceeds (audit figure).
+    """
+    ZERO = Decimal(0)
+    if tax_year < config.exempt_income_cap_start_year or not has_fx:
+        return ZERO
+
+    exempt_items = [
+        it for it in items
+        if it.is_exempt
+        and it.exemption_reason == CzExemptionReason.TIME_TEST_PASSED
+        and it.proceeds_czk is not None
+    ]
+    total_exempt_proceeds = sum((it.proceeds_czk for it in exempt_items), ZERO)
+    cap = config.exempt_income_cap_czk
+
+    if total_exempt_proceeds > cap:
+        ratio = (total_exempt_proceeds - cap) / total_exempt_proceeds
+        for it in exempt_items:
+            it.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+            note = it.tax_review_note or ""
+            it.tax_review_note = (
+                f"{note + '; ' if note else ''}"
+                f"§4/3 ZDP cap exceeded: time-test-exempt proceeds total "
+                f"{total_exempt_proceeds} CZK > {cap} CZK — approx. "
+                f"{(ratio * 100).quantize(Decimal('0.01'))} % of the gain is "
+                "NOT exempt (optional cost step-up may apply). Resolve manually."
+            )
+        logger.warning(
+            f"§4/3 ZDP exemption cap exceeded: {total_exempt_proceeds} CZK "
+            f"time-test-exempt proceeds > {cap} CZK — "
+            f"{len(exempt_items)} item(s) flagged for manual review."
+        )
+    return total_exempt_proceeds
+
+
 def _is_eligible(it: CzTaxItem) -> bool:
     """Is this item eligible for the annual exempt limit test?
 

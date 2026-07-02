@@ -32,7 +32,7 @@ from src.countries.cz.fx_policy import (
     CzFxPolicyConfig,
     FxConversionRecord,
 )
-from src.countries.cz.annual_limit import evaluate_annual_limit
+from src.countries.cz.annual_limit import evaluate_annual_limit, evaluate_exempt_income_cap
 from src.countries.cz.foreign_tax_credit import CzForeignTaxCreditSummary, evaluate_foreign_tax_credit
 from src.countries.cz.item_builder import build_tax_items
 from src.countries.cz.loss_offsetting import CzLossOffsettingResult, compute_loss_offsetting
@@ -137,6 +137,9 @@ class CzechTaxAggregator:
         # --- Phase 3: Apply annual exempt limit (after time test) ---
         has_fx = self._fx is not None
         annual_limit_proceeds = evaluate_annual_limit(items, self.config, has_fx)
+
+        # --- Phase 3b: §4/3 ZDP cap on time-test-exempt income (2025+) ---
+        evaluate_exempt_income_cap(items, self.config, tax_year, has_fx)
 
         # --- Phase 4: Compute §10 loss offsetting ---
         netting = compute_loss_offsetting(items, has_fx)
@@ -244,11 +247,28 @@ class CzechTaxAggregator:
 
         # §10 netting summary (from loss_offsetting module)
         netting_items = netting.to_line_items(cur)
+        cz10_notes = ["PLACEHOLDER: expense deduction rules (§10/4 ZDP) not applied"]
+        # M15: FX gains from currency conversions are NOT computed (no cash-
+        # balance FIFO). They are taxable §10 income in CZ — make the gap
+        # loud whenever conversions exist in the data.
+        conversion_count = sum(
+            1 for ev in financial_events
+            if getattr(ev, "event_type", None) == FinancialEventType.CURRENCY_CONVERSION
+        )
+        if conversion_count:
+            note = (
+                f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found — "
+                "FX gains/losses from currency conversions are NOT computed by this "
+                "engine and are taxable §10 income. Assess them manually."
+            )
+            cz10_notes.append(note)
+            logger.warning(note)
+
         sections["cz_10_summary"] = TaxResultSection(
             section_key="cz_10_summary",
             label="§10 ZDP – Souhrnný přehled",
             line_items=netting_items,
-            notes=["PLACEHOLDER: expense deduction rules (§10/4 ZDP) not applied"],
+            notes=cz10_notes,
         )
 
         # Foreign tax credit summary (preliminary per-item caps)

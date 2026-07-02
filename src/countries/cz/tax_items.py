@@ -151,6 +151,12 @@ class CzTaxItem:
     # --- Quantity (for disposals) ---
     quantity: Optional[Decimal] = None
 
+    # --- Category confidence ---
+    # True when the asset category (PRIVATE_SALE_ASSET, unknown, …) may not
+    # be a security — the time test must flag the item for manual review
+    # instead of granting securities exemptions by default.
+    category_needs_review: bool = False
+
     # --- Short positions ---
     # True when the item realizes a SHORT position (short cover, closing or
     # expiry of a written option). The §4/1/w holding-period time test can

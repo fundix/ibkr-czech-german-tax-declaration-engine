@@ -20,13 +20,18 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 import uuid
 
-from src.countries.cz.enums import CzTaxSection, category_to_cz_section
+from src.countries.cz.enums import (
+    CzTaxSection,
+    category_requires_manual_review,
+    category_to_cz_section,
+)
 from src.countries.cz.fx_policy import CzCurrencyConverter, FxConversionRecord
 from src.countries.cz.tax_items import CzTaxItem, CzTaxItemType, CzWhtRecord
 from src.domain.assets import Asset
 from src.domain.enums import AssetCategory, FinancialEventType, RealizationType
 from src.domain.events import (
     CashFlowEvent,
+    CorpActionStockDividend,
     FinancialEvent,
     WithholdingTaxEvent,
 )
@@ -169,6 +174,15 @@ def _build_income_items(
             wht_events[ev.event_id] = ev
             continue
 
+        if isinstance(ev, CorpActionStockDividend):
+            # A taxable stock/scrip dividend is income at the FMV of the
+            # received shares (the FIFO lot gets the same FMV as cost basis,
+            # so skipping it here meant the income was never taxed at all).
+            item = _build_stock_dividend_item(ev, resolver, fx, fx_records)
+            if item is not None:
+                items.append(item)
+            continue
+
         if not isinstance(ev, CashFlowEvent):
             continue
 
@@ -231,6 +245,51 @@ def _build_income_items(
         items.append(item)
 
     return items, wht_events
+
+
+def _build_stock_dividend_item(
+    ev: CorpActionStockDividend,
+    resolver: AssetResolver,
+    fx: Optional[CzCurrencyConverter],
+    fx_records: List[FxConversionRecord],
+) -> Optional[CzTaxItem]:
+    """§8 dividend item for a taxable stock/scrip dividend, valued at FMV."""
+    if ev.quantity_new_shares_received is None or ev.quantity_new_shares_received <= Decimal(0):
+        return None
+    if ev.fmv_per_new_share_eur is None:
+        logger.error(
+            f"Stock dividend event {ev.event_id}: missing fmv_per_new_share_eur — "
+            "cannot value the dividend income. Review FMV data."
+        )
+        return None
+
+    total_fmv_eur = ev.quantity_new_shares_received * ev.fmv_per_new_share_eur
+    czk, fx_rec = _convert_eur(total_fmv_eur, ev.event_date, fx, fx_records)
+
+    asset = resolver.get_asset_by_id(ev.asset_internal_id)
+    meta = _asset_meta(asset)
+
+    item = CzTaxItem(
+        item_type=CzTaxItemType.DIVIDEND,
+        section=CzTaxSection.CZ_8_DIVIDENDS,
+        source_event_id=ev.event_id,
+        event_date=ev.event_date,
+        original_amount=total_fmv_eur,
+        original_currency="EUR",
+        amount_eur=total_fmv_eur,
+        amount_czk=czk,
+        fx=fx_rec,
+        quantity=ev.quantity_new_shares_received,
+        **meta,
+    )
+    item.tax_review_note = (
+        f"Stock dividend: {ev.quantity_new_shares_received} share(s) valued at "
+        f"FMV {ev.fmv_per_new_share_eur} EUR/share (the FIFO lot carries the "
+        "same FMV as cost basis)."
+    )
+    if fx is not None and czk is None:
+        item.fx_conversion_failed = True
+    return item
 
 
 # --- WHT linking -----------------------------------------------------------
@@ -527,6 +586,7 @@ def _build_disposal_items(
             quantity=rgl.quantity_realized,
             is_short_position=is_short,
             acquisition_date_estimated=getattr(rgl, "is_acquisition_estimated", False),
+            category_needs_review=category_requires_manual_review(cat.name),
             **meta,
         )
         if fx is not None and (cost_czk is None or proceeds_czk is None):

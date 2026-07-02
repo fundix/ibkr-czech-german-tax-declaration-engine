@@ -69,6 +69,12 @@ class CzTaxConfig:
     # do not exceed this threshold, those items are exempt.
     annual_exempt_limit_enabled: bool = True
     annual_exempt_limit_czk: Decimal = Decimal("100000")
+    # §4/3 ZDP (effective 2025): time-test-exempt income above this annual
+    # cap loses the exemption proportionally. The engine FLAGS affected
+    # items for manual review (the proportional mechanics incl. the
+    # optional cost step-up are left to the preparer).
+    exempt_income_cap_czk: Decimal = Decimal("40000000")
+    exempt_income_cap_start_year: int = 2025
 
     @property
     def holding_test_days(self) -> int:
