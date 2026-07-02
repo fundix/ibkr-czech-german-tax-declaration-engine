@@ -160,14 +160,32 @@ class CzechTaxAggregator:
                 if it.item_type == CzTaxItemType.OTHER:
                     # Unlinked WHT standalone item — count WHT only, not as income
                     div_wht += it.total_wht_czk() if has_fx else sum(
-                        (r.original_amount for r in it.wht_records), ZERO
+                        (
+                            # EUR mode: summing across currencies would mix
+                            # units (USD 15 + EUR 10 ≠ "25 EUR") — count only
+                            # EUR-denominated WHT, mirroring the FTC guard.
+                            r.original_amount
+                            for r in it.wht_records
+                            if r.original_amount is not None
+                            and (r.original_currency or "EUR").upper() == "EUR"
+                        ),
+                        ZERO,
                     )
                     continue
                 div_count += 1
                 if it.included_in_tax_base:
                     div_taxable += (it.amount_czk if has_fx else it.amount_eur) or ZERO
                     div_wht += it.total_wht_czk() if has_fx else sum(
-                        (r.original_amount for r in it.wht_records), ZERO
+                        (
+                            # EUR mode: summing across currencies would mix
+                            # units (USD 15 + EUR 10 ≠ "25 EUR") — count only
+                            # EUR-denominated WHT, mirroring the FTC guard.
+                            r.original_amount
+                            for r in it.wht_records
+                            if r.original_amount is not None
+                            and (r.original_currency or "EUR").upper() == "EUR"
+                        ),
+                        ZERO,
                     )
             elif it.section == CzTaxSection.CZ_8_INTEREST:
                 int_count += 1

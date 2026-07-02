@@ -421,7 +421,10 @@ class FifoLedger:
         if not trade_event.ibkr_transaction_id:
             raise ValueError(f"Missing ibkr_transaction_id for trade {trade_event.event_id} needed for Short FIFO lot creation.")
 
-        total_sale_proceeds_eur = self.ctx.create_decimal(trade_event.net_proceeds_or_cost_basis_eur).copy_abs()
+        # Keep the sign: net proceeds are negative when commissions exceed the
+        # gross amount (e.g. closing a near-worthless option) — copy_abs()
+        # would flip a real cost into fictitious proceeds.
+        total_sale_proceeds_eur = self.ctx.create_decimal(trade_event.net_proceeds_or_cost_basis_eur)
         lot_qty_shorted_contracts_or_units = trade_event.quantity.copy_abs().quantize(global_config.PRECISION_QUANTITY, context=self.ctx)
 
         if lot_qty_shorted_contracts_or_units == Decimal(0):
@@ -455,7 +458,9 @@ class FifoLedger:
             return []
 
         quantity_to_realize = sale_event.quantity.copy_abs().quantize(global_config.PRECISION_QUANTITY, context=self.ctx)
-        total_sale_proceeds_for_event = self.ctx.create_decimal(sale_event.net_proceeds_or_cost_basis_eur).copy_abs()
+        # Keep the sign: net proceeds are negative when commissions exceed the
+        # gross amount — copy_abs() overstated the proceeds by 2× commission.
+        total_sale_proceeds_for_event = self.ctx.create_decimal(sale_event.net_proceeds_or_cost_basis_eur)
 
         if quantity_to_realize == Decimal(0): return []
         sale_proceeds_eur_per_unit_for_event = self.ctx.divide(total_sale_proceeds_for_event, quantity_to_realize)
@@ -663,11 +668,17 @@ class FifoLedger:
         if event.cash_per_share_eur is None:
              logger.error(f"Cash merger event {event.event_id} for asset {self.asset_internal_id} missing cash_per_share_eur. Cannot process.")
              return []
+        if self.short_lots:
+            logger.warning(
+                f"Cash merger event {event.event_id} for asset {self.asset_internal_id}: "
+                f"SHORT lots exist (qty {sum(l.quantity_shorted for l in self.short_lots)}) "
+                "and are NOT handled by cash merger processing — review manually."
+            )
         if not self.lots:
             logger.info(f"Cash merger event {event.event_id} for asset {self.asset_internal_id}, but no long lots to consume.")
             return []
 
-        logger.info(f"Processing cash merger for asset {self.asset_internal_id} from event {event.event_id}, selling all lots at {event.cash_per_share_eur} EUR per {'contract' if self.asset_category == AssetCategory.OPTION else 'unit'}.")
+        logger.info(f"Processing cash merger for asset {self.asset_internal_id} from event {event.event_id}, at {event.cash_per_share_eur} EUR per {'contract' if self.asset_category == AssetCategory.OPTION else 'unit'}.")
 
         realized_gains_losses: List[RealizedGainLoss] = []
         realization_value_eur_per_unit_for_event = event.cash_per_share_eur
@@ -683,10 +694,38 @@ class FifoLedger:
                 event.cash_per_share_eur, option_multiplier
             )
 
-        for current_lot in list(self.lots):
-            quantity_from_this_lot = current_lot.quantity
+        # Consume only the DISPOSED quantity (partial tenders / buybacks exist);
+        # quantity_disposed ≤ 0 or exceeding the held quantity falls back to all.
+        total_long_qty = sum(l.quantity for l in self.lots)
+        qty_remaining = getattr(event, "quantity_disposed", None)
+        if qty_remaining is None or qty_remaining <= Decimal(0):
+            qty_remaining = total_long_qty
+        elif qty_remaining > total_long_qty:
+            logger.warning(
+                f"Cash merger event {event.event_id}: quantity_disposed {qty_remaining} exceeds "
+                f"held quantity {total_long_qty} — consuming all held lots."
+            )
+            qty_remaining = total_long_qty
+        elif qty_remaining < total_long_qty:
+            logger.info(
+                f"Cash merger event {event.event_id}: PARTIAL disposal of {qty_remaining} "
+                f"out of {total_long_qty} held — remaining lots are kept."
+            )
 
-            cost_basis_for_portion = current_lot.total_cost_basis_eur
+        lots_to_remove_indices: List[int] = []
+        for i, current_lot in enumerate(self.lots):
+            if qty_remaining <= Decimal(0): break
+            if current_lot.quantity <= qty_remaining:
+                quantity_from_this_lot = current_lot.quantity
+                cost_basis_for_portion = current_lot.total_cost_basis_eur
+                lots_to_remove_indices.append(i)
+            else:
+                quantity_from_this_lot = qty_remaining
+                cost_basis_for_portion = self.ctx.multiply(quantity_from_this_lot, current_lot.unit_cost_basis_eur)
+                current_lot.quantity = self.ctx.subtract(current_lot.quantity, quantity_from_this_lot)
+                current_lot.total_cost_basis_eur = self.ctx.multiply(current_lot.quantity, current_lot.unit_cost_basis_eur)
+            qty_remaining = self.ctx.subtract(qty_remaining, quantity_from_this_lot)
+
             realization_value_for_portion = self.ctx.multiply(quantity_from_this_lot, realization_value_eur_per_unit_for_event)
             gross_gain_loss = self.ctx.subtract(realization_value_for_portion, cost_basis_for_portion)
 
@@ -714,8 +753,11 @@ class FifoLedger:
             realized_gains_losses.append(rgl)
             logger.debug(f"  Generated RGL from cash merger for lot (Src: {current_lot.source_transaction_id}): Realized {quantity_from_this_lot}, Gross G/L={gross_gain_loss}")
 
-        self.lots.clear()
-        logger.info(f"Cleared all long lots for asset {self.asset_internal_id} due to cash merger.")
+        for i in sorted(lots_to_remove_indices, reverse=True): del self.lots[i]
+        logger.info(
+            f"Cash merger for asset {self.asset_internal_id} consumed "
+            f"{len(realized_gains_losses)} lot portion(s); {len(self.lots)} lot(s) remain."
+        )
         return realized_gains_losses
 
     def add_lot_for_stock_dividend(self, event: CorpActionStockDividend):

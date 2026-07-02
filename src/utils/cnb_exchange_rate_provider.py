@@ -324,11 +324,21 @@ class CNBExchangeRateProvider(ExchangeRateProvider):
     ) -> None:
         """Pre-warm the cache for a date range (fetches one day at a time)."""
         current = start_date
+        cache_modified = False
         while current <= end_date:
             date_str = current.strftime("%Y-%m-%d")
             if date_str not in self.rates_cache:
-                self._fetch_rates_for_date(current)
+                fetched = self._fetch_rates_for_date(current)
+                if fetched:
+                    # Store the fetched rates — previously the result was
+                    # discarded and get_rate() re-fetched every date.
+                    self.rates_cache[date_str] = {
+                        code: str(rate) for code, rate in fetched.items()
+                    }
+                    cache_modified = True
             current += datetime.timedelta(days=1)
+        if cache_modified:
+            self._save_cache()
 
     def get_currency_code_mapping(self) -> Dict[str, str]:
         return self.currency_code_mapping.copy()

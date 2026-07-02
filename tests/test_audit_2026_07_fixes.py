@@ -761,6 +761,81 @@ class TestM13DroppedTradesVisible:
 
 
 # ---------------------------------------------------------------------------
+# L5 — negative net proceeds (commission > gross) keep their sign
+# L6 — cash merger consumes only quantity_disposed (partial tenders)
+# L10 — prefetch_rates actually fills the CNB cache
+# ---------------------------------------------------------------------------
+
+class TestL5NegativeNetProceeds:
+    def test_sale_with_commission_exceeding_gross(self):
+        from src.domain.enums import FinancialEventType
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        aid = uuid.uuid4()
+        ledger.add_long_lot(_trade(aid, "2024-01-10", Decimal("1"), Decimal("5.00"), "1"))
+        # Gross 0.05, commission 1.00 → net −0.95; the old copy_abs() turned
+        # this into +0.95 proceeds (gain error +1.90).
+        rgls = ledger.consume_long_lots_for_sale(_trade(
+            aid, "2024-02-10", Decimal("-1"), Decimal("-0.95"), "2",
+            event_type=FinancialEventType.TRADE_SELL_LONG,
+        ))
+        assert rgls[0].total_realization_value_eur == Decimal("-0.95")
+        assert rgls[0].gross_gain_loss_eur == Decimal("-5.95")
+
+
+class TestL6PartialCashMerger:
+    def test_merger_consumes_only_disposed_quantity(self):
+        from src.domain.events import CorpActionMergerCash
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        aid = ledger.asset_internal_id
+        ledger.add_long_lot(_trade(aid, "2024-01-10", Decimal("60"), Decimal("600"), "1"))
+        ledger.add_long_lot(_trade(aid, "2024-02-10", Decimal("40"), Decimal("400"), "2"))
+
+        event = CorpActionMergerCash(
+            asset_internal_id=aid,
+            event_date="2024-06-01",
+            cash_per_share_foreign_currency=Decimal("12"),
+            quantity_disposed=Decimal("40"),   # partial tender — NOT the full 100
+        )
+        event.cash_per_share_eur = Decimal("12")
+
+        rgls = ledger.consume_all_lots_for_cash_merger(event)
+        # FIFO: 40 shares out of the first (60-share) lot.
+        assert sum(r.quantity_realized for r in rgls) == Decimal("40")
+        assert sum(r.total_cost_basis_eur for r in rgls) == Decimal("400")
+        # 60 shares remain held (20 from lot 1 + 40 from lot 2).
+        assert sum(l.quantity for l in ledger.lots) == Decimal("60")
+        assert sum(l.total_cost_basis_eur for l in ledger.lots) == Decimal("600")
+
+
+class TestL10PrefetchFillsCache:
+    def test_prefetch_stores_rates_and_get_rate_reuses(self, tmp_path):
+        from datetime import date as _date
+
+        from src.utils.cnb_exchange_rate_provider import CNBExchangeRateProvider
+
+        calls = []
+
+        class _CountingProvider(CNBExchangeRateProvider):
+            def _fetch_rates_for_date(self, query_date):
+                calls.append(query_date)
+                return {"USD": Decimal("0.0447"), "EUR": Decimal("0.0411")}
+
+        provider = _CountingProvider(cache_file_path=str(tmp_path / "cnb.json"))
+        provider.prefetch_rates(_date(2024, 3, 15), _date(2024, 3, 15), {"USD"})
+        assert "2024-03-15" in provider.rates_cache
+        assert len(calls) == 1
+
+        rate = provider.get_rate(_date(2024, 3, 15), "USD")
+        assert rate == Decimal("0.0447")
+        # get_rate must be served from the prefetched cache — no second fetch.
+        assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # M16 — paid Stückzinsen (accrued interest on a bond purchase) reduce §8
 # interest income instead of silently vanishing
 # ---------------------------------------------------------------------------
