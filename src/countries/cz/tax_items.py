@@ -117,6 +117,10 @@ class CzTaxItem:
     event_date: str = ""                  # primary date (trade / payment date)
     acquisition_date: Optional[str] = None  # for disposals: lot acquisition date
     holding_period_days: Optional[int] = None
+    # True when acquisition_date is a synthetic SOY fallback (31 Dec of the
+    # prior year) — the real purchase date is unknown; the time test flags
+    # such items for manual review instead of trusting the date.
+    acquisition_date_estimated: bool = False
 
     # --- Original amounts (transaction currency) ---
     original_amount: Optional[Decimal] = None

@@ -135,6 +135,23 @@ def evaluate_time_test(
             item.tax_review_note = "Time test disabled in config"
             continue
 
+        # Synthetic acquisition date (SOY fallback lot, 31 Dec of the prior
+        # year): the real purchase date is unknown, so the time test cannot
+        # be evaluated reliably — keep taxable and flag for manual review
+        # (the position may actually be exempt if held > 3 years).
+        if item.acquisition_date_estimated:
+            item.is_taxable = True
+            item.is_exempt = False
+            item.exemption_reason = None
+            item.included_in_tax_base = True
+            item.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+            item.tax_review_note = (
+                "Acquisition date is a synthetic SOY fallback (31 Dec) — the "
+                "real purchase date is unknown; time test not evaluated. Item "
+                "kept taxable as conservative default; review manually."
+            )
+            continue
+
         # Check for missing acquisition_date
         if not item.acquisition_date:
             item.is_taxable = True  # conservative default

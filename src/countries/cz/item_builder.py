@@ -506,6 +506,7 @@ def _build_disposal_items(
             fx_proceeds=fx_proceeds,
             quantity=rgl.quantity_realized,
             is_short_position=is_short,
+            acquisition_date_estimated=getattr(rgl, "is_acquisition_estimated", False),
             **meta,
         )
         if fx is not None and (cost_czk is None or proceeds_czk is None):

@@ -110,6 +110,10 @@ class FifoLedger:
         self.asset_internal_id: uuid.UUID = asset_internal_id
         self.asset_category: AssetCategory = asset_category
         self.fund_type: Optional[InvestmentFundType] = fund_type
+        # Trades excluded from FIFO because enrichment left their EUR value
+        # None (missing FX rate). Each exclusion silently removes a taxable
+        # trade from the results — the engine surfaces the total at the end.
+        self.dropped_unenriched_events: int = 0
 
         if self.asset_category == AssetCategory.INVESTMENT_FUND and self.fund_type is None:
             logger.warning(f"FifoLedger for Investment Fund {asset_internal_id} initialized without a specific fund_type. Defaulting to InvestmentFundType.NONE. This may impact tax calculations if not intended.")
@@ -213,7 +217,22 @@ class FifoLedger:
                 if reconstructed_total_long_qty >= reported_soy_qty and reconstructed_total_short_qty_abs == Decimal(0):
                     logger.info(f"Asset {asset.get_classification_key()}: Using reconstructed FIFO long lots and costs.")
                     qty_to_assign = reported_soy_qty
-                    for lot in reconstructed_long_lots_snapshot:
+                    lots_source = reconstructed_long_lots_snapshot
+                    excess_qty = reconstructed_total_long_qty - reported_soy_qty
+                    if excess_qty > Decimal(0):
+                        # More reconstructed history than the reported SOY position:
+                        # an unreported historical disposal likely consumed lots —
+                        # per FIFO it would have consumed the OLDEST ones, so the
+                        # surviving position consists of the NEWEST lots. Assign
+                        # from the end (the final sort restores chronology).
+                        logger.warning(
+                            f"Asset {asset.get_classification_key()}: reconstructed long qty "
+                            f"{reconstructed_total_long_qty} exceeds reported SOY {reported_soy_qty} "
+                            f"by {excess_qty} — an unreported historical disposal is likely. "
+                            "Keeping the NEWEST lots per FIFO; review acquisition dates/costs."
+                        )
+                        lots_source = list(reversed(reconstructed_long_lots_snapshot))
+                    for lot in lots_source:
                         if qty_to_assign <= Decimal(0): break
                         qty_from_this_lot = min(lot.quantity, qty_to_assign)
                         final_lot = FifoLot(
@@ -235,7 +254,19 @@ class FifoLedger:
                 if reconstructed_total_short_qty_abs >= reported_soy_qty_abs and reconstructed_total_long_qty == Decimal(0):
                     logger.info(f"Asset {asset.get_classification_key()}: Using reconstructed FIFO short lots and proceeds.")
                     qty_to_assign = reported_soy_qty_abs
-                    for lot in reconstructed_short_lots_snapshot:
+                    short_lots_source = reconstructed_short_lots_snapshot
+                    excess_short_qty = reconstructed_total_short_qty_abs - reported_soy_qty_abs
+                    if excess_short_qty > Decimal(0):
+                        # Same reasoning as the long branch: an unreported cover
+                        # would have closed the OLDEST short lots first.
+                        logger.warning(
+                            f"Asset {asset.get_classification_key()}: reconstructed short qty "
+                            f"{reconstructed_total_short_qty_abs} exceeds reported SOY {reported_soy_qty_abs} "
+                            f"by {excess_short_qty} — an unreported historical cover is likely. "
+                            "Keeping the NEWEST short lots per FIFO; review opening dates/proceeds."
+                        )
+                        short_lots_source = list(reversed(reconstructed_short_lots_snapshot))
+                    for lot in short_lots_source:
                         if qty_to_assign <= Decimal(0): break
                         qty_from_this_lot = min(lot.quantity_shorted, qty_to_assign)
                         final_short_lot = ShortFifoLot(
@@ -349,7 +380,15 @@ class FifoLedger:
     def add_long_lot(self, trade_event: TradeEvent):
         if trade_event.event_type != FinancialEventType.TRADE_BUY_LONG: return
         if trade_event.quantity is None or trade_event.quantity <= Decimal(0): return
-        if trade_event.net_proceeds_or_cost_basis_eur is None: return
+        if trade_event.net_proceeds_or_cost_basis_eur is None:
+            self.dropped_unenriched_events += 1
+            logger.error(
+                f"BUY trade {trade_event.ibkr_transaction_id or trade_event.event_id} "
+                f"({trade_event.event_date}, qty {trade_event.quantity}) for asset {self.asset_internal_id} "
+                "has no EUR value (FX conversion failed) — lot NOT created and EXCLUDED from FIFO. "
+                "A later sale of this quantity may fail or realize against wrong lots."
+            )
+            return
         if not trade_event.ibkr_transaction_id:
             raise ValueError(f"Missing ibkr_transaction_id for trade {trade_event.event_id} needed for FIFO lot creation.")
 
@@ -376,7 +415,8 @@ class FifoLedger:
         if trade_event.event_type != FinancialEventType.TRADE_SELL_SHORT_OPEN: return
         if trade_event.quantity is None or trade_event.quantity >= Decimal(0): return
         if trade_event.net_proceeds_or_cost_basis_eur is None:
-            logger.error(f"Cannot add short lot for trade {trade_event.ibkr_transaction_id} - net_proceeds_or_cost_basis_eur is None. Event must be enriched before FIFO processing.")
+            self.dropped_unenriched_events += 1
+            logger.error(f"Cannot add short lot for trade {trade_event.ibkr_transaction_id} - net_proceeds_or_cost_basis_eur is None (FX conversion failed). Trade EXCLUDED from FIFO.")
             return
         if not trade_event.ibkr_transaction_id:
             raise ValueError(f"Missing ibkr_transaction_id for trade {trade_event.event_id} needed for Short FIFO lot creation.")
@@ -404,7 +444,15 @@ class FifoLedger:
     def consume_long_lots_for_sale(self, sale_event: TradeEvent, is_historical_simulation: bool = False) -> List[RealizedGainLoss]:
         if sale_event.event_type != FinancialEventType.TRADE_SELL_LONG: return []
         if sale_event.quantity is None or sale_event.quantity >= Decimal(0): return []
-        if sale_event.net_proceeds_or_cost_basis_eur is None: return []
+        if sale_event.net_proceeds_or_cost_basis_eur is None:
+            self.dropped_unenriched_events += 1
+            logger.error(
+                f"SELL trade {sale_event.ibkr_transaction_id or sale_event.event_id} "
+                f"({sale_event.event_date}, qty {sale_event.quantity}) for asset {self.asset_internal_id} "
+                "has no EUR value (FX conversion failed) — the TAXABLE DISPOSAL is EXCLUDED "
+                "from FIFO results. Review input data / FX rates."
+            )
+            return []
 
         quantity_to_realize = sale_event.quantity.copy_abs().quantize(global_config.PRECISION_QUANTITY, context=self.ctx)
         total_sale_proceeds_for_event = self.ctx.create_decimal(sale_event.net_proceeds_or_cost_basis_eur).copy_abs()
@@ -460,6 +508,7 @@ class FifoLedger:
                     total_realization_value_eur=realization_value_for_portion,
                     gross_gain_loss_eur=gross_gain_loss, holding_period_days=holding_period_days,
                     fund_type_at_sale=self.fund_type if self.asset_category == AssetCategory.INVESTMENT_FUND else None,
+                    is_acquisition_estimated=str(current_lot.source_transaction_id or "").startswith("SOY_FALLBACK"),
                 )
                 if self._tax_classifier is not None:
                     self._tax_classifier(rgl)
@@ -483,7 +532,15 @@ class FifoLedger:
     def consume_short_lots_for_cover(self, cover_event: TradeEvent, is_historical_simulation: bool = False) -> List[RealizedGainLoss]:
         if cover_event.event_type != FinancialEventType.TRADE_BUY_SHORT_COVER: return []
         if cover_event.quantity is None or cover_event.quantity <= Decimal(0): return []
-        if cover_event.net_proceeds_or_cost_basis_eur is None: return []
+        if cover_event.net_proceeds_or_cost_basis_eur is None:
+            self.dropped_unenriched_events += 1
+            logger.error(
+                f"COVER trade {cover_event.ibkr_transaction_id or cover_event.event_id} "
+                f"({cover_event.event_date}) for asset {self.asset_internal_id} "
+                "has no EUR value (FX conversion failed) — the TAXABLE SHORT COVER is "
+                "EXCLUDED from FIFO results. Review input data / FX rates."
+            )
+            return []
 
         quantity_to_realize = cover_event.quantity.quantize(global_config.PRECISION_QUANTITY, context=self.ctx)
         total_cost_for_cover_event = self.ctx.create_decimal(cover_event.net_proceeds_or_cost_basis_eur)
@@ -540,6 +597,7 @@ class FifoLedger:
                     total_realization_value_eur=realization_value_for_portion,
                     gross_gain_loss_eur=gross_gain_loss, holding_period_days=holding_period_days,
                     fund_type_at_sale=self.fund_type if self.asset_category == AssetCategory.INVESTMENT_FUND else None,
+                    is_acquisition_estimated=str(current_short_lot.source_transaction_id or "").startswith("SOY_FALLBACK"),
                 )
                 if self._tax_classifier is not None:
                     self._tax_classifier(rgl)

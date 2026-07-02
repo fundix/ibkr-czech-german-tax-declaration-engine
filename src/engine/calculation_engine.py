@@ -347,6 +347,17 @@ def run_main_calculations(
     else:
         logger.info("EOY Quantity Validation passed or no critical mismatches found against reported EOY positions.")
 
+    dropped_unenriched_total = sum(
+        getattr(ledger, "dropped_unenriched_events", 0) for ledger in fifo_ledgers.values()
+    )
+    if dropped_unenriched_total > 0:
+        logger.error(
+            f"{dropped_unenriched_total} trade event(s) were EXCLUDED from FIFO processing "
+            "because their EUR value was missing (failed FX conversion). Realized "
+            "gains/losses are INCOMPLETE — see the per-trade errors above and fix the "
+            "input data or FX rate availability before filing."
+        )
+
     logger.info("Vorabpauschale calculation skipped (result is €0 for tax year 2023).")
 
     processed_income_events_for_output: List[FinancialEvent] = list(current_year_events) + deferred_income_events

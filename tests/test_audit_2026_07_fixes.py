@@ -640,6 +640,127 @@ class TestM10ZeroDteOrdering:
 
 
 # ---------------------------------------------------------------------------
+# M7 — SOY reconstruction with excess history keeps the NEWEST lots
+# M8 — SOY fallback lots carry an "estimated acquisition" flag through to
+#      the CZ time test
+# M13 — trades dropped for missing EUR enrichment are counted, not silent
+# ---------------------------------------------------------------------------
+
+def _soy_stock(symbol="ABC", qty="100", cost="5000"):
+    from src.domain.assets import Stock
+
+    stock = Stock(ibkr_symbol=symbol)
+    stock.soy_quantity = Decimal(qty)
+    stock.soy_cost_basis_amount = Decimal(cost)
+    stock.soy_cost_basis_currency = "EUR"
+    return stock
+
+
+def _trade(asset_id, date, qty, net_eur, tx, event_type=None):
+    from src.domain.enums import FinancialEventType
+    from src.domain.events import TradeEvent
+
+    return TradeEvent(
+        asset_internal_id=asset_id,
+        event_date=date,
+        quantity=qty,
+        price_foreign_currency=Decimal("10"),
+        event_type=event_type or FinancialEventType.TRADE_BUY_LONG,
+        net_proceeds_or_cost_basis_eur=net_eur,
+        ibkr_transaction_id=tx,
+    )
+
+
+class TestM7SoyExcessKeepsNewest:
+    def test_excess_reconstruction_keeps_newest_lots(self):
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        stock = _soy_stock()
+        # An unreported historical sale is missing from the input: the
+        # reconstruction yields 200 shares, the broker reports SOY = 100.
+        # FIFO says the missing sale consumed the OLDEST (2019) lot, so the
+        # surviving position must be the 2023 lot (cost 5000), not 2019.
+        buys = [
+            _trade(stock.internal_asset_id, "2019-05-10", Decimal("100"), Decimal("1000"), "10"),
+            _trade(stock.internal_asset_id, "2023-08-15", Decimal("100"), Decimal("5000"), "20"),
+        ]
+        ledger.initialize_lots_from_soy(stock, buys, tax_year=2025)
+
+        assert len(ledger.lots) == 1
+        assert ledger.lots[0].acquisition_date == "2023-08-15"
+        assert ledger.lots[0].total_cost_basis_eur == Decimal("5000")
+
+
+class TestM8SoyFallbackEstimatedFlag:
+    def test_fallback_lot_rgl_is_flagged(self):
+        from src.domain.enums import FinancialEventType
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        stock = _soy_stock(qty="100", cost="2000")
+        ledger.initialize_lots_from_soy(stock, [], tax_year=2025)   # no history → fallback
+
+        sell = _trade(
+            stock.internal_asset_id, "2025-06-01", Decimal("-100"),
+            Decimal("6000"), "99", event_type=FinancialEventType.TRADE_SELL_LONG,
+        )
+        rgls = ledger.consume_long_lots_for_sale(sell)
+        assert len(rgls) == 1
+        assert rgls[0].acquisition_date == "2024-12-31"          # synthetic date
+        assert rgls[0].is_acquisition_estimated is True
+
+    def test_real_lot_rgl_not_flagged(self):
+        from src.domain.enums import FinancialEventType
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        aid = uuid.uuid4()
+        ledger.add_long_lot(_trade(aid, "2024-01-10", Decimal("100"), Decimal("1000"), "1"))
+        rgls = ledger.consume_long_lots_for_sale(_trade(
+            aid, "2024-06-01", Decimal("-100"), Decimal("1500"), "2",
+            event_type=FinancialEventType.TRADE_SELL_LONG,
+        ))
+        assert rgls[0].is_acquisition_estimated is False
+
+    def test_time_test_flags_estimated_acquisition(self):
+        item = CzTaxItem(
+            item_type=CzTaxItemType.SECURITY_DISPOSAL,
+            section=CzTaxSection.CZ_10_SECURITIES,
+            source_event_id=uuid.uuid4(),
+            event_date="2025-06-01",
+            acquisition_date="2024-12-31",
+            acquisition_date_estimated=True,
+        )
+        evaluate_time_test([item], CzTaxConfig())
+        # The synthetic date must not be trusted in either direction — the
+        # position may actually be exempt; flag for manual review.
+        assert item.is_exempt is False
+        assert item.is_taxable is True
+        assert item.tax_review_status == CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+        assert "SOY fallback" in (item.tax_review_note or "")
+
+
+class TestM13DroppedTradesVisible:
+    def test_unenriched_trades_counted(self):
+        from src.domain.enums import FinancialEventType
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        aid = uuid.uuid4()
+        ledger.add_long_lot(_trade(aid, "2024-01-10", Decimal("10"), None, "1"))
+        assert ledger.lots == []
+        assert ledger.dropped_unenriched_events == 1
+
+        rgls = ledger.consume_long_lots_for_sale(_trade(
+            aid, "2024-02-10", Decimal("-10"), None, "2",
+            event_type=FinancialEventType.TRADE_SELL_LONG,
+        ))
+        assert rgls == []
+        assert ledger.dropped_unenriched_events == 2
+
+
+# ---------------------------------------------------------------------------
 # M16 — paid Stückzinsen (accrued interest on a bond purchase) reduce §8
 # interest income instead of silently vanishing
 # ---------------------------------------------------------------------------
