@@ -153,7 +153,21 @@ class CzechTaxAggregator:
         div_wht = ZERO
         div_count = 0
         int_taxable = ZERO
+        int_wht = ZERO
         int_count = 0
+
+        def _eur_wht_sum(records):
+            # EUR mode: only EUR-denominated WHT can be summed (unit mismatch
+            # otherwise) — mirrors the FTC guard.
+            return sum(
+                (
+                    r.original_amount
+                    for r in records
+                    if r.original_amount is not None
+                    and (r.original_currency or "EUR").upper() == "EUR"
+                ),
+                ZERO,
+            )
 
         for it in items:
             if it.section == CzTaxSection.CZ_8_DIVIDENDS:
@@ -188,9 +202,14 @@ class CzechTaxAggregator:
                         ZERO,
                     )
             elif it.section == CzTaxSection.CZ_8_INTEREST:
+                if it.item_type == CzTaxItemType.OTHER:
+                    # Unlinked interest-style WHT — count WHT only, not income
+                    int_wht += it.total_wht_czk() if has_fx else _eur_wht_sum(it.wht_records)
+                    continue
                 int_count += 1
                 if it.included_in_tax_base:
                     int_taxable += (it.amount_czk if has_fx else it.amount_eur) or ZERO
+                    int_wht += it.total_wht_czk() if has_fx else _eur_wht_sum(it.wht_records)
 
         cur = "CZK" if has_fx else "EUR"
         c = cur.lower()
@@ -214,6 +233,7 @@ class CzechTaxAggregator:
             label=self.config.section_labels.get("cz_8_interest", "§8 – Úroky"),
             line_items={
                 f"gross_interest_{c}": int_taxable.quantize(TWO),
+                f"wht_paid_{c}": int_wht.quantize(TWO),
                 "item_count": Decimal(int_count),
             },
             notes=([] if has_fx else ["no FX converter — amounts in EUR"]),

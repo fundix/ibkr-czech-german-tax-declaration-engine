@@ -144,8 +144,17 @@ class CzCurrencyConverter:
                 event_date=event_date.strftime("%Y-%m-%d"),
             )
 
-        # get_rate returns foreign-currency-units-per-1-CZK
-        rate = self._provider.get_rate(event_date, currency_upper)
+        # get_rate returns foreign-currency-units-per-1-CZK. Prefer the
+        # info variant so the audit record carries the REAL rate date when
+        # the weekend/holiday fallback was applied.
+        actual_rate_date = event_date
+        if hasattr(self._provider, "get_rate_info"):
+            rate_info = self._provider.get_rate_info(event_date, currency_upper)
+            rate = rate_info[0] if rate_info else None
+            if rate_info is not None:
+                actual_rate_date = rate_info[1]
+        else:
+            rate = self._provider.get_rate(event_date, currency_upper)
 
         if rate is None or rate <= Decimal(0):
             logger.warning(
@@ -157,12 +166,14 @@ class CzCurrencyConverter:
         # CZK = amount / rate  (rate = foreign_per_czk)
         czk_amount = amount / rate
 
-        # Determine the actual date used (the provider may have fallen back)
-        # We trust the provider's fallback logic; record the event_date as
-        # the requested date and note if fallback was applied.
-        # (Provider handles fallback internally; we can't easily distinguish
-        #  here, but the rate itself is deterministic for the given date.)
-        fx_date_str = event_date.strftime("%Y-%m-%d")
+        event_date_str = event_date.strftime("%Y-%m-%d")
+        fx_date_str = actual_rate_date.strftime("%Y-%m-%d")
+        conversion_note: Optional[str] = None
+        if actual_rate_date != event_date:
+            conversion_note = (
+                f"Weekend/holiday fallback: ČNB rate of {fx_date_str} used "
+                f"for event date {event_date_str}."
+            )
         rate_inverse = Decimal("1") / rate if rate != Decimal(0) else Decimal(0)
 
         return FxConversionRecord(
@@ -174,7 +185,8 @@ class CzCurrencyConverter:
             fx_date_used=fx_date_str,
             fx_source=self._policy.source,
             fx_policy=self._policy.mode.name.lower(),
-            event_date=fx_date_str,
+            event_date=event_date_str,
+            conversion_note=conversion_note,
         )
 
     def convert_eur_to_czk(

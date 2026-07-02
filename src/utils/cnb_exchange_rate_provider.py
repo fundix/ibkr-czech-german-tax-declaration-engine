@@ -236,9 +236,30 @@ class CNBExchangeRateProvider(ExchangeRateProvider):
 
         Returns ``Decimal("1.0")`` for ``CZK``.
         """
+        info = self.get_rate_info(date_of_conversion, currency_code)
+        return info[0] if info else None
+
+    def get_rate_info(
+        self, date_of_conversion: datetime.date, currency_code: str
+    ) -> Optional[Tuple[Decimal, datetime.date]]:
+        """
+        Like :meth:`get_rate`, but returns ``(rate, actual_rate_date)`` so
+        callers can record the REAL date of the rate in audit trails when
+        the weekend/holiday fallback was applied.
+        """
         original_upper = currency_code.upper()
         if original_upper == "CZK":
-            return Decimal("1.0")
+            return (Decimal("1.0"), date_of_conversion)
+
+        # ČNB answers a FUTURE-dated request with today's sheet — a silent
+        # wrong rate. A future event date is bad input data; refuse loudly.
+        if date_of_conversion > datetime.date.today():
+            logger.error(
+                f"CNB rate requested for FUTURE date {date_of_conversion} "
+                f"({original_upper}) — refusing (ČNB would silently return "
+                "the current sheet). Check the input data."
+            )
+            return None
 
         effective_code = self._get_effective_currency_code(original_upper)
         target_date_str = date_of_conversion.strftime("%Y-%m-%d")
@@ -258,7 +279,7 @@ class CNBExchangeRateProvider(ExchangeRateProvider):
                             f"CNB cache hit: {effective_code} on {search_date_str} "
                             f"(fallback {i}d for {target_date_str}) = {rate}"
                         )
-                        return rate
+                        return (rate, search_date)
                     except InvalidOperation:
                         logger.error(
                             f"Invalid cached rate '{cached}' for "
@@ -294,7 +315,7 @@ class CNBExchangeRateProvider(ExchangeRateProvider):
                         f"CNB rate for {effective_code} on {search_date_str} "
                         f"(fallback {i}d for {target_date_str}): {fetched[effective_code]}"
                     )
-                    return fetched[effective_code]
+                    return (fetched[effective_code], search_date)
                 else:
                     # ČNB published rates but not for this currency
                     if self.rates_cache[search_date_str].get(effective_code) is not None:

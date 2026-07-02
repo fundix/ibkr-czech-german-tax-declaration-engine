@@ -15,6 +15,7 @@ WHT credit calculation — those are downstream consumers of the items.
 from __future__ import annotations
 
 import logging
+import re
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 import uuid
@@ -356,6 +357,12 @@ def _link_wht(
 
 # --- Unlinked WHT items ----------------------------------------------------
 
+# Interest-withholding description pattern (mirrors the core WHT linker).
+_INTEREST_WHT_PATTERN = re.compile(
+    r"WITHHOLDING\s*(?:@\s*\d{1,3}(?:\.\d+)?%)?\s*ON\s*(?:CREDIT\s*)?INT",
+    re.IGNORECASE,
+)
+
 def _build_unlinked_wht_items(
     unlinked_ids: set,
     wht_events: Dict[uuid.UUID, WithholdingTaxEvent],
@@ -396,9 +403,22 @@ def _build_unlinked_wht_items(
             source_country=getattr(wht, "source_country_code", None),
         )
 
+        # Classify by likely underlying income: interest-style WHT (broker
+        # interest on cash balances, "WITHHOLDING ... ON CREDIT INT" rows)
+        # belongs to the interest section — hardcoding dividends misstated
+        # the per-section wht_paid figures.
+        desc = (wht.ibkr_activity_description or "").upper()
+        is_interest_like = bool(_INTEREST_WHT_PATTERN.search(desc)) or (
+            getattr(asset, "asset_category", None) == AssetCategory.CASH_BALANCE
+        )
+        section = (
+            CzTaxSection.CZ_8_INTEREST if is_interest_like
+            else CzTaxSection.CZ_8_DIVIDENDS
+        )
+
         item = CzTaxItem(
             item_type=CzTaxItemType.OTHER,
-            section=CzTaxSection.CZ_8_DIVIDENDS,  # WHT most commonly relates to dividends
+            section=section,
             source_event_id=wht.event_id,
             event_date=wht.event_date,
             original_amount=orig_amt,

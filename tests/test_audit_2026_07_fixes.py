@@ -836,6 +836,92 @@ class TestL10PrefetchFillsCache:
 
 
 # ---------------------------------------------------------------------------
+# L9 — FX audit trail records the REAL rate date on weekend fallback
+# L11 — a future-dated rate request is refused instead of silently served
+# L13 — standalone interest-style WHT lands in the interest section
+# ---------------------------------------------------------------------------
+
+class _FridayOnlyProvider:
+    """CNB-style provider stub with rates published only on 2024-03-15."""
+
+    def __init__(self):
+        from src.utils.cnb_exchange_rate_provider import CNBExchangeRateProvider
+        import tempfile, os
+
+        class _P(CNBExchangeRateProvider):
+            def _fetch_rates_for_date(self, query_date):
+                from datetime import date as _date
+                if query_date == _date(2024, 3, 15):
+                    return {"USD": Decimal("0.04")}
+                return None
+
+        self.provider = _P(cache_file_path=
+            os.path.join(tempfile.mkdtemp(), "cnb.json"))
+
+
+class TestL9FallbackDateInAuditTrail:
+    def test_weekend_conversion_records_real_rate_date(self):
+        from datetime import date as _date
+
+        provider = _FridayOnlyProvider().provider
+        fx = CzCurrencyConverter(provider=provider, policy=CzFxPolicyConfig())
+        # Saturday 2024-03-16 → Friday's rate must be used AND recorded.
+        rec = fx.convert_to_czk(Decimal("100"), "USD", _date(2024, 3, 16))
+        assert rec is not None
+        assert rec.converted_amount_czk == Decimal("2500")
+        assert rec.event_date == "2024-03-16"
+        assert rec.fx_date_used == "2024-03-15"          # real rate date
+        assert "fallback" in (rec.conversion_note or "").lower()
+
+    def test_same_day_conversion_has_no_note(self):
+        from datetime import date as _date
+
+        provider = _FridayOnlyProvider().provider
+        fx = CzCurrencyConverter(provider=provider, policy=CzFxPolicyConfig())
+        rec = fx.convert_to_czk(Decimal("100"), "USD", _date(2024, 3, 15))
+        assert rec.fx_date_used == "2024-03-15"
+        assert rec.conversion_note is None
+
+
+class TestL11FutureDateRefused:
+    def test_future_date_returns_none(self):
+        from datetime import date as _date, timedelta as _td
+
+        provider = _FridayOnlyProvider().provider
+        future = _date.today() + _td(days=30)
+        # ČNB would answer with today's sheet — the provider must refuse.
+        assert provider.get_rate(future, "USD") is None
+
+
+class TestL13StandaloneWhtSection:
+    def _wht(self, description, amount=Decimal("10")):
+        from src.domain.events import WithholdingTaxEvent
+
+        return WithholdingTaxEvent(
+            asset_internal_id=uuid.uuid4(),
+            event_date="2024-03-15",
+            source_country_code="IE",
+            gross_amount_foreign_currency=amount,
+            local_currency="EUR",
+            ibkr_activity_description=description,
+            ibkr_transaction_id="1",
+        )
+
+    def test_interest_style_wht_goes_to_interest_section(self):
+        interest_wht = self._wht("WITHHOLDING @ 20% ON CREDIT INT FOR MAR-2024")
+        dividend_wht = self._wht("ABC(US000) CASH DIVIDEND - US TAX")
+        wht_index = {interest_wht.event_id: interest_wht,
+                     dividend_wht.event_id: dividend_wht}
+
+        items = item_builder._build_unlinked_wht_items(
+            set(wht_index.keys()), wht_index, _NoneResolver(), None, [],
+        )
+        sections = {i.source_event_id: i.section for i in items}
+        assert sections[interest_wht.event_id] == CzTaxSection.CZ_8_INTEREST
+        assert sections[dividend_wht.event_id] == CzTaxSection.CZ_8_DIVIDENDS
+
+
+# ---------------------------------------------------------------------------
 # M16 — paid Stückzinsen (accrued interest on a bond purchase) reduce §8
 # interest income instead of silently vanishing
 # ---------------------------------------------------------------------------
