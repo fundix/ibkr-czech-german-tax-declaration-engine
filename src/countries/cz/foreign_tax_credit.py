@@ -207,7 +207,10 @@ def evaluate_foreign_tax_credit(
 
         # Compute cap
         max_creditable = (gross.copy_abs() * cap_rate).quantize(TWO)
-        actual_creditable = min(wht_paid, max_creditable)
+        # Net WHT paid can be negative when refunds exceed charges on this
+        # item (data anomaly) — a credit can never be negative, so floor at 0.
+        # The invariant paid = creditable + non_creditable is preserved.
+        actual_creditable = min(max(wht_paid, ZERO), max_creditable)
         non_creditable = wht_paid - actual_creditable
 
         # Review status

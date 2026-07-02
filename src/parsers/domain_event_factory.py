@@ -509,9 +509,13 @@ class DomainEventFactory:
                     if match_country_in_desc: source_country_for_wht = match_country_in_desc.group(1)
                     elif asset_for_event.asset_category == AssetCategory.CASH_BALANCE: source_country_for_wht = "IE"
                 
-                # WHT amount should be stored as a positive value representing the tax paid.
-                # raw_amount for WHT is typically negative in IBKR reports.
-                event_params_kw["gross_amount_foreign_currency"] = raw_amount.copy_abs()
+                # WHT is stored with positive = tax paid. IBKR reports withholding
+                # as negative cash amounts, so the sign is flipped: a negative row
+                # (tax withheld) becomes positive, and a positive row (refund /
+                # reversal of prior withholding, e.g. a rate true-up) becomes
+                # NEGATIVE so it nets against the original charge downstream
+                # instead of counting as additional tax paid.
+                event_params_kw["gross_amount_foreign_currency"] = raw_amount.copy_negate()
 
                 domain_event_instance = WithholdingTaxEvent(
                     asset_internal_id=asset_for_event.internal_asset_id, event_date=event_date_str,

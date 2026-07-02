@@ -172,3 +172,158 @@ class TestH2CnbProviderWiring:
 
         aggregator = get_tax_plugin("cz").get_tax_aggregator()
         assert aggregator._fx is None
+
+
+# ---------------------------------------------------------------------------
+# H3 — WHT refunds/reversals net against the original charge instead of
+# counting as additional tax paid
+# ---------------------------------------------------------------------------
+
+class TestH3ParserWhtSign:
+    def _wht_event_for_amount(self, amount: Decimal):
+        from src.classification.asset_classifier import AssetClassifier
+        from src.domain.events import WithholdingTaxEvent
+        from src.identification.asset_resolver import AssetResolver
+        from src.parsers.domain_event_factory import DomainEventFactory
+        from src.parsers.raw_models import RawCashTransactionRecord
+
+        factory = DomainEventFactory(AssetResolver(AssetClassifier()))
+        rct = RawCashTransactionRecord(
+            CurrencyPrimary="USD",
+            Description="MSFT(US5949181045) CASH DIVIDEND - US TAX",
+            SettleDate="2024-03-15",
+            Type="Withholding Tax",
+            Amount=amount,
+            Symbol="MSFT",
+            AssetClass="STK",
+            TransactionID="1001",
+            IssuerCountryCode="US",
+            **{"ReportDate": "2024-03-15"},
+        )
+        events = factory.create_events_from_cash_transactions([rct])
+        whts = [e for e in events if isinstance(e, WithholdingTaxEvent)]
+        assert len(whts) == 1
+        return whts[0]
+
+    def test_withheld_tax_stored_positive(self):
+        evt = self._wht_event_for_amount(Decimal("-10"))
+        assert evt.gross_amount_foreign_currency == Decimal("10")
+
+    def test_refund_stored_negative(self):
+        # A positive IBKR WHT row is a refund/reversal — it must NOT become
+        # additional tax paid.
+        evt = self._wht_event_for_amount(Decimal("10"))
+        assert evt.gross_amount_foreign_currency == Decimal("-10")
+
+
+class TestH3RefundLinking:
+    def _events(self, refund_amount=Decimal("-15"), refund_date="2024-05-20"):
+        from src.domain.events import CashFlowEvent, WithholdingTaxEvent
+        from src.domain.enums import FinancialEventType
+
+        asset_id = uuid.uuid4()
+        div = CashFlowEvent(
+            asset_internal_id=asset_id,
+            event_date="2024-03-15",
+            event_type=FinancialEventType.DIVIDEND_CASH,
+            gross_amount_foreign_currency=Decimal("100"),
+            local_currency="USD",
+            ibkr_transaction_id="1000",
+            ibkr_activity_description="MSFT(US5949181045) CASH DIVIDEND",
+        )
+        charge = WithholdingTaxEvent(
+            asset_internal_id=asset_id,
+            event_date="2024-03-15",
+            source_country_code="US",
+            gross_amount_foreign_currency=Decimal("15"),
+            local_currency="USD",
+            ibkr_transaction_id="1001",
+            ibkr_activity_description="MSFT(US5949181045) CASH DIVIDEND - US TAX",
+        )
+        refund = WithholdingTaxEvent(
+            asset_internal_id=asset_id,
+            event_date=refund_date,
+            source_country_code="US",
+            gross_amount_foreign_currency=refund_amount,
+            local_currency="USD",
+            ibkr_transaction_id="5000",
+            ibkr_activity_description="MSFT(US5949181045) CASH DIVIDEND - US TAX (REFUND)",
+        )
+        return div, charge, refund
+
+    def test_late_refund_links_to_same_income_as_prior_charge(self):
+        from src.processing.withholding_tax_linker import WithholdingTaxLinker
+
+        div, charge, refund = self._events()
+        links, unlinked = WithholdingTaxLinker().link_withholding_tax_events(
+            [div, charge, refund]
+        )
+        assert len(links) == 2
+        assert unlinked == []
+        assert refund.taxed_income_event_id == div.event_id
+        refund_links = [l for l in links if "refund_of_prior_wht" in l.match_criteria]
+        assert len(refund_links) == 1
+        assert refund_links[0].linked_income_event_id == div.event_id
+
+    def test_oversized_refund_stays_unlinked(self):
+        from src.processing.withholding_tax_linker import WithholdingTaxLinker
+
+        div, charge, refund = self._events(refund_amount=Decimal("-20"))
+        links, unlinked = WithholdingTaxLinker().link_withholding_tax_events(
+            [div, charge, refund]
+        )
+        assert len(links) == 1
+        assert unlinked == [refund]
+
+
+class TestH3FtcNetting:
+    def _div_with_wht(self, wht_czk_amounts) -> CzTaxItem:
+        from src.countries.cz.tax_items import CzWhtRecord
+
+        item = CzTaxItem(
+            item_type=CzTaxItemType.DIVIDEND,
+            section=CzTaxSection.CZ_8_DIVIDENDS,
+            source_event_id=uuid.uuid4(),
+            event_date="2024-03-15",
+            amount_czk=Decimal("2500"),
+            amount_eur=Decimal("100"),
+        )
+        for amount in wht_czk_amounts:
+            item.wht_records.append(CzWhtRecord(
+                wht_event_id=uuid.uuid4(),
+                event_date="2024-03-15",
+                original_amount=amount / Decimal("25"),
+                original_currency="USD",
+                amount_czk=amount,
+                source_country="US",
+            ))
+        return item
+
+    def test_full_refund_nets_to_zero_credit(self):
+        from src.countries.cz.foreign_tax_credit import evaluate_foreign_tax_credit
+
+        item = self._div_with_wht([Decimal("375"), Decimal("-375")])
+        summary = evaluate_foreign_tax_credit([item], CzTaxConfig(), has_fx=True)
+        rec = summary.records[0]
+        assert rec.foreign_tax_paid_czk == Decimal("0")
+        assert rec.actual_creditable_czk == Decimal("0")
+
+    def test_partial_refund_credits_net_amount(self):
+        from src.countries.cz.foreign_tax_credit import evaluate_foreign_tax_credit
+
+        item = self._div_with_wht([Decimal("750"), Decimal("-375")])
+        summary = evaluate_foreign_tax_credit([item], CzTaxConfig(), has_fx=True)
+        rec = summary.records[0]
+        assert rec.foreign_tax_paid_czk == Decimal("375")
+        # Cap 15 % × 2500 = 375 → the net amount is fully creditable.
+        assert rec.actual_creditable_czk == Decimal("375")
+
+    def test_negative_net_paid_never_yields_negative_credit(self):
+        from src.countries.cz.foreign_tax_credit import evaluate_foreign_tax_credit
+
+        item = self._div_with_wht([Decimal("-125")])
+        summary = evaluate_foreign_tax_credit([item], CzTaxConfig(), has_fx=True)
+        rec = summary.records[0]
+        assert rec.actual_creditable_czk == Decimal("0")
+        # Invariant paid = creditable + non_creditable still holds.
+        assert rec.foreign_tax_paid_czk == rec.actual_creditable_czk + rec.non_creditable_czk
