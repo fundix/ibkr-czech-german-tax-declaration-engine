@@ -99,11 +99,41 @@ def evaluate_annual_limit(
         total_proceeds += proceeds
         eligible.append(it)
 
+    # Disposals whose CZK proceeds are missing (failed FX conversion) make
+    # the annual total unknowable: their proceeds are absent from the sum,
+    # so granting the "≤ threshold" exemption to the remaining items could
+    # exempt a year that is actually over the limit.
+    fx_failed_disposals = [
+        it for it in items
+        if it.item_type in _ANNUAL_LIMIT_ELIGIBLE_TYPES
+        and not it.is_exempt
+        and it.proceeds_czk is None
+    ]
+
     if not eligible:
         return ZERO
 
     # --- Phase 2: apply the all-or-nothing rule ---
-    if total_proceeds <= threshold:
+    if total_proceeds <= threshold and fx_failed_disposals:
+        # Total is under the threshold but incomplete — do NOT exempt.
+        for it in eligible:
+            it.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+            note = it.tax_review_note or ""
+            it.tax_review_note = (
+                f"{note + '; ' if note else ''}"
+                f"Annual limit undeterminable: {len(fx_failed_disposals)} "
+                f"disposal(s) missing CZK proceeds (FX conversion failed) — "
+                f"known proceeds {total_proceeds} CZK ≤ {threshold} CZK, but "
+                "the true total may exceed the limit. Exemption NOT granted; "
+                "item kept taxable pending manual review."
+            )
+        logger.warning(
+            f"Annual limit NOT applied: known proceeds {total_proceeds} CZK ≤ "
+            f"{threshold} CZK but {len(fx_failed_disposals)} disposal(s) have "
+            "no CZK proceeds (FX failed) — total unknowable, eligible items "
+            "kept taxable and flagged for review."
+        )
+    elif total_proceeds <= threshold:
         # All eligible items are exempt
         for it in eligible:
             it.is_taxable = False

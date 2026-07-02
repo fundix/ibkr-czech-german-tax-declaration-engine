@@ -437,6 +437,105 @@ class TestL2DapRounding:
         assert result.final_czech_tax_after_credit == Decimal("18510")
 
 
+# ---------------------------------------------------------------------------
+# M3 — a disposal with failed FX conversion makes the 100k annual total
+# unknowable: the remaining items must NOT be exempted
+# ---------------------------------------------------------------------------
+
+def _limit_item(proceeds_czk, fx_failed=False) -> CzTaxItem:
+    item = CzTaxItem(
+        item_type=CzTaxItemType.SECURITY_DISPOSAL,
+        section=CzTaxSection.CZ_10_SECURITIES,
+        source_event_id=uuid.uuid4(),
+        event_date="2024-06-15",
+        acquisition_date="2024-01-10",
+        proceeds_czk=proceeds_czk,
+        gain_loss_czk=Decimal("1000") if proceeds_czk is not None else None,
+        is_taxable=True,
+        included_in_tax_base=True,
+    )
+    if fx_failed:
+        item.fx_conversion_failed = True
+        item.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+    return item
+
+
+class TestM3AnnualLimitFxFailed:
+    def test_fx_failed_disposal_blocks_exemption(self):
+        from src.countries.cz.annual_limit import evaluate_annual_limit
+
+        ok = _limit_item(Decimal("60000"))
+        failed = _limit_item(None, fx_failed=True)   # true proceeds unknown
+        evaluate_annual_limit([ok, failed], CzTaxConfig(), has_fx=True)
+
+        # 60 000 ≤ 100 000, but the total is incomplete → no exemption.
+        assert ok.is_exempt is False
+        assert ok.is_taxable is True
+        assert ok.tax_review_status == CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+        assert "FX conversion failed" in (ok.tax_review_note or "")
+
+    def test_without_fx_failures_exemption_still_granted(self):
+        from src.countries.cz.annual_limit import evaluate_annual_limit
+        from src.countries.cz.tax_items import CzExemptionReason
+
+        ok = _limit_item(Decimal("60000"))
+        evaluate_annual_limit([ok], CzTaxConfig(), has_fx=True)
+        assert ok.is_exempt is True
+        assert ok.exemption_reason == CzExemptionReason.ANNUAL_LIMIT_NOT_EXCEEDED
+
+
+# ---------------------------------------------------------------------------
+# M14 — a PENDING loss must not reduce the tax base (a pending GAIN stays in,
+# conservative in both directions)
+# ---------------------------------------------------------------------------
+
+class TestM14PendingLossExcluded:
+    def _pending_item(self, gain_loss_czk) -> CzTaxItem:
+        return CzTaxItem(
+            item_type=CzTaxItemType.SECURITY_DISPOSAL,
+            section=CzTaxSection.CZ_10_SECURITIES,
+            source_event_id=uuid.uuid4(),
+            event_date="2024-06-15",
+            gain_loss_czk=gain_loss_czk,
+            is_taxable=True,
+            included_in_tax_base=True,
+            tax_review_status=CzTaxReviewStatus.PENDING_MANUAL_REVIEW,
+        )
+
+    def _taxable_gain(self, gain_loss_czk) -> CzTaxItem:
+        return CzTaxItem(
+            item_type=CzTaxItemType.SECURITY_DISPOSAL,
+            section=CzTaxSection.CZ_10_SECURITIES,
+            source_event_id=uuid.uuid4(),
+            event_date="2024-06-15",
+            gain_loss_czk=gain_loss_czk,
+            is_taxable=True,
+            included_in_tax_base=True,
+        )
+
+    def test_pending_loss_does_not_reduce_base(self):
+        from src.countries.cz.loss_offsetting import compute_loss_offsetting
+
+        result = compute_loss_offsetting(
+            [self._taxable_gain(Decimal("100000")), self._pending_item(Decimal("-50000"))],
+            has_fx=True,
+        )
+        assert result.securities.taxable_losses == Decimal("0")
+        assert result.securities.net_taxable == Decimal("100000")
+        # The excluded amount stays visible for manual review.
+        assert result.securities.pending_total == Decimal("50000")
+
+    def test_pending_gain_stays_in_base(self):
+        from src.countries.cz.loss_offsetting import compute_loss_offsetting
+
+        result = compute_loss_offsetting(
+            [self._pending_item(Decimal("50000"))],
+            has_fx=True,
+        )
+        assert result.securities.taxable_gains == Decimal("50000")
+        assert result.securities.net_taxable == Decimal("50000")
+
+
 class TestM21EurModeGuards:
     def test_eur_mode_skips_threshold_and_rounding(self):
         # 2 000 000 EUR ≈ 50M CZK is far above any CZK threshold, but in EUR
