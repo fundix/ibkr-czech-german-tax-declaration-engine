@@ -98,6 +98,21 @@ def evaluate_time_test(
 
         # --- SECURITY_DISPOSAL: apply time test ---
 
+        if item.is_short_position:
+            # Short positions can never pass the time test: the security is
+            # not held between acquisition and transfer (the sale precedes
+            # the purchase), and acquisition_date is the short OPENING date.
+            item.is_taxable = True
+            item.is_exempt = False
+            item.exemption_reason = None
+            item.included_in_tax_base = True
+            item.tax_review_status = CzTaxReviewStatus.RESOLVED
+            item.tax_review_note = (
+                "Short position (sale precedes purchase) — §4/1/w time test "
+                "not applicable; item is taxable."
+            )
+            continue
+
         if not config.time_test_enabled:
             item.is_taxable = True
             item.is_exempt = False

@@ -370,6 +370,17 @@ def _build_unlinked_wht_items(
 
 # --- Disposal items --------------------------------------------------------
 
+# Realization types where the position was opened by a SALE and closed by a
+# purchase (or expiry): the cash flows are reversed relative to a long
+# position — proceeds were received at rgl.acquisition_date (opening) and the
+# cost was paid at rgl.realization_date (cover/close).
+_SHORT_REALIZATION_TYPES = {
+    RealizationType.SHORT_POSITION_COVER,
+    RealizationType.OPTION_TRADE_CLOSE_SHORT,
+    RealizationType.OPTION_EXPIRED_SHORT,
+}
+
+
 def _build_disposal_items(
     rgls: List[RealizedGainLoss],
     resolver: AssetResolver,
@@ -394,14 +405,27 @@ def _build_disposal_items(
         else:
             item_type = CzTaxItemType.SECURITY_DISPOSAL
 
-        # FX conversion (NSS 2 Afs 4/2019-35): the acquisition cost (výdaj) is
-        # converted at the ACQUISITION-date rate and the sale proceeds (příjem) at
-        # the DISPOSAL-date rate, so the currency movement between purchase and sale
-        # is reflected in the §10 gain. A single sale-date rate applied to BOTH legs
-        # (the prior practice the Supreme Administrative Court rejected) is NOT used.
-        cost_date = rgl.acquisition_date or rgl.realization_date
+        # FX conversion (NSS 2 Afs 4/2019-35): each cash flow is converted at
+        # the rate of the day it actually occurred, so the currency movement
+        # between the two legs is reflected in the §10 gain. A single
+        # sale-date rate applied to BOTH legs (the prior practice the Supreme
+        # Administrative Court rejected) is NOT used.
+        #
+        # For LONG positions the cost was paid at acquisition and the proceeds
+        # received at disposal. For SHORT positions (short cover, closing or
+        # expiry of a written option) the RGL date semantics are reversed:
+        # the proceeds were received when the position was OPENED
+        # (= rgl.acquisition_date) and the cost was paid at the COVER
+        # (= rgl.realization_date).
+        is_short = rgl.realization_type in _SHORT_REALIZATION_TYPES
+        if is_short:
+            cost_date = rgl.realization_date
+            proceeds_date = rgl.acquisition_date or rgl.realization_date
+        else:
+            cost_date = rgl.acquisition_date or rgl.realization_date
+            proceeds_date = rgl.realization_date
         cost_czk, fx_cost = _convert_eur(rgl.total_cost_basis_eur, cost_date, fx, fx_records)
-        proceeds_czk, fx_proceeds = _convert_eur(rgl.total_realization_value_eur, rgl.realization_date, fx, fx_records)
+        proceeds_czk, fx_proceeds = _convert_eur(rgl.total_realization_value_eur, proceeds_date, fx, fx_records)
 
         # §10 gain in CZK = proceeds(@sale) − cost(@acquisition).
         gl_czk: Optional[Decimal] = None
@@ -432,6 +456,7 @@ def _build_disposal_items(
             fx_cost_basis=fx_cost,
             fx_proceeds=fx_proceeds,
             quantity=rgl.quantity_realized,
+            is_short_position=is_short,
             **meta,
         )
         if fx is not None and (cost_czk is None or proceeds_czk is None):

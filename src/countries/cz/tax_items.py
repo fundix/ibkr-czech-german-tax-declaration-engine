@@ -147,6 +147,14 @@ class CzTaxItem:
     # --- Quantity (for disposals) ---
     quantity: Optional[Decimal] = None
 
+    # --- Short positions ---
+    # True when the item realizes a SHORT position (short cover, closing or
+    # expiry of a written option). The §4/1/w holding-period time test can
+    # never exempt such items: the security is not held between acquisition
+    # and transfer (the sale precedes the purchase), and acquisition_date on
+    # the item is the short OPENING date, not an ownership start.
+    is_short_position: bool = False
+
     # --- Taxability classification (set by time_test + annual_limit evaluators) ---
     is_taxable: bool = True
     is_exempt: bool = False
