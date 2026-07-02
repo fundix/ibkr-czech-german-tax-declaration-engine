@@ -217,6 +217,35 @@ def _build_income_items(
 
 # --- WHT linking -----------------------------------------------------------
 
+# Most common treaty WHT rate — used ONLY as a tie-break when several
+# same-day income items are plausible targets for one WHT event.
+_WHT_RATE_ANCHOR = Decimal("0.15")
+
+
+def _pick_wht_target(
+    wht: WithholdingTaxEvent,
+    candidates: List[CzTaxItem],
+) -> CzTaxItem:
+    """Choose the income item a WHT event most plausibly belongs to.
+
+    Prefer items without a WHT already attached, then the item whose
+    implied WHT/income ratio is closest to the most common treaty rate.
+    (A dict-overwrite previously sent every same-day WHT to one item,
+    where the per-item FTC cap swallowed part of the credit.)
+    """
+    wht_amount = wht.gross_amount_foreign_currency
+
+    def _key(it: CzTaxItem):
+        income = it.original_amount or it.amount_eur
+        if wht_amount is not None and income is not None and income > Decimal(0):
+            closeness = ((wht_amount.copy_abs() / income) - _WHT_RATE_ANCHOR).copy_abs()
+        else:
+            closeness = Decimal("999")
+        return (len(it.wht_records) > 0, closeness)
+
+    return min(candidates, key=_key)
+
+
 def _link_wht(
     income_items: List[CzTaxItem],
     wht_events: Dict[uuid.UUID, WithholdingTaxEvent],
@@ -239,11 +268,11 @@ def _link_wht(
     by_event_id: Dict[uuid.UUID, CzTaxItem] = {
         it.source_event_id: it for it in income_items
     }
-    by_asset_date: Dict[Tuple, CzTaxItem] = {}
+    by_asset_date: Dict[Tuple, List[CzTaxItem]] = {}
     by_asset: Dict[uuid.UUID, List[CzTaxItem]] = {}
     for it in income_items:
         if it.asset_id is not None:
-            by_asset_date[(it.asset_id, it.event_date)] = it
+            by_asset_date.setdefault((it.asset_id, it.event_date), []).append(it)
             by_asset.setdefault(it.asset_id, []).append(it)
 
     for wht_id, wht in wht_events.items():
@@ -253,9 +282,12 @@ def _link_wht(
         if wht.taxed_income_event_id and wht.taxed_income_event_id in by_event_id:
             target = by_event_id[wht.taxed_income_event_id]
 
-        # Strategy 2: same asset + same date
+        # Strategy 2: same asset + same date (multiple same-day income items
+        # are possible — pick the most plausible, don't overwrite)
         if target is None:
-            target = by_asset_date.get((wht.asset_internal_id, wht.event_date))
+            candidates = by_asset_date.get((wht.asset_internal_id, wht.event_date))
+            if candidates:
+                target = _pick_wht_target(wht, candidates)
 
         # Strategy 3: same asset, nearest date within ±3 days
         if target is None and wht.asset_internal_id in by_asset:

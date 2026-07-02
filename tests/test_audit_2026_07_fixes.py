@@ -330,6 +330,124 @@ class TestH3FtcNetting:
 
 
 # ---------------------------------------------------------------------------
+# M4 — two same-day dividends on one asset: each WHT goes to its own dividend
+# (an id-only tie-break sent both WHTs to one dividend, and the per-item FTC
+# cap then swallowed part of the credit)
+# ---------------------------------------------------------------------------
+
+class TestM4WhtDistribution:
+    def _make_income(self, asset_id, amount, tx_id):
+        from src.domain.enums import FinancialEventType
+        from src.domain.events import CashFlowEvent
+
+        return CashFlowEvent(
+            asset_internal_id=asset_id,
+            event_date="2024-03-15",
+            event_type=FinancialEventType.DIVIDEND_CASH,
+            gross_amount_foreign_currency=amount,
+            local_currency="USD",
+            ibkr_transaction_id=tx_id,
+            ibkr_activity_description="ABC(US000) CASH DIVIDEND",
+        )
+
+    def _make_wht(self, asset_id, amount, tx_id):
+        from src.domain.events import WithholdingTaxEvent
+
+        return WithholdingTaxEvent(
+            asset_internal_id=asset_id,
+            event_date="2024-03-15",
+            source_country_code="US",
+            gross_amount_foreign_currency=amount,
+            local_currency="USD",
+            ibkr_transaction_id=tx_id,
+            ibkr_activity_description="ABC(US000) CASH DIVIDEND - US TAX",
+        )
+
+    def test_core_linker_distributes_by_plausible_rate(self):
+        from src.processing.withholding_tax_linker import WithholdingTaxLinker
+
+        asset_id = uuid.uuid4()
+        # Non-sequential tx ids → all pairings score the same confidence (80).
+        div_a = self._make_income(asset_id, Decimal("100"), "5000000")
+        div_b = self._make_income(asset_id, Decimal("200"), "7000000")
+        wht_a = self._make_wht(asset_id, Decimal("15"), "6000000")
+        wht_b = self._make_wht(asset_id, Decimal("30"), "8000000")
+
+        links, unlinked = WithholdingTaxLinker().link_withholding_tax_events(
+            [div_a, div_b, wht_a, wht_b]
+        )
+        assert unlinked == []
+        by_wht = {l.withholding_tax_event_id: l.linked_income_event_id for l in links}
+        # 15/100 and 30/200 are both exactly 15 % — the plausible pairing.
+        assert by_wht[wht_a.event_id] == div_a.event_id
+        assert by_wht[wht_b.event_id] == div_b.event_id
+
+    def test_item_builder_fallback_does_not_overwrite(self):
+        asset_id = uuid.uuid4()
+
+        def _income_item(amount):
+            return CzTaxItem(
+                item_type=CzTaxItemType.DIVIDEND,
+                section=CzTaxSection.CZ_8_DIVIDENDS,
+                source_event_id=uuid.uuid4(),
+                event_date="2024-03-15",
+                asset_id=asset_id,
+                original_amount=amount,
+                original_currency="USD",
+                amount_eur=amount,
+            )
+
+        item_a = _income_item(Decimal("100"))
+        item_b = _income_item(Decimal("200"))
+        wht_a = self._make_wht(asset_id, Decimal("15"), "6000000")
+        wht_b = self._make_wht(asset_id, Decimal("30"), "8000000")
+
+        unlinked = item_builder._link_wht(
+            [item_a, item_b],
+            {wht_a.event_id: wht_a, wht_b.event_id: wht_b},
+            _NoneResolver(),
+            None,
+            [],
+        )
+        assert unlinked == set()
+        assert [r.original_amount for r in item_a.wht_records] == [Decimal("15")]
+        assert [r.original_amount for r in item_b.wht_records] == [Decimal("30")]
+
+
+# ---------------------------------------------------------------------------
+# M20 — a dividend reversal row keeps its negative sign even when the IBKR
+# Code column (Di/In/Po) is populated
+# ---------------------------------------------------------------------------
+
+class TestM20DividendReversalSign:
+    def test_reversal_with_code_di_stays_negative(self):
+        from src.classification.asset_classifier import AssetClassifier
+        from src.domain.enums import FinancialEventType
+        from src.identification.asset_resolver import AssetResolver
+        from src.parsers.domain_event_factory import DomainEventFactory
+        from src.parsers.raw_models import RawCashTransactionRecord
+
+        factory = DomainEventFactory(AssetResolver(AssetClassifier()))
+        rct = RawCashTransactionRecord(
+            CurrencyPrimary="USD",
+            Description="ABC(US000) CASH DIVIDEND - REVERSAL",
+            SettleDate="2024-03-20",
+            Type="Dividends",
+            Amount=Decimal("-100"),
+            Symbol="ABC",
+            AssetClass="STK",
+            TransactionID="2001",
+            Code="Di",
+            IssuerCountryCode="US",
+            **{"ReportDate": "2024-03-20"},
+        )
+        events = factory.create_events_from_cash_transactions([rct])
+        divs = [e for e in events if e.event_type == FinancialEventType.DIVIDEND_CASH]
+        assert len(divs) == 1
+        assert divs[0].gross_amount_foreign_currency == Decimal("-100")
+
+
+# ---------------------------------------------------------------------------
 # M1 — time test compares CALENDAR years, not a fixed 1095-day count
 # ---------------------------------------------------------------------------
 

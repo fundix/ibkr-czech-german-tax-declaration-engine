@@ -436,10 +436,12 @@ class DomainEventFactory:
             # (or its absolute if the convention for that field is always positive value + type).
             # For simplicity, and to align with existing TradeEvent creation, let's use absolute amount + type.
 
-            event_amount_for_storage = raw_amount # Keep sign for some events.
-            if event_type_str_upper in ["DIVIDEND", "INTEREST", "PAYMENT IN LIEU"] or \
-               code_upper in ["DI", "IN", "PO"]: # Types that are generally income
-                event_amount_for_storage = raw_amount.copy_abs()
+            # Keep the reported sign. Income rows (dividends, interest, PIL)
+            # are positive as reported by IBKR; a NEGATIVE row is a reversal/
+            # correction and must stay negative so it nets against the
+            # original income downstream — copy_abs() would double-count it
+            # as more income.
+            event_amount_for_storage = raw_amount
 
             event_params_kw = {
                 "gross_amount_foreign_currency": event_amount_for_storage,

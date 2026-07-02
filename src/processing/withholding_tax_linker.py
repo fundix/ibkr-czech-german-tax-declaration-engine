@@ -208,15 +208,24 @@ class WithholdingTaxLinker:
                 candidate_matches.append(match)
         
         # Return the match with highest confidence score.
-        # Tie-break deterministically on the candidate income event id so that
-        # equal-confidence candidates (e.g. two same-day, same-currency dividends
-        # on one asset) always resolve to the SAME income event regardless of the
-        # order events were parsed in — instead of "whichever appeared first".
+        # Equal-confidence candidates (e.g. two same-day, same-currency
+        # dividends on one asset) are tie-broken by how close the implied
+        # WHT/income ratio is to the most common treaty rate (15 %) — an
+        # id-only tie-break sent BOTH same-day WHTs to the same dividend,
+        # and the per-item FTC cap then swallowed part of the credit. The
+        # anchor is a tie-break only; it plays no role in validation. The
+        # event id remains as the final deterministic fallback.
         if candidate_matches:
-            return max(
-                candidate_matches,
-                key=lambda m: (m.confidence_score, str(m.candidate_event_id)),
-            )
+            anchor = Decimal("0.15")
+
+            def _match_key(m: LinkingCriteriaMatch):
+                if m.effective_tax_rate is None:
+                    rate_closeness = Decimal("-999")
+                else:
+                    rate_closeness = -(m.effective_tax_rate.copy_abs() - anchor).copy_abs()
+                return (m.confidence_score, rate_closeness, str(m.candidate_event_id))
+
+            return max(candidate_matches, key=_match_key)
 
         return None
     
