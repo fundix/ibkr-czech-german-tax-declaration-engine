@@ -180,22 +180,39 @@ def _build_income_items(
         elif ev.event_type == FinancialEventType.INTEREST_RECEIVED:
             item_type = CzTaxItemType.INTEREST
             section = CzTaxSection.CZ_8_INTEREST
+        elif ev.event_type == FinancialEventType.INTEREST_PAID_STUECKZINSEN:
+            # Accrued interest PAID on a bond purchase reduces §8 interest
+            # income. The event stores the cost as a positive number, so it
+            # enters as a NEGATIVE interest item (previously it silently
+            # vanished and §8 interest was overstated by the paid accrual).
+            item_type = CzTaxItemType.INTEREST
+            section = CzTaxSection.CZ_8_INTEREST
         else:
             continue
+
+        sign = (
+            Decimal("-1")
+            if ev.event_type == FinancialEventType.INTEREST_PAID_STUECKZINSEN
+            else Decimal("1")
+        )
 
         # Prefer original currency for direct conversion
         orig_amt = ev.gross_amount_foreign_currency
         orig_cur = ev.local_currency
         if orig_amt is not None and orig_cur is not None:
+            orig_amt = sign * orig_amt
             czk, fx_rec = _convert(orig_amt, orig_cur, ev.event_date, fx, fx_records)
         else:
-            orig_amt = ev.gross_amount_eur
+            orig_amt = sign * ev.gross_amount_eur if ev.gross_amount_eur is not None else None
             orig_cur = "EUR"
-            czk, fx_rec = _convert_eur(ev.gross_amount_eur, ev.event_date, fx, fx_records)
+            czk, fx_rec = _convert_eur(orig_amt, ev.event_date, fx, fx_records)
 
         asset = resolver.get_asset_by_id(ev.asset_internal_id)
         meta = _asset_meta(asset)
 
+        amount_eur = (
+            sign * ev.gross_amount_eur if ev.gross_amount_eur is not None else None
+        )
         item = CzTaxItem(
             item_type=item_type,
             section=section,
@@ -203,7 +220,7 @@ def _build_income_items(
             event_date=ev.event_date,
             original_amount=orig_amt,
             original_currency=orig_cur,
-            amount_eur=ev.gross_amount_eur,
+            amount_eur=amount_eur,
             amount_czk=czk,
             fx=fx_rec,
             **meta,

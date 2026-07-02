@@ -262,10 +262,13 @@ def run_main_calculations(
                         _create_excess_dividend_event(event, excess, asset_object)
                     )
 
-                    # Reduce original capital repayment event to only the cost basis portion
+                    # Reduce original capital repayment event to only the cost basis portion.
+                    # The portion is an EUR figure — relabel the currency so the
+                    # mutated event stays unit-consistent for any downstream reader.
                     cost_basis_portion = repayment_amount_eur - excess
                     event.gross_amount_eur = cost_basis_portion
                     event.gross_amount_foreign_currency = cost_basis_portion
+                    event.local_currency = "EUR"
                     logger.info(f"Reduced capital repayment event to cost basis portion: {cost_basis_portion} EUR")
             except Exception as e:
                 logger.error(f"Error processing capital repayment {event.event_id}: {e}", exc_info=True)

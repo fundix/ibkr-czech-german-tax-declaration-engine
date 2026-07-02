@@ -63,7 +63,7 @@ def get_event_sort_key(event: FinancialEvent, asset_resolver: AssetResolver) -> 
              logger.warning(f"OptionLifecycle Event {event.event_id} on {parsed_date} lacks ibkr_transaction_id. Using placeholder.")
         specific_secondary_elements = (
             event.ibkr_transaction_id or "", 
-            asset.asset_category, 
+            asset.asset_category.name, 
             event.event_id
         )
     elif isinstance(event, (TradeEvent, CurrencyConversionEvent)): # Trade and Currency Conversion share structure
@@ -73,7 +73,7 @@ def get_event_sort_key(event: FinancialEvent, asset_resolver: AssetResolver) -> 
              logger.warning(f"Trade/CurrencyConversion Event {event.event_id} on {parsed_date} lacks ibkr_transaction_id. Using placeholder.")
         specific_secondary_elements = (
             event.ibkr_transaction_id or "", 
-            asset.asset_category, 
+            asset.asset_category.name, 
             event.event_id
         )
     elif isinstance(event, (CashFlowEvent, WithholdingTaxEvent, FeeEvent)):
@@ -84,7 +84,7 @@ def get_event_sort_key(event: FinancialEvent, asset_resolver: AssetResolver) -> 
         gross_amount_for_sort = event.gross_amount_foreign_currency if event.gross_amount_foreign_currency is not None else Decimal('0')
         specific_secondary_elements = (
             event.ibkr_transaction_id or "", 
-            asset.asset_category,
+            asset.asset_category.name,
             gross_amount_for_sort,
             event.event_id
         )
@@ -93,7 +93,7 @@ def get_event_sort_key(event: FinancialEvent, asset_resolver: AssetResolver) -> 
         intra_day_order = _INTRA_DAY_SORT_ORDER_UNKNOWN
         specific_secondary_elements = ( # Minimal structure for unknown
             event.ibkr_transaction_id or "", 
-            asset.asset_category, 
+            asset.asset_category.name, 
             event.event_id
         )
     

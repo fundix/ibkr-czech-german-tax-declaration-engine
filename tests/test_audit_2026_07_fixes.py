@@ -498,6 +498,81 @@ class TestM1TimeTestCalendarYears:
 
 
 # ---------------------------------------------------------------------------
+# M16 — paid Stückzinsen (accrued interest on a bond purchase) reduce §8
+# interest income instead of silently vanishing
+# ---------------------------------------------------------------------------
+
+class TestM16Stueckzinsen:
+    def test_paid_accrued_interest_reduces_interest_income(self):
+        from src.domain.enums import FinancialEventType
+        from src.domain.events import CashFlowEvent
+
+        aid = uuid.uuid4()
+        received = CashFlowEvent(
+            asset_internal_id=aid,
+            event_date="2024-04-01",
+            event_type=FinancialEventType.INTEREST_RECEIVED,
+            gross_amount_foreign_currency=Decimal("500"),
+            local_currency="EUR",
+            gross_amount_eur=Decimal("500"),
+        )
+        paid = CashFlowEvent(
+            asset_internal_id=aid,
+            event_date="2024-03-01",
+            event_type=FinancialEventType.INTEREST_PAID_STUECKZINSEN,
+            gross_amount_foreign_currency=Decimal("400"),   # stored as positive cost
+            local_currency="EUR",
+            gross_amount_eur=Decimal("400"),
+        )
+        items, _ = item_builder.build_tax_items([], [received, paid], _NoneResolver(), None)
+        interest = [i for i in items if i.item_type == CzTaxItemType.INTEREST]
+        assert len(interest) == 2
+        amounts = sorted(i.amount_eur for i in interest)
+        # Net §8 interest is 500 − 400 = 100, not 500.
+        assert amounts == [Decimal("-400"), Decimal("500")]
+        assert all(i.section == CzTaxSection.CZ_8_INTEREST for i in interest)
+
+
+# ---------------------------------------------------------------------------
+# L7 — event sort keys must not compare raw AssetCategory enums (TypeError)
+# ---------------------------------------------------------------------------
+
+class TestL7SortKeyEnums:
+    def test_same_txid_different_categories_sortable(self):
+        from src.domain.enums import FinancialEventType
+        from src.domain.events import TradeEvent
+        from src.utils.sorting_utils import get_event_sort_key
+
+        cats = {}
+
+        class _CatResolver:
+            def get_asset_by_id(self, aid):
+                class _A:
+                    pass
+                a = _A()
+                a.asset_category = cats[aid]
+                return a
+
+        aid_stock, aid_bond = uuid.uuid4(), uuid.uuid4()
+        cats[aid_stock] = AssetCategory.STOCK
+        cats[aid_bond] = AssetCategory.BOND
+
+        def _trade(aid):
+            return TradeEvent(
+                asset_internal_id=aid, event_date="2024-05-01",
+                quantity=Decimal("10"), price_foreign_currency=Decimal("5"),
+                event_type=FinancialEventType.TRADE_BUY_LONG,
+                ibkr_transaction_id="100",   # identical → comparison reaches the category
+            )
+
+        resolver = _CatResolver()
+        events = [_trade(aid_stock), _trade(aid_bond)]
+        # Raw enums in the key tuple raised TypeError here.
+        ordered = sorted(events, key=lambda e: get_event_sort_key(e, resolver))
+        assert len(ordered) == 2
+
+
+# ---------------------------------------------------------------------------
 # M2 — 23 % threshold is a per-year statutory value (1 935 552 was 2023 only)
 # L2 — statutory DAP rounding (§16/2 ZDP base, §146/1 DŘ tax)
 # M21 — EUR mode must not compare a EUR base against the CZK threshold
