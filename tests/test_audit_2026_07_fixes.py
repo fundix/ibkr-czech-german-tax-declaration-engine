@@ -1086,6 +1086,137 @@ class TestM19PositionFlip:
 
 
 # ---------------------------------------------------------------------------
+# M9 — prior-year exercise/assignment premiums reach the SOY reconstruction
+# (historical premium pre-pass + lifecycle consumption in the replay)
+# ---------------------------------------------------------------------------
+
+class TestM9HistoricalPremiums:
+    def _setup(self):
+        from src.domain.assets import Option, Stock
+        from src.utils.currency_converter import CurrencyConverter
+        from tests.support.mock_providers import MockECBExchangeRateProvider
+
+        stock = Stock(ibkr_symbol="XYZ")
+        stock.ibkr_conid = "222"
+        option = Option(
+            option_type="P", strike_price=Decimal("50"),
+            expiry_date="2024-12-20", ibkr_symbol="XYZ 241220P50",
+        )
+        option.underlying_ibkr_conid = "222"
+        option.multiplier = Decimal("100")
+        option.underlying_asset_internal_id = stock.internal_asset_id
+
+        provider = MockECBExchangeRateProvider(foreign_to_eur_init_value=Decimal("1.0"))
+        converter = CurrencyConverter(rate_provider=provider)
+        return stock, option, _MapResolver([option, stock]), converter, provider
+
+    def _run_prepass(self, events_by_asset, resolver, converter, provider):
+        import src.config as global_config
+        from src.engine.calculation_engine import _apply_historical_option_premiums
+
+        _apply_historical_option_premiums(
+            historical_events_by_asset=events_by_asset,
+            asset_resolver=resolver,
+            currency_converter=converter,
+            exchange_rate_provider=provider,
+            internal_calculation_precision=global_config.INTERNAL_CALCULATION_PRECISION,
+            decimal_rounding_mode=global_config.DECIMAL_ROUNDING_MODE,
+        )
+
+    def test_prior_year_put_assignment_premium_reduces_stock_basis(self):
+        from src.domain.enums import FinancialEventType
+        from src.domain.events import OptionAssignmentEvent
+
+        stock, option, resolver, converter, provider = self._setup()
+
+        # 12/2024 (prior year): write a put for 300 EUR premium, get assigned,
+        # stock delivered at 5 000 EUR. Correct basis = 5 000 − 300 = 4 700.
+        short_open = _trade(
+            option.internal_asset_id, "2024-12-01", Decimal("-1"), Decimal("300"), "10",
+            event_type=FinancialEventType.TRADE_SELL_SHORT_OPEN,
+        )
+        assignment = OptionAssignmentEvent(
+            asset_internal_id=option.internal_asset_id,
+            event_date="2024-12-15",
+            quantity_contracts=Decimal("1"),
+        )
+        assignment.ibkr_transaction_id = "11"
+        stock_buy = _trade(stock.internal_asset_id, "2024-12-15", Decimal("100"), Decimal("5000"), "12")
+        stock_buy.related_option_event_id = assignment.event_id
+
+        self._run_prepass(
+            {
+                option.internal_asset_id: [short_open, assignment],
+                stock.internal_asset_id: [stock_buy],
+            },
+            resolver, converter, provider,
+        )
+        # Previously the reconstruction saw the raw 5 000 EUR.
+        assert stock_buy.net_proceeds_or_cost_basis_eur == Decimal("4700")
+
+    def test_soy_reconstruction_uses_adjusted_basis(self):
+        from src.domain.enums import FinancialEventType
+        from src.domain.events import OptionAssignmentEvent
+        from tests.test_audit_fixes import _make_ledger
+
+        stock, option, resolver, converter, provider = self._setup()
+        stock.soy_quantity = Decimal("100")
+        stock.soy_cost_basis_amount = Decimal("4700")
+        stock.soy_cost_basis_currency = "EUR"
+
+        short_open = _trade(
+            option.internal_asset_id, "2024-12-01", Decimal("-1"), Decimal("300"), "10",
+            event_type=FinancialEventType.TRADE_SELL_SHORT_OPEN,
+        )
+        assignment = OptionAssignmentEvent(
+            asset_internal_id=option.internal_asset_id,
+            event_date="2024-12-15",
+            quantity_contracts=Decimal("1"),
+        )
+        stock_buy = _trade(stock.internal_asset_id, "2024-12-15", Decimal("100"), Decimal("5000"), "12")
+        stock_buy.related_option_event_id = assignment.event_id
+
+        self._run_prepass(
+            {
+                option.internal_asset_id: [short_open, assignment],
+                stock.internal_asset_id: [stock_buy],
+            },
+            resolver, converter, provider,
+        )
+
+        ledger = _make_ledger()
+        ledger.initialize_lots_from_soy(stock, [stock_buy], tax_year=2025)
+        assert len(ledger.lots) == 1
+        # The SOY lot carries the premium-adjusted basis (was 5 000 before).
+        assert ledger.lots[0].total_cost_basis_eur == Decimal("4700")
+
+    def test_option_reconstruction_consumes_lifecycle_events(self):
+        from src.domain.enums import AssetCategory as _AC
+        from src.domain.events import OptionExerciseEvent
+        from tests.test_audit_fixes import _make_ledger
+
+        stock, option, resolver, converter, provider = self._setup()
+        option.soy_quantity = Decimal("1")
+        option.soy_cost_basis_amount = Decimal("300")
+        option.soy_cost_basis_currency = "EUR"
+
+        buy = _trade(option.internal_asset_id, "2024-11-01", Decimal("2"), Decimal("600"), "1")
+        exercise = OptionExerciseEvent(
+            asset_internal_id=option.internal_asset_id,
+            event_date="2024-12-15",
+            quantity_contracts=Decimal("1"),
+        )
+
+        ledger = _make_ledger(asset_category=_AC.OPTION, multiplier=Decimal("100"))
+        ledger.asset_internal_id = option.internal_asset_id
+        # Previously the exercise was invisible here: reconstructed qty 2 vs
+        # reported SOY 1. Now the lifecycle event consumes the exercised lot.
+        ledger.initialize_lots_from_soy(option, [buy, exercise], tax_year=2025)
+        assert sum(l.quantity for l in ledger.lots) == Decimal("1")
+        assert sum(l.total_cost_basis_eur for l in ledger.lots) == Decimal("300")
+
+
+# ---------------------------------------------------------------------------
 # L11 — a future-dated rate request is refused instead of silently served
 # L13 — standalone interest-style WHT lands in the interest section
 # ---------------------------------------------------------------------------

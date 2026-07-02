@@ -33,7 +33,8 @@ from .event_processors.corporate_action_processor import (
     GenericCorporateActionProcessor, ExpireDividendRightsProcessor
 )
 from .event_processors.option_processor import (
-    OptionExerciseProcessor, OptionAssignmentProcessor, OptionExpirationWorthlessProcessor
+    OptionExerciseProcessor, OptionAssignmentProcessor, OptionExpirationWorthlessProcessor,
+    _make_pending_adjustment,
 )
 
 
@@ -46,6 +47,138 @@ def _format_asset_info(asset_obj) -> str:
     desc = asset_obj.description or asset_obj.get_classification_key()
     symbol = asset_obj.ibkr_symbol or "N/A"
     return f"'{desc}' (Symbol: {symbol})"
+
+def _apply_historical_option_premiums(
+    historical_events_by_asset: DefaultDict[uuid.UUID, List[FinancialEvent]],
+    asset_resolver: AssetResolver,
+    currency_converter: CurrencyConverter,
+    exchange_rate_provider: ECBExchangeRateProvider,
+    internal_calculation_precision: int,
+    decimal_rounding_mode: str,
+) -> None:
+    """Fold prior-year exercise/assignment premiums into the linked
+    HISTORICAL delivery stock trades before SOY reconstruction.
+
+    Current-year processing applies the premium via TradeProcessor, but the
+    per-asset SOY reconstruction replayed the raw trade values — stock lots
+    from a prior-year assignment carried a basis WITHOUT the premium. This
+    pre-pass replays prior-year events chronologically ACROSS assets on
+    temporary option ledgers, computes each exercise/assignment premium and
+    adjusts the linked stock trade's net value in place (pro-rata across
+    partial delivery fills, mirroring TradeProcessor).
+    """
+    all_hist: List[FinancialEvent] = [
+        e for events in historical_events_by_asset.values() for e in events
+    ]
+    if not all_hist:
+        return
+    try:
+        all_hist.sort(key=lambda e: get_event_sort_key(e, asset_resolver))
+    except ValueError as e:
+        logger.warning(
+            f"Historical premium pre-pass: cannot sort events deterministically ({e}); "
+            "skipping premium adjustments."
+        )
+        return
+
+    option_ledgers: Dict[uuid.UUID, FifoLedger] = {}
+    pending: Dict[uuid.UUID, Dict[str, Any]] = {}
+
+    def _ledger_for(option_asset: Option) -> FifoLedger:
+        led = option_ledgers.get(option_asset.internal_asset_id)
+        if led is None:
+            led = FifoLedger(
+                asset_internal_id=option_asset.internal_asset_id,
+                asset_category=AssetCategory.OPTION,
+                asset_multiplier_from_asset=option_asset.multiplier,
+                currency_converter=currency_converter,
+                exchange_rate_provider=exchange_rate_provider,
+                internal_working_precision=internal_calculation_precision,
+                decimal_rounding_mode=decimal_rounding_mode,
+                tax_classifier=None,
+            )
+            option_ledgers[option_asset.internal_asset_id] = led
+        return led
+
+    for event in all_hist:
+        asset = asset_resolver.get_asset_by_id(event.asset_internal_id)
+        try:
+            if isinstance(asset, Option) and isinstance(event, TradeEvent):
+                led = _ledger_for(asset)
+                if event.event_type == FinancialEventType.TRADE_BUY_LONG:
+                    led.add_long_lot(event)
+                elif event.event_type == FinancialEventType.TRADE_SELL_LONG:
+                    led.consume_long_lots_for_sale(event, is_historical_simulation=True)
+                elif event.event_type == FinancialEventType.TRADE_SELL_SHORT_OPEN:
+                    led.add_short_lot(event)
+                elif event.event_type == FinancialEventType.TRADE_BUY_SHORT_COVER:
+                    led.consume_short_lots_for_cover(event, is_historical_simulation=True)
+
+            elif isinstance(event, (OptionExerciseEvent, OptionAssignmentEvent)) and isinstance(asset, Option):
+                led = _ledger_for(asset)
+                if isinstance(event, OptionExerciseEvent):
+                    details = led.consume_long_option_get_cost(event.quantity_contracts)
+                else:
+                    details = led.consume_short_option_get_proceeds(event.quantity_contracts)
+                premium = sum(
+                    (d.consumed_quantity * d.value_per_unit_eur for d in details),
+                    Decimal(0),
+                )
+                pending[event.event_id] = _make_pending_adjustment(premium, event, asset)
+
+            elif isinstance(event, OptionExpirationWorthlessEvent) and isinstance(asset, Option):
+                led = _ledger_for(asset)
+                qty = event.quantity_contracts
+                if sum(l.quantity for l in led.lots) >= qty:
+                    led.consume_long_option_get_cost(qty)
+                elif sum(l.quantity_shorted for l in led.short_lots) >= qty:
+                    led.consume_short_option_get_proceeds(qty)
+
+            elif (
+                isinstance(event, TradeEvent)
+                and event.related_option_event_id is not None
+                and event.related_option_event_id in pending
+                and event.net_proceeds_or_cost_basis_eur is not None
+            ):
+                adj = pending[event.related_option_event_id]
+                trade_qty = (event.quantity or Decimal(0)).copy_abs()
+                expected = adj["expected_stock_qty"]
+                remaining = adj["remaining_stock_qty"]
+                if expected <= Decimal(0) or trade_qty >= remaining:
+                    share = adj["premium_remaining_eur"]
+                else:
+                    share = adj["premium_eur"] * trade_qty / expected
+                # PRD 2.4 sign convention (mirrors TradeProcessor): call
+                # premiums INCREASE the stock leg's value (buy cost / sale
+                # proceeds), put premiums DECREASE it.
+                sign = Decimal(1) if adj["option_type"] == "C" else Decimal(-1)
+                event.net_proceeds_or_cost_basis_eur = (
+                    event.net_proceeds_or_cost_basis_eur + sign * share
+                )
+                adj["premium_remaining_eur"] -= share
+                adj["remaining_stock_qty"] = max(Decimal(0), remaining - trade_qty)
+                if adj["remaining_stock_qty"] <= Decimal(0):
+                    del pending[event.related_option_event_id]
+                logger.info(
+                    f"Historical premium adjustment: stock trade "
+                    f"{event.ibkr_transaction_id or event.event_id} ({event.event_date}) "
+                    f"adjusted by {sign * share} EUR from prior-year option event "
+                    f"{event.related_option_event_id}."
+                )
+        except (ValueError, UserWarning) as e:
+            logger.warning(
+                f"Historical premium pre-pass: skipping event {event.event_id} "
+                f"({type(event).__name__}): {e}"
+            )
+
+    for opt_event_id, adj in pending.items():
+        logger.warning(
+            f"Historical premium pre-pass: unconsumed premium "
+            f"{adj['premium_remaining_eur']} EUR for prior-year option event "
+            f"{opt_event_id} — the delivery trade was not found in historical "
+            "data; the SOY stock basis may miss this premium."
+        )
+
 
 def run_main_calculations(
     financial_events: List[FinancialEvent],
@@ -100,7 +233,7 @@ def run_main_calculations(
             continue
 
         if event_date_obj < tax_year_start_date_obj:
-            if isinstance(event, (TradeEvent, CorpActionSplitForward, CorpActionStockDividend)):
+            if isinstance(event, (TradeEvent, CorpActionSplitForward, CorpActionStockDividend, OptionLifecycleEvent)):
                 historical_events_by_asset[event.asset_internal_id].append(event)
         elif event_date_obj <= tax_year_end_date_obj:
             current_year_events.append(event)
@@ -113,6 +246,19 @@ def run_main_calculations(
 
     logger.info(f"Separated events: {sum(len(v) for v in historical_events_by_asset.values())} relevant historical events for SOY FIFO reconstruction, "
                 f"{len(current_year_events)} current tax year events.")
+
+    # M9: prior-year exercise/assignment premiums must be folded into the
+    # linked historical stock trades BEFORE the per-asset SOY reconstruction
+    # replays them (the reconstruction itself is per-asset and cannot see
+    # premiums crossing from option assets to stock assets).
+    _apply_historical_option_premiums(
+        historical_events_by_asset=historical_events_by_asset,
+        asset_resolver=asset_resolver,
+        currency_converter=currency_converter,
+        exchange_rate_provider=exchange_rate_provider,
+        internal_calculation_precision=internal_calculation_precision,
+        decimal_rounding_mode=decimal_rounding_mode,
+    )
 
     fifo_ledgers: Dict[uuid.UUID, FifoLedger] = {}
 

@@ -6,7 +6,11 @@ import uuid
 from datetime import date as date_obj, datetime
 
 from src.domain.assets import Asset, Option
-from src.domain.events import FinancialEvent, TradeEvent, CorpActionSplitForward, CorpActionMergerCash, CorpActionStockDividend
+from src.domain.events import (
+    FinancialEvent, TradeEvent, CorpActionSplitForward, CorpActionMergerCash,
+    CorpActionStockDividend, OptionAssignmentEvent, OptionExerciseEvent,
+    OptionExpirationWorthlessEvent, OptionLifecycleEvent,
+)
 from src.domain.results import RealizedGainLoss
 from src.domain.enums import AssetCategory, FinancialEventType, TaxReportingCategory, RealizationType, InvestmentFundType
 from src.utils.currency_converter import CurrencyConverter
@@ -183,6 +187,31 @@ class FifoLedger:
                     self.adjust_lots_for_split(hist_event)
                 elif isinstance(hist_event, CorpActionStockDividend):
                      self.add_lot_for_stock_dividend(hist_event)
+                elif isinstance(hist_event, OptionLifecycleEvent) and self.asset_category == AssetCategory.OPTION:
+                    # Exercised/assigned/expired contracts left the position
+                    # before SOY — without consuming them the reconstructed
+                    # option quantity is overstated and falls back needlessly.
+                    try:
+                        qty = hist_event.quantity_contracts
+                        if isinstance(hist_event, OptionExerciseEvent):
+                            self.consume_long_option_get_cost(qty)
+                        elif isinstance(hist_event, OptionAssignmentEvent):
+                            self.consume_short_option_get_proceeds(qty)
+                        elif isinstance(hist_event, OptionExpirationWorthlessEvent):
+                            if sum(l.quantity for l in self.lots) >= qty:
+                                self.consume_long_option_get_cost(qty)
+                            elif sum(l.quantity_shorted for l in self.short_lots) >= qty:
+                                self.consume_short_option_get_proceeds(qty)
+                            else:
+                                raise ValueError(
+                                    f"insufficient option lots for historical expiration of {qty} contracts"
+                                )
+                    except ValueError as ve:
+                        logger.warning(
+                            f"Historical simulation: option lifecycle event {hist_event.event_id} "
+                            f"could not be applied: {ve}"
+                        )
+                        historical_simulation_inconsistent = True
             except UserWarning as uw:
                 logger.warning(f"Historical simulation warning for asset {asset.internal_asset_id} processing event {hist_event.event_id}: {uw}")
                 historical_simulation_inconsistent = True
