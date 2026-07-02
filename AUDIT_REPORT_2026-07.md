@@ -3,6 +3,18 @@
 > Netrackovaný pracovní soubor. Průběžně aktualizován během auditu; na konci obsahuje finální report.
 > Stav repa: HEAD 7fccf79, čistý working tree.
 
+## Stav oprav (větev fix/audit-2026-07-batch1, 2026-07-02)
+
+**Opraveno (15 nálezů, 6 commitů, 508 testů zelených):**
+- Dávka 1: H1 (short FX swap + časový test shortů), H2 (zapojení ČNB provideru v CLI), H3 (WHT refundy netting + druhý průchod linkeru)
+- Dávka 2: M1 (časový test kalendářními roky), M2 (práh 23 % per rok), L2 (zaokrouhlení DAP), M21 (EUR-mode guard sazeb)
+- Dávka 3: M3 (FX-fail blokuje 100k exempci), M14 (PENDING ztráta mimo základ)
+- Dávka 4: M4 (rozdělení stejnodenních WHT), M20 (reversal dividendy drží znaménko), L1 (FTC strop max(0, gross))
+- Dávka 5: M16 (Stückzinsen snižují §8 úroky), L7 (řaditelné kategorie), L8 (měnová konzistence mutace)
+
+**Zbývá — mechanické (další dávky):** M5 (ztracené opční prémie), M7–M9 (SOY rekonstrukce), M10 (0DTE řazení), M11 (cash-in-lieu), M13 (FX-fail tiché vypuštění z FIFO), L5, L6, L9–L14.
+**Zbývá — čeká na rozhodnutí uživatele (⚖):** M6 (stock dividendy v §8), M12 (pro-rata repatriace), M15 (kurzové zisky konverzí), M22 (PRIVATE_SALE fallback), M17/M18 (oddělené datum prémie — návrh datového modelu), M19 (C;O flip — sémantika FIFO), L4 (40M cap 2025+).
+
 ## Stav auditu
 
 - [x] Krok 0: checkpoint soubor založen
