@@ -17,7 +17,12 @@
 - Dávka 7: M7 (SOY přebytek nechává NEJNOVĚJŠÍ loty + warning), M8 (příznak odhadnutého data nabytí z SOY fallbacku → PENDING v časovém testu), M13 (FX-fail vypuštěné obchody: ERROR per obchod + souhrnný ERROR za běh)
 - Dávka 8: L5 (záporné čisté proceeds drží znaménko), L6 (cash merger konzumuje jen quantity_disposed; short pozice → warning), L10 (prefetch plní cache), L12 (EUR-mode wht_paid jen EUR záznamy)
 
-**Zbývá — mechanické, vyžaduje návrhové rozhodnutí:** M9 (replay opčních prémií v historické SOY simulaci — zásah do historické větve engine), M11 (cash-in-lieu u frakcí — závisí, jak CIL přichází ve vstupních datech), L9 (skutečné datum kurzu ve fx_date_used — změna API provideru), L11 (validace data hlavičky ČNB listku), L13 (sekce standalone WHT), L14 (tolerance párování WHT — ladit proti reálným datům).
+**Opraveno v dávce 9 (další 3 nálezy, 523 testů zelených):** L9 (get_rate_info → skutečné datum kurzu ve fx_date_used + conversion_note při fallbacku), L11 (odmítnutí budoucího data — ČNB by tiše vrátila dnešní listek), L13 (standalone úroková WHT do sekce úroků; sekce úroků má vlastní wht_paid řádek).
+
+**Zbývá — mechanické, vyžaduje rozhodnutí/data od uživatele:**
+- **M9** (opční prémie v historické SOY simulaci): korektní oprava = přehrát historii globálně chronologicky přes procesory (dnes se přehrává per-asset bez lifecycle událostí, prémie kříží assety) — refactor historické větve engine, dopad i na DE. Alternativa: dokumentovat jako známou mezeru.
+- **M11** (cash-in-lieu u frakcí po reverse splitu): potřeba vidět, jak CIL vypadá v reálných IBKR datech uživatele (cash transaction řádek? corporate action detail?), aby šel navázat na disposal frakce.
+- **L14** (benevolentní tolerance WHT párování): zpřísnění hrozí false negatives — ladit proti reálným výpisům uživatele.
 **Zbývá — čeká na rozhodnutí uživatele (⚖):** M6 (stock dividendy v §8), M12 (pro-rata repatriace), M15 (kurzové zisky konverzí), M22 (PRIVATE_SALE fallback), M17/M18 (oddělené datum prémie — návrh datového modelu), M19 (C;O flip — sémantika FIFO), L4 (40M cap 2025+).
 
 ## Stav auditu
