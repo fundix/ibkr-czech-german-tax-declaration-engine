@@ -81,8 +81,16 @@ recommended execution order.
       ř. 321–330, samostatný list za každý stát dle odst. 8; ř. 330 →
       ř. 58 DAP). Pinned by `TestOfficialLineRefs`; re-verify when a new
       form vzor is published.
-- [ ] **CZ PDF report.** The PDF generator currently renders only the
-      German Anlage-KAP report; CZ has console/JSON/XLSX.
+- [x] **CZ PDF report.** DONE (2026-07-03):
+      `src/countries/cz/exporters/pdf_exporter.py` renders a filing-support
+      report (podklady pro DAP): form-mapping tables with verified official
+      line refs, §10 netting, §38f per-country table, item detail tables
+      (disposals / options / dividends+interest), pending-review list and
+      all limitation notes. Czech diacritics via vendored DejaVu Sans
+      (reportlab's built-in Helvetica lacks ě/ř/ů). CLI `--output-pdf`
+      (mode-suffixed in compare mode), web GUI exports `result.<mode>.pdf`
+      per run with a download link. Covered by `tests/test_cz_pdf_exporter.py`
+      (pymupdf text extraction).
 - [ ] **EPO XML export (longer term).** Direct import into the CZ tax
       portal would be the biggest usability win, but requires tracking the
       official form schema across years.

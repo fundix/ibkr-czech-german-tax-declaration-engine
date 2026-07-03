@@ -24,7 +24,7 @@ A Python tool that automates the tedious parts of preparing tax declarations fro
 | Core FIFO/enrichment | Stable — spec-driven FIFO/options/loss-offsetting test groups |
 | German plugin (DE) | Production — validated for tax year 2023 |
 | Czech plugin (CZ) | Beta — calculation audit 2026-07 complete; policy placeholders remain (see [known limitations](docs/cz-plugin.md#known-limitations)) |
-| Test suite | 542 tests passing |
+| Test suite | 694 tests passing |
 
 The CZ calculation path went through a full audit in 2026-07 (39 findings,
 35 fixed, 4 open pending real data / design decisions — see
@@ -38,7 +38,7 @@ Planned next steps live in [docs/future-work.md](docs/future-work.md).
 | Country | Plugin | Status | Output formats |
 |---------|--------|--------|----------------|
 | **Germany (DE)** | `countries/de/` | Production — validated for 2023 | Console, PDF |
-| **Czech Republic (CZ)** | `countries/cz/` | Beta — audited 2026-07; policy placeholders remain | Console, JSON, XLSX |
+| **Czech Republic (CZ)** | `countries/cz/` | Beta — audited 2026-07; policy placeholders remain | Console, JSON, XLSX, PDF |
 
 ### Germany (DE)
 - Anlage KAP, KAP-INV, SO form figures
@@ -56,7 +56,7 @@ Planned next steps live in [docs/future-work.md](docs/future-work.md).
 - Tax liability computation (15 % / 23 % rates)
 - DAP-oriented form mapping
 - Per-event CZK conversion via ČNB daily rates, or the GFŘ uniform rate ("jednotný kurz") — `--cz-fx-mode compare` computes both and reports the cheaper mode
-- Audit-friendly JSON and XLSX exports
+- Audit-friendly JSON and XLSX exports + a filing-support PDF report (`--output-pdf`)
 
 ### Core (country-agnostic)
 - IBKR Flex Query CSV parsing
@@ -96,7 +96,7 @@ are taken from the previous year's end automatically, and trades/corporate
 actions are merged across all uploaded years for FIFO history). Then run a
 tax year in daily/uniform/compare FX mode and browse the results: summary,
 per-item detail, verified DAP form line references, a manual-review
-checklist, and JSON/XLSX downloads. Everything runs locally — no data leaves
+checklist, and JSON/XLSX/PDF downloads. Everything runs locally — no data leaves
 your machine.
 
 ### Automatic statement download (IBKR Flex Web Service)
@@ -167,7 +167,7 @@ src/
 │       ├── tax_liability.py
 │       ├── form_mapping.py
 │       ├── fx_policy.py
-│       └── exporters/    # JSON + XLSX
+│       └── exporters/    # JSON + XLSX + PDF
 ├── main.py
 ├── cli.py
 ├── config.py

@@ -31,6 +31,7 @@ tests/
 ├── test_cz_tax_liability.py         # CZ tax liability + rate application
 ├── test_cz_form_mapping.py          # CZ DAP-oriented form mapping
 ├── test_cz_exporters.py             # JSON + XLSX export
+├── test_cz_pdf_exporter.py          # PDF export (pymupdf text extraction)
 ├── support/                         # Shared test infrastructure
 │   ├── base.py
 │   ├── helpers.py

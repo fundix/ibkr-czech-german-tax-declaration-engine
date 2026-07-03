@@ -140,6 +140,21 @@ export_cz_to_xlsx(tax_result, "report.xlsx")
 
 XLSX sheets: Summary, Securities, Options, Dividends, Interest, WithholdingTax, PendingReview, Metadata.
 
+### PDF
+```python
+from src.countries.cz.exporters import export_cz_to_pdf
+export_cz_to_pdf(tax_result, "report.pdf", taxpayer_name="…", account_id="…")
+```
+
+A filing-support report ("podklady pro DAP", Czech): DAP form-mapping
+tables with official line references, §10 netting overview, §38f
+per-country table, item detail tables, pending-review list and all
+limitation notes. CLI: `--output-pdf report.pdf` (in `--cz-fx-mode compare`
+both modes are written as `report.daily.pdf` / `report.uniform.pdf`).
+Czech diacritics are rendered with the vendored DejaVu Sans fonts
+(`exporters/fonts/`); if the font files are missing the exporter falls
+back to Helvetica and strips diacritics.
+
 ## Policy Assumptions
 
 These are explicitly documented in the code and output:
