@@ -69,6 +69,19 @@ class TestPages:
         assert r.status_code == 200
         assert "kontrol" in r.text.lower()
 
+    def test_portfolio_page_shows_open_position_with_lots(self, client):
+        r = client.get("/results/2024-test/portfolio")
+        assert r.status_code == 200
+        assert "DIVCO" in r.text
+        assert "odhad" in r.text        # SOY-fallback lot flagged
+        assert "ALPHA" not in r.text    # sold — not an open position
+
+    def test_dividends_page_aggregates_by_asset(self, client):
+        r = client.get("/results/2024-test/dividends")
+        assert r.status_code == 200
+        assert "DIVCO" in r.text
+        assert "§38f" in r.text
+
     def test_downloads(self, client):
         r = client.get("/results/2024-test/download/daily.json")
         assert r.status_code == 200

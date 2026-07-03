@@ -27,11 +27,15 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.countries.cz.aggregation_service import run_cz_aggregation, run_cz_compare
+from src.countries.cz.config import CzTaxConfig
+from src.countries.cz.time_test import time_test_deadline
 from src.pipeline_runner import run_core_processing_pipeline
+from src.utils.type_utils import parse_ibkr_date
 from src.webapp import settings
 from src.webapp.jobs import JobRunner, JobState, engine_file_lock
 from src.webapp.serializers import dump_json, load_json
@@ -279,6 +283,11 @@ class RunService:
                 "pending_review_count": exported.get("warnings", {}).get("pending_review_count", 0),
             }
 
+        dump_json(
+            self._build_portfolio(processing, tax_year),
+            run_dir / "portfolio.json",
+        )
+
         meta = {
             "run_id": run_id,
             "tax_year": tax_year,
@@ -293,6 +302,86 @@ class RunService:
         dump_json(meta, run_dir / "meta.json")
         logger.info(f"Run {run_id} finished in {meta['duration_s']} s.")
         return meta
+
+    # ------------------------------------------------------------------
+    # Portfolio (end-of-year open FIFO lots + time-test deadlines)
+    # ------------------------------------------------------------------
+
+    # §4/1/w applies to securities; derivatives never pass the time test.
+    _TIME_TEST_CATEGORIES = {"STOCK", "BOND", "INVESTMENT_FUND"}
+
+    def _build_portfolio(self, processing, tax_year: int) -> Dict[str, Any]:
+        """Distill open FIFO lots into a JSON-safe portfolio snapshot.
+
+        Valuation stays in the position's own currency (EOY mark price from
+        the positions file); cost basis is EUR (engine-internal base). CZK
+        conversion arrives with live quotes in a later phase.
+        """
+        cz_cfg = CzTaxConfig()
+        positions = []
+        for asset_id, ledger in (processing.fifo_ledgers_by_asset_id or {}).items():
+            lots = getattr(ledger, "lots", [])
+            short_lots = getattr(ledger, "short_lots", [])
+            if not lots and not short_lots:
+                continue
+            asset = processing.asset_resolver.get_asset_by_id(asset_id)
+            if asset is None:
+                continue
+            category = asset.asset_category.name if asset.asset_category else "UNKNOWN"
+            time_test_applies = category in self._TIME_TEST_CATEGORIES
+
+            lot_rows = []
+            for lot in lots:
+                estimated = str(lot.source_transaction_id).startswith("SOY_FALLBACK")
+                acq = parse_ibkr_date(lot.acquisition_date)
+                deadline = (
+                    time_test_deadline(acq, cz_cfg)
+                    if (time_test_applies and acq and not estimated) else None
+                )
+                lot_rows.append({
+                    "acquisition_date": lot.acquisition_date,
+                    "quantity": lot.quantity,
+                    "unit_cost_eur": lot.unit_cost_basis_eur,
+                    "total_cost_eur": lot.total_cost_basis_eur,
+                    "acquisition_estimated": estimated,
+                    # exempt when disposed of strictly AFTER the deadline
+                    "time_test_deadline": deadline,
+                })
+
+            short_rows = [{
+                "opening_date": s.opening_date,
+                "quantity": s.quantity_shorted,
+                "unit_proceeds_eur": s.unit_sale_proceeds_eur,
+                "total_proceeds_eur": s.total_sale_proceeds_eur,
+            } for s in short_lots]
+
+            positions.append({
+                "symbol": asset.ibkr_symbol,
+                "isin": getattr(asset, "ibkr_isin", None),
+                "description": asset.description,
+                "category": category,
+                "time_test_applicable": time_test_applies,
+                "quantity_long": sum((l.quantity for l in lots), Decimal(0)),
+                "quantity_short": sum((s.quantity_shorted for s in short_lots), Decimal(0)),
+                "total_cost_eur": sum((l.total_cost_basis_eur for l in lots), Decimal(0)),
+                "eoy_quantity": asset.eoy_quantity,
+                "eoy_market_price": asset.eoy_market_price,
+                "eoy_currency": asset.eoy_mark_price_currency,
+                "eoy_position_value": asset.eoy_position_value,
+                "lots": lot_rows,
+                "short_lots": short_rows,
+            })
+
+        positions.sort(key=lambda p: (p["symbol"] or ""))
+        return {
+            "tax_year": tax_year,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "positions": positions,
+        }
+
+    def load_portfolio(self, run_id: str) -> Optional[Dict[str, Any]]:
+        path = self.runs_dir / run_id / "portfolio.json"
+        return load_json(path) if path.is_file() else None
 
     # ------------------------------------------------------------------
     # Reading persisted runs

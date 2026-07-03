@@ -22,6 +22,22 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Portfolio view (Phase 3)** — the web GUI gains per-run *Portfolio* and
+  *Dividendy* pages:
+  - the calculation engine now returns its final FIFO ledgers
+    (`run_main_calculations` 5-tuple → `ProcessingOutput.fifo_ledgers_by_asset_id`),
+    so end-of-year open lots (with acquisition dates and EUR cost basis)
+    are available to consumers; every web run persists a `portfolio.json`
+    snapshot;
+  - per-lot **§4/1/w time-test countdown** ("osvobozeno od …", days
+    remaining, 90-day warning) driven by a new pure helper
+    `time_test_deadline()` extracted from `evaluate_time_test` (single
+    source of the 3-year / pre-2014 6-month / §33 clamping arithmetic);
+    SOY-fallback lots with synthetic acquisition dates are flagged
+    "odhad"; derivatives are marked not applicable;
+  - EOY valuation from the positions file's MarkPrice (own currency; CZK
+    conversion arrives with live quotes in a later phase);
+  - dividend overview per asset and per month with WHT totals.
 - **Local web GUI (Phase 1)** — `uv run --extra web python -m src.webapp`
   starts a localhost FastAPI + Jinja2 + HTMX app (Czech UI, optional `web`
   dependency group; no Node/build step, htmx vendored):

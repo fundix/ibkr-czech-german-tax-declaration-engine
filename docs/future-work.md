@@ -105,10 +105,12 @@ recommended execution order.
 - [x] **UI / web interface.** Phase 1 DONE (2026-07-03): local FastAPI +
       HTMX app (`uv run --extra web python -m src.webapp`) — upload per-year
       CSVs, run daily/uniform/compare, browse summary/items/DAP-lines/review
-      checklist, download exports. Roadmap continues: classification UI
-      (Phase 2), portfolio view with time-test countdown (Phase 3),
-      mini-taxomat with live prices + sale simulator (Phase 4), MCP server
-      for Claude (Phase 5).
+      checklist, download exports. Phase 3 DONE (2026-07-03): portfolio view
+      (EOY open FIFO lots via `ProcessingOutput.fifo_ledgers_by_asset_id`,
+      per-lot §4/1/w time-test countdown via pure `time_test_deadline()`,
+      EOY valuation, dividend overview per asset/month). Roadmap continues:
+      classification UI (Phase 2), mini-taxomat with live prices + sale
+      simulator (Phase 4), MCP server for Claude (Phase 5).
 
 ## 5. Documentation
 

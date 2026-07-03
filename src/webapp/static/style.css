@@ -128,3 +128,24 @@ pre.compare {
   background: #101827; color: #e7edf5; padding: 1rem; border-radius: 8px;
   font-size: .85rem; overflow-x: auto;
 }
+
+/* Portfolio: per-lot expander */
+.hidden { display: none; }
+.expander {
+  background: none; border: 1px solid var(--border); color: var(--muted);
+  border-radius: 6px; padding: 0 .45rem; font-size: .9rem; cursor: pointer;
+}
+.expander:hover { background: #eef2f7; filter: none; }
+.lots-row > td { background: #fafbfd; }
+table.lots { margin: .3rem 0 .6rem; }
+table.lots th, table.lots td { padding: .3rem .5rem; font-size: .85rem; }
+
+/* Dividends: monthly bars */
+.bars { display: flex; flex-direction: column; gap: .35rem; }
+.bar-row { display: flex; align-items: center; gap: .6rem; }
+.bar-label { width: 5rem; color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+.bar {
+  height: 1.1rem; background: var(--accent); border-radius: 4px;
+  min-width: 2px; transition: width .3s;
+}
+.bar-value { font-size: .85rem; color: var(--muted); white-space: nowrap; }

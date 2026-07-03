@@ -1,6 +1,8 @@
 # src/webapp/routes.py
 """HTTP routes of the local web GUI — thin wrappers over services.RunService."""
 import logging
+from datetime import date, timedelta
+from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Form, Request
@@ -147,6 +149,80 @@ def review(request: Request, run_id: str, mode: Optional[str] = None):
     return _tpl(request, "review.html", meta=meta, modes=modes, mode=active,
                 pending=pending, section_notes=section_notes,
                 warnings=result.get("warnings", {}), page="review")
+
+
+@router.get("/results/{run_id}/portfolio", response_class=HTMLResponse)
+def portfolio(request: Request, run_id: str, mode: Optional[str] = None):
+    svc = _svc(request)
+    ctx = _run_context(svc, run_id, mode)
+    if ctx is None:
+        return RedirectResponse("/", status_code=303)
+    meta, modes, active = ctx
+    pf = svc.load_portfolio(run_id)
+    today = date.today()
+    positions = (pf or {}).get("positions", [])
+    exempt_qty = Decimal(0)
+    soon_qty = Decimal(0)
+    for pos in positions:
+        for lot in pos.get("lots", []):
+            deadline = lot.get("time_test_deadline")
+            if deadline:
+                d = date.fromisoformat(deadline)
+                lot["days_remaining"] = (d - today).days + 1  # exempt AFTER deadline
+                lot["exempt_from"] = (d + timedelta(days=1)).isoformat()
+                if lot["days_remaining"] <= 0:
+                    lot["tt_status"] = "exempt"
+                    exempt_qty += Decimal(lot["quantity"])
+                elif lot["days_remaining"] <= 90:
+                    lot["tt_status"] = "soon"
+                    soon_qty += Decimal(lot["quantity"])
+                else:
+                    lot["tt_status"] = "running"
+            else:
+                lot["tt_status"] = "none"
+    return _tpl(request, "portfolio.html", meta=meta, modes=modes, mode=active,
+                portfolio=pf, positions=positions, today=today.isoformat(),
+                exempt_qty=exempt_qty, soon_qty=soon_qty, page="portfolio")
+
+
+@router.get("/results/{run_id}/dividends", response_class=HTMLResponse)
+def dividends(request: Request, run_id: str, mode: Optional[str] = None):
+    svc = _svc(request)
+    ctx = _run_context(svc, run_id, mode)
+    if ctx is None:
+        return RedirectResponse("/", status_code=303)
+    meta, modes, active = ctx
+    result = svc.load_result(run_id, active) or {}
+    div_items = [it for it in result.get("items", [])
+                 if it.get("item_type") in ("DIVIDEND", "FUND_DISTRIBUTION")]
+
+    by_asset: dict = {}
+    by_month: dict = {}
+    total_czk = Decimal(0)
+    total_wht = Decimal(0)
+    for it in div_items:
+        sym = it.get("asset_symbol") or "?"
+        a = by_asset.setdefault(sym, {
+            "symbol": sym, "description": it.get("asset_description"),
+            "country": it.get("source_country"), "count": 0,
+            "gross_czk": Decimal(0), "wht_czk": Decimal(0),
+        })
+        gross = Decimal(it.get("amount_czk") or 0)
+        wht = Decimal(it.get("wht_total_czk") or 0)
+        a["count"] += 1
+        a["gross_czk"] += gross
+        a["wht_czk"] += wht
+        total_czk += gross
+        total_wht += wht
+        month = (it.get("event_date") or "")[:7]
+        by_month[month] = by_month.get(month, Decimal(0)) + gross
+
+    assets = sorted(by_asset.values(), key=lambda a: a["gross_czk"], reverse=True)
+    months = sorted(by_month.items())
+    max_month = max((v for _, v in months), default=Decimal(0))
+    return _tpl(request, "dividends.html", meta=meta, modes=modes, mode=active,
+                assets=assets, months=months, max_month=max_month,
+                total_czk=total_czk, total_wht=total_wht, page="dividends")
 
 
 @router.get("/results/{run_id}/download/{mode}.{fmt}")

@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Dividendy {{ meta.run_id }}{% endblock %}
+{% block content %}
+{% include "partials/run_nav.html" %}
+
+<section class="cards-row">
+  <div class="card stat">
+    <h3>Hrubé dividendy {{ meta.tax_year }}</h3>
+    <p class="big">{{ total_czk | czk }} Kč</p>
+    <p class="muted">{{ assets | length }} titulů</p>
+  </div>
+  <div class="card stat">
+    <h3>Sražená zahraniční daň</h3>
+    <p class="big">{{ total_wht | czk }} Kč</p>
+    <p class="muted">podklad pro zápočet §38f</p>
+  </div>
+</section>
+
+{% if months %}
+<section class="card">
+  <h2>Po měsících</h2>
+  <div class="bars">
+    {% for month, value in months %}
+    <div class="bar-row">
+      <span class="bar-label">{{ month }}</span>
+      <div class="bar" style="width: {{ (value / max_month * 100) if max_month else 0 }}%"></div>
+      <span class="bar-value">{{ value | czk }} Kč</span>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Po titulech</h2>
+  {% if assets %}
+  <table>
+    <thead><tr><th>Symbol</th><th>Země</th><th class="num">Výplat</th><th class="num">Hrubé Kč</th><th class="num">WHT Kč</th></tr></thead>
+    <tbody>
+      {% for a in assets %}
+      <tr title="{{ a.description }}">
+        <td><strong>{{ a.symbol }}</strong></td>
+        <td>{{ a.country or "–" }}</td>
+        <td class="num">{{ a.count }}</td>
+        <td class="num">{{ a.gross_czk | czk }}</td>
+        <td class="num">{{ a.wht_czk | czk }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>V roce {{ meta.tax_year }} žádné dividendy.</p>
+  {% endif %}
+</section>
+{% endblock %}

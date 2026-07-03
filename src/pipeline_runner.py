@@ -33,13 +33,17 @@ class ProcessingOutput:
                  processed_income_events: List[FinancialEvent], # Assuming this is the third item from run_main_calculations
                  all_financial_events_enriched: List[FinancialEvent],
                  asset_resolver: AssetResolver,
-                 eoy_mismatch_error_count: int):
+                 eoy_mismatch_error_count: int,
+                 fifo_ledgers_by_asset_id: Optional[Dict[Any, Any]] = None):
         self.realized_gains_losses = realized_gains_losses
         self.vorabpauschale_items = vorabpauschale_items
         self.processed_income_events = processed_income_events
         self.all_financial_events_enriched = all_financial_events_enriched
         self.asset_resolver = asset_resolver
         self.eoy_mismatch_error_count = eoy_mismatch_error_count
+        # Final FIFO ledgers (open lots after all tax-year events) keyed by
+        # asset internal id — end-of-year open positions for portfolio views.
+        self.fifo_ledgers_by_asset_id = fifo_ledgers_by_asset_id or {}
         # For EOY state checks in tests, final assets can be fetched from asset_resolver
         self.final_assets_by_id: Dict[Any, Asset] = asset_resolver.assets_by_internal_id
 
@@ -124,7 +128,7 @@ def run_core_processing_pipeline(
         _tax_plugin = get_tax_plugin(country_code)
         _tax_classifier = _tax_plugin.get_tax_classifier()
         logger.info(f"Using tax classifier for country: {country_code}")
-        realized_gains_losses, vorabpauschale_items, processed_income_events, eoy_mismatch_error_count_calc = run_main_calculations(
+        realized_gains_losses, vorabpauschale_items, processed_income_events, eoy_mismatch_error_count_calc, fifo_ledgers = run_main_calculations(
             financial_events=financial_events_enriched,
             asset_resolver=orchestrator.asset_resolver, # Use the resolver from the orchestrator
             currency_converter=currency_converter,
@@ -149,5 +153,6 @@ def run_core_processing_pipeline(
         processed_income_events=processed_income_events,
         all_financial_events_enriched=financial_events_enriched,
         asset_resolver=orchestrator.asset_resolver,
-        eoy_mismatch_error_count=eoy_mismatch_error_count_calc
+        eoy_mismatch_error_count=eoy_mismatch_error_count_calc,
+        fifo_ledgers_by_asset_id=fifo_ledgers,
     )

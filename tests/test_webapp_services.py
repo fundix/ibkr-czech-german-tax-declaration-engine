@@ -131,6 +131,30 @@ class TestExecuteRun:
         assert service.list_runs()[0]["run_id"] == "2024-test"
         assert service.export_path("2024-test", "daily", "xlsx").is_file()
 
+    def test_portfolio_snapshot_from_open_fifo_lots(self, service):
+        _seed_synthetic_year(service)
+        service._execute_run(
+            "2024-pf", 2024, "daily",
+            ecb_provider=GoldenEcbProvider(),
+            cz_fx_provider=GoldenCnbProvider(),
+        )
+        pf = service.load_portfolio("2024-pf")
+        assert pf["tax_year"] == 2024
+
+        # Golden scenario: only DIVCO stays open at EOY (100 shares held all
+        # year, no trades — SOY fallback lot). ALPHA/OLDCO sold, put expired.
+        assert [p["symbol"] for p in pf["positions"]] == ["DIVCO"]
+        divco = pf["positions"][0]
+        assert Decimal(divco["quantity_long"]) == Decimal("100")
+        # Open lots must equal the reported EOY quantity (cross-validation)
+        assert Decimal(divco["quantity_long"]) == Decimal(divco["eoy_quantity"])
+        assert divco["time_test_applicable"] is True
+
+        [lot] = divco["lots"]
+        # SOY fallback: synthetic 31 Dec acquisition — no reliable deadline
+        assert lot["acquisition_estimated"] is True
+        assert lot["time_test_deadline"] is None
+
     def test_run_without_dataset_raises(self, service):
         with pytest.raises(ValueError, match="2031"):
             service._execute_run("2031-test", 2031, "daily")
