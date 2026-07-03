@@ -24,7 +24,7 @@ CASH_TRANSACTIONS_FILE_PATH = "data/cash_transactions.csv"
 POSITIONS_START_FILE_PATH = "data/positions_start_of_year.csv"
 POSITIONS_END_FILE_PATH = "data/positions_end_of_year.csv"
 CORPORATE_ACTIONS_FILE_PATH = "data/corporate_actions.csv" # e.g. corpact*.csv
-# Tax year being processed
+# Tax year being processed (override per-run with --tax-year)
 TAX_YEAR = 2024
 
 # TRADES_FILE_PATH = "data/trades_uebber.csv"

@@ -233,6 +233,25 @@ class CzechTaxAggregator:
             notes=([] if has_fx else ["no FX converter — amounts in EUR"]),
         )
 
+        interest_notes = [] if has_fx else ["no FX converter — amounts in EUR"]
+        # Margin/debit interest paid to the broker is excluded from §8 (no
+        # expense deduction for individuals) — surface the excluded total so
+        # the exclusion is auditable instead of silent.
+        debit_interest_count = 0
+        debit_interest_eur = ZERO
+        for ev in financial_events:
+            if getattr(ev, "event_type", None) == FinancialEventType.INTEREST_PAID_DEBIT:
+                debit_interest_count += 1
+                debit_interest_eur += ev.gross_amount_eur or ZERO
+        if debit_interest_count:
+            note = (
+                f"{debit_interest_count} margin/debit interest charge(s) totalling "
+                f"{debit_interest_eur.quantize(TWO)} EUR excluded — interest paid to "
+                "the broker is not deductible from §8 income."
+            )
+            interest_notes.append(note)
+            logger.info(note)
+
         sections["cz_8_interest"] = TaxResultSection(
             section_key="cz_8_interest",
             label=self.config.section_labels.get("cz_8_interest", "§8 – Úroky"),
@@ -241,7 +260,7 @@ class CzechTaxAggregator:
                 f"wht_paid_{c}": int_wht.quantize(TWO),
                 "item_count": Decimal(int_count),
             },
-            notes=([] if has_fx else ["no FX converter — amounts in EUR"]),
+            notes=interest_notes,
         )
 
         # --- Phase 5.5: Foreign tax credit (§38f ZDP) ---

@@ -26,10 +26,18 @@ recommended execution order.
       audit trail (L9), forward split preserving the acquisition date,
       cash merger (L6), `C;O` flip (M19), and negative net proceeds (L5).
       S3–S5 additionally pin the under-100k annual-limit exemption branch.
-- [ ] **Run on real statements + reconciliation.** Process the user's real
-      2024/2025 IBKR exports and reconcile against IBKR's own annual
-      statements. Also unblocks M11 and L14 (both waiting on real data —
-      see "Open audit findings" below).
+- [x] **Run on real statements + reconciliation.** DONE (2026-07-03): full
+      2025 run on real exports (trades 2024+2025 concatenated for SOY FIFO
+      reconstruction). EOY quantity validation passed; BYDDY 6:1 split,
+      `C;O` flip, 2 put assignments (premium→stock basis), 8 expirations,
+      WHT reversal netting and IE/SE/US FTC caps all verified against
+      hand-computed sums. FOUND & FIXED: "Broker Interest Paid" (margin
+      interest) entered §8 as negative income and diluted the FTC income
+      base — now a distinct `INTEREST_PAID_DEBIT` event type, excluded from
+      CZ §8/FTC with an audit note (`tests/test_cz_margin_interest.py`).
+      Remaining: reconcile against IBKR's official Annual Statement PDF.
+      M11 still blocked (no cash-in-lieu in the data); L14 partially
+      validated (all 11 WHT rows incl. a reversal linked correctly).
 
 ## 2. CZ tax-logic gaps (these change the resulting tax)
 
@@ -64,9 +72,15 @@ recommended execution order.
 
 ## 3. Filing-ready outputs
 
-- [ ] **Fill in `official_line_ref` in `cz/form_mapping.py`.** Verify the
-      stable internal line codes against the current DAP form: ř. 38 (§8),
-      Příloha 2 (§10), Příloha 3 + per-state "Seznam" for §38f.
+- [x] **Fill in `official_line_ref` in `cz/form_mapping.py`.** DONE
+      (2026-07-03): refs verified against the official 2025-period forms
+      from financnisprava.gov.cz — DAP 25 5405 vzor č. 30 (ř. 38 §8, ř. 40
+      §10, ř. 41–42, ř. 57, ř. 58), Příloha 2 vzor č. 21 (§10 tabulka:
+      druh D = cenné papíry, druh F = jiné ostatní příjmy /deriváty/, kód
+      "z" pro zahraniční zdroj; ř. 207–209), Příloha 3 vzor č. 21 (§38f
+      ř. 321–330, samostatný list za každý stát dle odst. 8; ř. 330 →
+      ř. 58 DAP). Pinned by `TestOfficialLineRefs`; re-verify when a new
+      form vzor is published.
 - [ ] **CZ PDF report.** The PDF generator currently renders only the
       German Anlage-KAP report; CZ has console/JSON/XLSX.
 - [ ] **EPO XML export (longer term).** Direct import into the CZ tax
@@ -75,9 +89,11 @@ recommended execution order.
 
 ## 4. Ergonomics
 
-- [ ] **`--tax-year` CLI flag** and runtime configuration outside
-      `src/config.py` (the file is gitignored and edited in place — fragile
-      across updates).
+- [x] **`--tax-year` CLI flag.** DONE (2026-07-03): `--tax-year N` overrides
+      `config.TAX_YEAR` everywhere (pipeline, loss offsetting, CZ
+      aggregation, default PDF filename). Together with the existing file
+      path flags, a full run no longer requires editing `src/config.py`
+      (only cosmetic PDF fields TAXPAYER_NAME/ACCOUNT_ID remain there).
 - [ ] **Direct IBKR Flex Query download** (token + query ID) instead of
       manual CSV export.
 - [ ] **PENDING / manual-review checklist as a first-class output** —

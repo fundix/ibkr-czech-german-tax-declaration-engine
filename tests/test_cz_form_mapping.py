@@ -411,3 +411,44 @@ class TestLineCodes:
         for code in expected_codes:
             line = mapping.get_line(code)
             assert line is not None, f"Missing line code: {code}"
+
+
+# =========================================================================
+# Test 9: official_line_ref verified against the 2025 forms
+# (DAP 25 5405 vzor č. 30, Příloha 2 vzor č. 21, Příloha 3 vzor č. 21)
+# =========================================================================
+
+class TestOfficialLineRefs:
+    def test_verified_official_refs(self):
+        mapping = build_form_mapping(
+            liability=_liability(div=Decimal("1000"), interest=Decimal("500")),
+            netting=_netting(sec_gains=Decimal("5000"), opt_gains=Decimal("2000")),
+            ftc_summary=_ftc(paid=Decimal("150"), creditable=Decimal("150"),
+                             foreign_income=Decimal("1000")),
+            taxable_dividends=Decimal("1000"),
+            taxable_interest=Decimal("500"),
+            currency="CZK",
+        )
+
+        expected_refs = {
+            "CZ_DAP_8_TOTAL": "ř. 38 DAP",
+            "CZ_DAP_10_TOTAL": "Příloha 2, ř. 209 → ř. 40 DAP",
+            "CZ_DAP_GROSS_TAX": "ř. 57 DAP",
+            "CZ_DAP_FINAL_TAX": "ř. 58 DAP (= ř. 330 Přílohy 3)",
+            "CZ_DAP_FTC_FINAL": "Příloha 3, ř. 328",
+            "CZ_DAP_FTC_NON_CREDITABLE": "Příloha 3, ř. 329",
+        }
+        for code, ref in expected_refs.items():
+            line = mapping.get_line(code)
+            assert line is not None, f"Missing line code: {code}"
+            assert line.official_line_ref == ref, (
+                f"{code}: expected {ref!r}, got {line.official_line_ref!r}"
+            )
+
+        # Securities vs options map to distinct income kinds in the
+        # Příloha 2 §10 table (druh D vs druh F) — losses of one druh
+        # cannot offset gains of another, so the split must stay visible.
+        sec_ref = mapping.get_line("CZ_DAP_10_SECURITIES").official_line_ref
+        opt_ref = mapping.get_line("CZ_DAP_10_OPTIONS").official_line_ref
+        assert "druh D" in sec_ref
+        assert "druh F" in opt_ref

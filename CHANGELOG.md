@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Margin/debit interest no longer reduces the CZ §8 base.** IBKR "Broker
+  Interest Paid" rows were mapped to `INTEREST_RECEIVED` with the negative
+  amount kept, entered §8 as negative interest income and diluted the §38f
+  foreign-income base (found on real 2025 statements: −1,272 CZK base,
+  FTC credit understated by 159 CZK). They now map to a new
+  `INTEREST_PAID_DEBIT` event type (stored positive = cost; refunds net),
+  are excluded from CZ §8 income and the FTC base, and the excluded total
+  is surfaced as an audit note on the interest section.
+
+### Added
+
+- **`--tax-year` CLI flag** overriding `config.TAX_YEAR` for the whole run
+  (pipeline, loss offsetting, CZ aggregation, default PDF filename), so a
+  run no longer requires editing `src/config.py`.
+- **Verified `official_line_ref` in `cz/form_mapping.py`** against the
+  official 2025-period forms (DAP 25 5405 vzor č. 30, Příloha 2 vzor č. 21,
+  Příloha 3 vzor č. 21): §8 → ř. 38; §10 → Příloha 2 tabulka (druh D
+  cenné papíry / druh F deriváty, kód "z"), ř. 209 → ř. 40; daň § 16 →
+  ř. 57; §38f → Příloha 3 ř. 321–330 (samostatný list za stát), ř. 330 →
+  ř. 58. The stale "SZDZ caps are placeholders" warning now reflects the
+  verified dividend caps.
+
 ## [4.0.0] - 2026-04-02
 
 ### Added
