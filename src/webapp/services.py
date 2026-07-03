@@ -39,6 +39,7 @@ from src.utils.type_utils import parse_ibkr_date
 from src.webapp import settings
 from src.webapp.ibkr_flex import (
     FLEX_SLOTS,
+    INTER_QUERY_DELAY_S,
     FlexConfig,
     fetch_statement,
     load_flex_config,
@@ -50,6 +51,20 @@ from src.webapp.serializers import dump_json, load_json
 logger = logging.getLogger(__name__)
 
 FX_MODES = ("daily", "uniform", "compare")
+
+
+def _effective_fx_mode(fx_mode: str, tax_year: int, current_year: int):
+    """Downgrade compare→daily for the RUNNING year.
+
+    The GFŘ publishes the jednotný kurz only AFTER the year ends, so the
+    uniform column of a running-year comparison cannot be computed (every
+    conversion fails → nonsense totals + a wall of pending items)."""
+    if fx_mode == "compare" and tax_year >= current_year:
+        return "daily", [
+            "Jednotný kurz pro běžící rok ještě neexistuje (GFŘ jej vyhlašuje "
+            "až po konci roku) — spočítán pouze denní kurz ČNB."
+        ]
+    return fx_mode, []
 
 
 @dataclass
@@ -252,6 +267,8 @@ class RunService:
         run_dir = self.runs_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
+        fx_mode, run_notes = _effective_fx_mode(fx_mode, tax_year, datetime.now().year)
+
         inputs = self._prepare_inputs(run_dir, tax_year)
 
         with engine_file_lock():
@@ -314,6 +331,7 @@ class RunService:
             "eoy_mismatch_error_count": processing.eoy_mismatch_error_count,
             "summary": summary,
             "compare_lines": compare_lines,
+            "notes": run_notes,
         }
         dump_json(meta, run_dir / "meta.json")
         logger.info(f"Run {run_id} finished in {meta['duration_s']} s.")
@@ -392,6 +410,7 @@ class RunService:
         tax_year: int,
         fx_mode: str,
         fetch=fetch_statement,
+        pause=time.sleep,
     ) -> Dict[str, Any]:
         cfg = self.get_flex_config()
         year_dir = self.data_dir / str(tax_year)
@@ -401,6 +420,10 @@ class RunService:
             query_id = cfg.queries.get(slot)
             if not query_id:
                 continue
+            if fetched:
+                # IBKR throttles per-token bursts (error 1018) — space out
+                # consecutive statement downloads.
+                pause(INTER_QUERY_DELAY_S)
             logger.info(f"IBKR Flex: downloading {slot} (query {query_id})…")
             content = fetch(cfg.token, query_id)
             target = year_dir / self._FLEX_SLOT_FILES[slot]

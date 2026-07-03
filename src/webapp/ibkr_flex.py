@@ -52,6 +52,12 @@ _ERROR_HINTS = {
 _POLL_ATTEMPTS = 12
 _POLL_DELAY_S = 5.0
 
+# IBKR throttles bursts of requests per token (error 1018): pause between
+# consecutive statement downloads and back off + retry when 1018 appears.
+INTER_QUERY_DELAY_S = 10.0
+_RATE_LIMIT_RETRIES = 5
+_RATE_LIMIT_DELAY_S = 30.0
+
 
 class FlexFetchError(RuntimeError):
     def __init__(self, message: str, code: Optional[str] = None):
@@ -120,27 +126,50 @@ def fetch_statement(
     http_get: Callable[[str, Dict[str, str]], bytes] = _http_get,
     sleep: Callable[[float], None] = time.sleep,
 ) -> bytes:
-    """Download one Flex Query statement (CSV bytes). Raises FlexFetchError."""
-    body = http_get(SEND_REQUEST_URL, {"t": token, "q": query_id, "v": "3"}).decode(
-        "utf-8", errors="replace"
-    )
-    err = _parse_error(body)
-    if err:
-        raise FlexFetchError(err[1], code=err[0])
-    ref = re.search(r"<ReferenceCode>(\w+)</ReferenceCode>", body)
-    if not ref:
-        raise FlexFetchError(f"Neočekávaná odpověď SendRequest: {body[:200]}")
+    """Download one Flex Query statement (CSV bytes). Raises FlexFetchError.
+
+    IBKR throttles per-token request bursts (error 1018) — both protocol
+    steps treat 1018 as RETRYABLE with a longer backoff instead of failing
+    the whole download.
+    """
+    ref = None
+    for attempt in range(_RATE_LIMIT_RETRIES):
+        body = http_get(SEND_REQUEST_URL, {"t": token, "q": query_id, "v": "3"}).decode(
+            "utf-8", errors="replace"
+        )
+        err = _parse_error(body)
+        if err and err[0] == "1018":  # rate limited — back off and retry
+            logger.info(
+                f"Flex query {query_id}: rate limited (attempt {attempt + 1}), "
+                f"waiting {_RATE_LIMIT_DELAY_S:.0f} s…"
+            )
+            sleep(_RATE_LIMIT_DELAY_S)
+            continue
+        if err:
+            raise FlexFetchError(err[1], code=err[0])
+        match = re.search(r"<ReferenceCode>(\w+)</ReferenceCode>", body)
+        if not match:
+            raise FlexFetchError(f"Neočekávaná odpověď SendRequest: {body[:200]}")
+        ref = match.group(1)
+        break
+    if ref is None:
+        raise FlexFetchError(
+            "IBKR stále hlásí příliš mnoho požadavků (1018) — zkuste to za pár minut.",
+            code="1018",
+        )
 
     for attempt in range(_POLL_ATTEMPTS):
-        statement = http_get(
-            GET_STATEMENT_URL, {"t": token, "q": ref.group(1), "v": "3"}
-        )
+        statement = http_get(GET_STATEMENT_URL, {"t": token, "q": ref, "v": "3"})
         head = statement[:500].decode("utf-8", errors="replace")
         if "<FlexStatementResponse" in head or "<ErrorCode>" in head:
             err = _parse_error(head)
-            if err and err[0] == "1019":  # still generating
-                logger.info(f"Flex statement {query_id} not ready (attempt {attempt + 1}).")
-                sleep(_POLL_DELAY_S)
+            if err and err[0] in ("1019", "1018"):  # generating / rate limited
+                delay = _RATE_LIMIT_DELAY_S if err[0] == "1018" else _POLL_DELAY_S
+                logger.info(
+                    f"Flex statement {query_id} not ready "
+                    f"(code {err[0]}, attempt {attempt + 1}), waiting {delay:.0f} s…"
+                )
+                sleep(delay)
                 continue
             raise FlexFetchError(
                 err[1] if err else f"Neočekávaná odpověď GetStatement: {head[:200]}"
