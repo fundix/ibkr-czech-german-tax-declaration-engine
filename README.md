@@ -132,6 +132,7 @@ src/
 |----------|----------|
 | [Architecture](docs/architecture.md) | Developers, contributors |
 | [CZ Plugin](docs/cz-plugin.md) | CZ users, CZ contributors |
+| [IBKR Flex Query Setup (CZ)](docs/ibkr-flex-query-setup.md) | Users exporting data from IBKR |
 | [Roadmap / Future Work](docs/future-work.md) | Contributors, planning |
 | [Audit Report 2026-07](AUDIT_REPORT_2026-07.md) | Reviewers, auditors |
 | [Development & Testing](docs/development.md) | All contributors |
