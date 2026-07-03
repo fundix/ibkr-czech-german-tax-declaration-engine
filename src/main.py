@@ -1,12 +1,12 @@
 # src/main.py
 import logging
 import sys
-from decimal import getcontext
 import os # For path operations if needed for PDF output
 
 # Configuration and CLI
 import src.config as config
 from src.cli import parse_arguments
+from src.utils.decimal_context import setup_decimal_context
 
 # Core pipeline runner
 from src.pipeline_runner import run_core_processing_pipeline, ProcessingOutput
@@ -30,20 +30,6 @@ from src.reporting.pdf_generator import PdfReportGenerator # Added PDF Generator
 # Configure logging (can be moved to a dedicated setup function if complex)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-
-def setup_decimal_context():
-    """Sets the global decimal precision and rounding mode."""
-    getcontext().prec = config.INTERNAL_CALCULATION_PRECISION # Renamed from INTERNAL_WORKING_PRECISION
-    valid_rounding_modes = ["ROUND_CEILING", "ROUND_DOWN", "ROUND_FLOOR", "ROUND_HALF_DOWN",
-                            "ROUND_HALF_EVEN", "ROUND_HALF_UP", "ROUND_UP", "ROUND_05UP"]
-    rounding_mode_to_set = config.DECIMAL_ROUNDING_MODE
-    if rounding_mode_to_set not in valid_rounding_modes:
-        logger.warning(f"Invalid DECIMAL_ROUNDING_MODE '{rounding_mode_to_set}' in config. Using ROUND_HALF_UP as fallback.")
-        rounding_mode_to_set = "ROUND_HALF_UP"
-
-    getcontext().rounding = rounding_mode_to_set
-    logger.info(f"Global decimal precision set to {getcontext().prec}, rounding mode to {getcontext().rounding}.")
 
 
 def main_application():

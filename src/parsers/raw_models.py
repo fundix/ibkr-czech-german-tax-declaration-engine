@@ -1,20 +1,26 @@
 # src/parsers/raw_models.py
-from typing import Optional, Any
+from typing import Optional, Any, Union, get_args, get_origin
 from decimal import Decimal
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from src.utils.type_utils import safe_decimal, parse_ibkr_date, parse_ibkr_datetime
 
 class RawBaseRecord(BaseModel):
-    # Common validator for all decimal fields that might appear in subclasses
-    @validator('*', pre=True, allow_reuse=True)
-    def parse_all_decimals(cls, v: Any, field: Any) -> Any:
-        # Check if the field is supposed to be Decimal based on annotations
-        # This is a bit general; specific validators per field are more robust
-        # but this can catch common cases if fields are named consistently for decimal parsing.
-        # For now, relying on specific validators in each model or direct safe_decimal calls.
-        if hasattr(field, 'type_') and field.type_ == Decimal : # Check annotation more safely
-             return safe_decimal(v, default=Decimal("0.0")) # Default to 0 if unparsable
+    model_config = ConfigDict(extra='ignore', populate_by_name=True)
+
+    # Wildcard coercion for every Decimal-typed field. This intentionally
+    # replicates the pydantic-v1 wildcard validator semantics: an empty CSV
+    # cell (or a None from a short csv row) on a Decimal field becomes
+    # Decimal("0.0"), NOT None — dropping this would silently change parsed
+    # amounts. Per-field validators in subclasses still run as well; both
+    # orders converge to the same value because safe_decimal passes Decimals
+    # through unchanged.
+    @field_validator('*', mode='before')
+    @classmethod
+    def parse_all_decimals(cls, v: Any, info: ValidationInfo) -> Any:
+        ann = cls.model_fields[info.field_name].annotation
+        if ann is Decimal or (get_origin(ann) is Union and Decimal in get_args(ann)):
+            return safe_decimal(v, default=Decimal("0.0"))  # Default to 0 if unparsable
         return v
 
 
@@ -73,20 +79,19 @@ class RawTradeRecord(RawBaseRecord):
     buy_sell: Optional[str] = Field(None, alias="Buy/Sell") # BUY, SELL - important for TradeEvent type
 
     # Validators for specific fields
-    @validator('multiplier', 'strike', 'quantity', 'trade_price', 'trade_money', 'proceeds', 'taxes',
-               'ib_commission', 'net_cash', 'close_price', 'cost_basis', 'fifo_pnl_realized',
-               'mtm_pnl', 'orig_trade_price', pre=True)
+    @field_validator('multiplier', 'strike', 'quantity', 'trade_price', 'trade_money', 'proceeds', 'taxes',
+                     'ib_commission', 'net_cash', 'close_price', 'cost_basis', 'fifo_pnl_realized',
+                     'mtm_pnl', 'orig_trade_price', mode='before')
+    @classmethod
     def parse_decimal_fields(cls, v: Any) -> Optional[Decimal]:
         return safe_decimal(v, default=None if v is None or str(v).strip() == "" else Decimal("0.0"))
 
-    @validator('trade_date', 'report_date', 'settle_date_target', 'expiry', 'orig_trade_date', pre=True)
+    @field_validator('trade_date', 'report_date', 'settle_date_target', 'expiry', 'orig_trade_date', mode='before')
+    @classmethod
     def validate_date_strings(cls, v: Any) -> Optional[str]:
         if v is None or str(v).strip() == "":
             return None
         return str(v).strip()
-
-    class Config:
-        extra = 'ignore' # Ignore extra columns not defined in the model
 
 class RawCashTransactionRecord(RawBaseRecord):
     client_account_id: Optional[str] = Field(None, alias="ClientAccountID")
@@ -119,18 +124,17 @@ class RawCashTransactionRecord(RawBaseRecord):
     code: Optional[str] = Field(None, alias="Code") # e.g. 'Po' for Payment in Lieu, 'Re' for Return of Capital
     issuer_country_code: Optional[str] = Field(None, alias="IssuerCountryCode") # Added as it's in sample CSV
 
-    @validator('fx_rate_to_base', 'amount', 'proceeds', pre=True)
+    @field_validator('fx_rate_to_base', 'amount', 'proceeds', mode='before')
+    @classmethod
     def parse_decimal_fields(cls, v: Any) -> Optional[Decimal]:
         return safe_decimal(v, default=None if v is None or str(v).strip() == "" else Decimal("0.0"))
 
-    @validator('report_date', 'date_time', 'settle_date', pre=True)
+    @field_validator('report_date', 'date_time', 'settle_date', mode='before')
+    @classmethod
     def validate_date_strings(cls, v: Any) -> Optional[str]:
         if v is None or str(v).strip() == "":
             return None
         return str(v).strip()
-
-    class Config:
-        extra = 'ignore'
 
 class RawPositionRecord(RawBaseRecord): # For Start and End of Year positions
     account_id: Optional[str] = Field(None, alias="AccountId")
@@ -165,19 +169,18 @@ class RawPositionRecord(RawBaseRecord): # For Start and End of Year positions
     fifo_pnl_unrealized: Optional[Decimal] = Field(None, alias="FifoPnlUnrealized")
     level_of_detail: Optional[str] = Field(None, alias="LevelOfDetail") # e.g. LOT
 
-    @validator('multiplier', 'strike', 'position', 'mark_price', 'position_value',
-               'cost_basis_price', 'cost_basis_money', 'percent_of_nav', 'fifo_pnl_unrealized', pre=True)
+    @field_validator('multiplier', 'strike', 'position', 'mark_price', 'position_value',
+                     'cost_basis_price', 'cost_basis_money', 'percent_of_nav', 'fifo_pnl_unrealized', mode='before')
+    @classmethod
     def parse_decimal_fields(cls, v: Any) -> Optional[Decimal]:
         return safe_decimal(v, default=None if v is None or str(v).strip() == "" else Decimal("0.0"))
 
-    @validator('report_date', 'expiry', pre=True)
+    @field_validator('report_date', 'expiry', mode='before')
+    @classmethod
     def validate_date_strings(cls, v: Any) -> Optional[str]:
         if v is None or str(v).strip() == "":
             return None
         return str(v).strip()
-
-    class Config:
-        extra = 'ignore'
 
 
 class RawCorporateActionRecord(RawBaseRecord): # From corpact*.csv
@@ -202,7 +205,7 @@ class RawCorporateActionRecord(RawBaseRecord): # From corpact*.csv
     action_id_ibkr: Optional[str] = Field(None, alias="ActionID")
     action_description: Optional[str] = Field(None, alias="ActionDescription")
     code: Optional[str] = Field(None, alias="Code")
-    type_ca: str = Field(None, alias="Type")
+    type_ca: Optional[str] = Field(None, alias="Type")
     quantity: Optional[Decimal] = Field(None, alias="Quantity")
     proceeds: Optional[Decimal] = Field(None, alias="Proceeds")
     value: Optional[Decimal] = Field(None, alias="Value")
@@ -212,15 +215,14 @@ class RawCorporateActionRecord(RawBaseRecord): # From corpact*.csv
     record_date: Optional[str] = Field(None, alias="RecordDate")
 
 
-    @validator('fx_rate_to_base', 'quantity', 'proceeds', 'value', pre=True)
+    @field_validator('fx_rate_to_base', 'quantity', 'proceeds', 'value', mode='before')
+    @classmethod
     def parse_decimal_fields(cls, v: Any) -> Optional[Decimal]:
         return safe_decimal(v, default=None if v is None or str(v).strip() == "" else Decimal("0.0"))
 
-    @validator('report_date', 'pay_date', 'ex_date', 'record_date', pre=True)
+    @field_validator('report_date', 'pay_date', 'ex_date', 'record_date', mode='before')
+    @classmethod
     def validate_date_strings(cls, v: Any) -> Optional[str]:
         if v is None or str(v).strip() == "":
             return None
         return str(v).strip()
-        
-    class Config:
-        extra = 'ignore'

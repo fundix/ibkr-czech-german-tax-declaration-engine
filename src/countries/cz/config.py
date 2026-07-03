@@ -12,9 +12,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Dict, Optional
 
 from src.countries.cz.fx_policy import CzFxPolicyConfig
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
 @dataclass
@@ -123,8 +126,8 @@ class CzTaxConfig:
         "LU": Decimal("0.10"),  # 51/2014 Sb.
     })
 
-    # --- CNB cache path ---
-    cnb_cache_file_path: str = "cache/cnb_exchange_rates.json"
+    # --- CNB cache path (anchored to project root — cwd-independent) ---
+    cnb_cache_file_path: str = str(_PROJECT_ROOT / "cache" / "cnb_exchange_rates.json")
 
     # --- Income bucket labels (for TaxResult sections) ---
     section_labels: Dict[str, str] = field(default_factory=lambda: {
