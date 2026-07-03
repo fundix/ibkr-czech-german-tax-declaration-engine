@@ -86,6 +86,54 @@ class TestInputAssembly:
         with pytest.raises(ValueError, match="hlavičku"):
             service._merge_years("trades", 2025, tmp_path / "merged.csv")
 
+    def test_merge_drops_duplicate_transaction_ids(self, service, tmp_path):
+        """Overlapping Flex query periods export the same trades into two
+        year files — identical rows (same TransactionID) must merge once."""
+        header = '"Symbol","TradeDate","TransactionID"'
+        (service.data_dir / "2024").mkdir(parents=True)
+        (service.data_dir / "2024" / "trades.csv").write_text(
+            f'{header}\n"AAA","2024-03-01","t1"\n"BBB","2024-11-05","t2"\n')
+        (service.data_dir / "2025").mkdir(parents=True)
+        (service.data_dir / "2025" / "trades.csv").write_text(
+            f'{header}\n"BBB","2024-11-05","t2"\n"CCC","2025-02-01","t3"\n')
+
+        notes = []
+        merged = service._merge_years("trades", 2025, tmp_path / "m.csv", notes=notes)
+        lines = merged.read_text().splitlines()
+        assert lines == [
+            header,
+            '"AAA","2024-03-01","t1"',
+            '"BBB","2024-11-05","t2"',
+            '"CCC","2025-02-01","t3"',
+        ]
+        assert len(notes) == 1 and "1 duplicitních" in notes[0]
+
+    def test_merge_keeps_distinct_rows_sharing_action_id(self, service, tmp_path):
+        """Multi-leg corporate actions may share an ActionID — only
+        byte-identical repeats are duplicates, distinct legs stay."""
+        header = '"Symbol","Type","ActionID"'
+        (service.data_dir / "2024").mkdir(parents=True)
+        (service.data_dir / "2024" / "corporate_actions.csv").write_text(
+            f'{header}\n"AAA","CASH","a1"\n"AAA","STOCK","a1"\n')
+        (service.data_dir / "2025").mkdir(parents=True)
+        (service.data_dir / "2025" / "corporate_actions.csv").write_text(
+            f'{header}\n"AAA","STOCK","a1"\n')
+
+        merged = service._merge_years("corp_actions", 2025, tmp_path / "m.csv")
+        lines = merged.read_text().splitlines()
+        assert lines == [header, '"AAA","CASH","a1"', '"AAA","STOCK","a1"']
+
+    def test_merge_without_id_column_keeps_everything(self, service, tmp_path):
+        for year in (2024, 2025):
+            d = service.data_dir / str(year)
+            d.mkdir(parents=True)
+            (d / "trades.csv").write_text('"A","B"\n"same","row"\n')
+        notes = []
+        merged = service._merge_years("trades", 2025, tmp_path / "m.csv", notes=notes)
+        lines = merged.read_text().splitlines()
+        assert lines == ['"A","B"', '"same","row"', '"same","row"']
+        assert notes == []
+
     def test_positions_start_falls_back_to_previous_year_end(self, service, tmp_path):
         _seed_synthetic_year(service, 2024)
         # Year 2025 without positions_start: reuse 2024's positions_end
