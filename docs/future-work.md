@@ -113,8 +113,12 @@ recommended execution order.
       overrides), unrealized P/L in CZK, allocation + value-history charts
       (vendored Chart.js, SQLite snapshots), sale simulator with FIFO
       preview, time-test split, annual-limit interplay and wait-hint.
-      Roadmap continues: classification UI (Phase 2), MCP server for
-      Claude (Phase 5).
+      Phase 5 DONE (2026-07-03): MCP server (`uv run --extra mcp python -m
+      src.mcp_server`, stdio) — nine tools over the shared service layer;
+      registered via `claude mcp add ibkr-tax -- uv --directory <repo> run
+      --extra mcp python -m src.mcp_server`. Remaining from the roadmap:
+      classification UI (Phase 2) — becomes relevant with the first
+      non-stock asset (fund/bond).
 
 ## 5. Documentation
 

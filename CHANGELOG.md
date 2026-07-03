@@ -22,6 +22,19 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **MCP server for Claude (Phase 5)** — `uv run --extra mcp python -m
+  src.mcp_server` (stdio, official `mcp` SDK / FastMCP; `mcp` optional
+  dependency group). Nine tools wrap the same `RunService` layer the web
+  GUI uses (`list_datasets`, `run_pipeline`, `get_tax_summary`,
+  `get_form_mapping`, `get_pending_review_items`, `get_positions`,
+  `get_time_test_status`, `get_dividends`, `simulate_sale`) — Claude and
+  the browser can never disagree. Registration one-liner for Claude Code
+  and a Claude Desktop snippet in the README. Shared aggregation helpers
+  (`dividend_summary`, `time_test_overview`, `latest_run_id`,
+  `run_pipeline_sync`) extracted into services; the dividends route now
+  uses the same summary. Tested through the SDK's in-memory client
+  (tool registry, golden figures, JSON-safety, error paths) plus a real
+  stdio handshake.
 - **Mini-taxomat (Phase 4)** — live valuation, sale simulator, charts:
   - **live quotes** without new dependencies (Yahoo chart endpoint via
     `requests`; no yfinance/pandas): 15-min TTL cache incl. failures,
