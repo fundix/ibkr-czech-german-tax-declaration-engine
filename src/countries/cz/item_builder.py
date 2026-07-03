@@ -202,6 +202,13 @@ def _build_income_items(
             # vanished and §8 interest was overstated by the paid accrual).
             item_type = CzTaxItemType.INTEREST
             section = CzTaxSection.CZ_8_INTEREST
+        elif ev.event_type == FinancialEventType.INTEREST_PAID_DEBIT:
+            # Margin/debit interest paid to the broker is NOT deductible from
+            # §8 capital income for individuals (§8 allows no expense
+            # deduction here), so it must not become a negative §8 item or
+            # enter the FTC foreign-income base. The aggregator surfaces the
+            # excluded total as a note on the interest section.
+            continue
         else:
             continue
 

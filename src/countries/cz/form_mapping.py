@@ -11,8 +11,18 @@ pre-computed data from ``CzTaxLiabilitySummary``, ``CzLossOffsettingResult``,
 ``CzForeignTaxCreditSummary``, and aggregated §8 totals.
 
 Internal line codes (e.g. ``CZ_DAP_8_DIVIDENDS``) are stable identifiers
-suitable for programmatic use.  ``official_line_ref`` is intentionally
-``None`` until verified against the official form layout.
+suitable for programmatic use.  ``official_line_ref`` values were verified
+on 2026-07-03 against the official forms for tax period 2025:
+
+- DAP 25 5405 MFin 5405 vzor č. 30 (2. oddíl ř. 36–45, 4. oddíl ř. 57–61)
+- Příloha 2 – 25 5405/P2 vzor č. 21 (§10: tabulka druhů příjmů, ř. 207–209;
+  druh D = prodej cenných papírů, druh F = jiné ostatní příjmy, kód „z" ve
+  sloupci 5 pro příjmy ze zdrojů v zahraničí)
+- Příloha 3 – 25 5405/P3 vzor č. 21 (§38f: ř. 321–330; metoda prostého
+  zápočtu se podle §38f odst. 8 provádí za každý stát na samostatném listu)
+
+The line numbering has been stable for years, but re-verify when a new
+form vzor is published (source: financnisprava.gov.cz/assets/tiskopisy/).
 
 Usage::
 
@@ -155,17 +165,20 @@ def build_form_mapping(
         code="CZ_DAP_8_DIVIDENDS",
         label="Dividendy ze zahraničí (hrubý příjem)",
         value=q(taxable_dividends),
+        official_line_ref="ř. 38 DAP (součást úhrnu §8)",
     ))
     sec8.lines.append(CzFormLine(
         code="CZ_DAP_8_INTEREST",
         label="Úroky ze zahraničí (hrubý příjem)",
         value=q(taxable_interest),
+        official_line_ref="ř. 38 DAP (součást úhrnu §8)",
     ))
     sec8_total = (liability.taxable_dividends + liability.taxable_interest) if liability else (taxable_dividends + taxable_interest)
     sec8.lines.append(CzFormLine(
         code="CZ_DAP_8_TOTAL",
         label="Dílčí základ §8 celkem",
         value=q(sec8_total),
+        official_line_ref="ř. 38 DAP",
     ))
 
     if ftc_summary and ftc_summary.foreign_income_total_czk > ZERO:
@@ -173,6 +186,7 @@ def build_form_mapping(
             code="CZ_DAP_8_FOREIGN_INCOME",
             label="Zahraniční příjmy pro zápočet daně",
             value=q(ftc_summary.foreign_income_total_czk),
+            official_line_ref="Příloha 3, ř. 321 (za každý stát samostatný list)",
             note="Podklad pro §38f",
         ))
 
@@ -196,18 +210,21 @@ def build_form_mapping(
         code="CZ_DAP_10_SECURITIES",
         label="Cenné papíry – čistý zdanitelný výsledek",
         value=q(sec_val),
+        official_line_ref="Příloha 2, tabulka §10 – druh D (prodej cenných papírů), kód „z“",
         note="Po kompenzaci zisků a ztrát; záporný výsledek = 0 pro DZD" if sec_net_raw < ZERO else None,
     ))
     sec10.lines.append(CzFormLine(
         code="CZ_DAP_10_OPTIONS",
         label="Opce a deriváty – čistý zdanitelný výsledek",
         value=q(opt_val),
+        official_line_ref="Příloha 2, tabulka §10 – druh F (jiné ostatní příjmy), kód „z“",
         note="Po kompenzaci zisků a ztrát; záporný výsledek = 0 pro DZD" if opt_net_raw < ZERO else None,
     ))
     sec10.lines.append(CzFormLine(
         code="CZ_DAP_10_TOTAL",
         label="Dílčí základ §10 celkem",
         value=q(sec_val + opt_val),
+        official_line_ref="Příloha 2, ř. 209 → ř. 40 DAP",
     ))
 
     # Supporting / audit info
@@ -241,27 +258,32 @@ def build_form_mapping(
             code="CZ_DAP_TAXABLE_BASE",
             label="Základ daně celkem",
             value=q(liability.combined_taxable_base),
+            official_line_ref="ř. 41–42 DAP (jen příjmy z IBKR, bez §6/§7/§9)",
         ))
         sec_liability.lines.append(CzFormLine(
             code="CZ_DAP_TAX_BASE_RATE",
             label=f"Daň ze základu do {liability.threshold} {currency} ({liability.base_rate*100:.0f} %)",
             value=q(liability.tax_at_base_rate),
+            official_line_ref="ř. 57 DAP (součást výpočtu daně §16)",
         ))
         if liability.base_for_elevated_rate > ZERO:
             sec_liability.lines.append(CzFormLine(
                 code="CZ_DAP_TAX_ELEVATED_RATE",
                 label=f"Daň ze základu nad {liability.threshold} {currency} ({liability.elevated_rate*100:.0f} %)",
                 value=q(liability.tax_at_elevated_rate),
+                official_line_ref="ř. 57 DAP (součást výpočtu daně §16)",
             ))
         sec_liability.lines.append(CzFormLine(
             code="CZ_DAP_GROSS_TAX",
             label="Daň celkem (před zápočtem)",
             value=q(liability.gross_czech_tax),
+            official_line_ref="ř. 57 DAP",
         ))
         sec_liability.lines.append(CzFormLine(
             code="CZ_DAP_FINAL_TAX",
             label="Daň po zápočtu zahraniční daně",
             value=q(liability.final_czech_tax_after_credit),
+            official_line_ref="ř. 58 DAP (= ř. 330 Přílohy 3)",
         ))
 
         sec_liability.notes.extend(liability.limitation_notes)
@@ -281,11 +303,13 @@ def build_form_mapping(
             code="CZ_DAP_FTC_PAID",
             label="Zahraniční daň zaplacená celkem",
             value=q(ftc_summary.foreign_tax_paid_total_czk),
+            note="Skutečně sražená daň; nad rámec smluvní sazby nelze uvést na ř. 323",
         ))
         sec_ftc.lines.append(CzFormLine(
             code="CZ_DAP_FTC_PRELIMINARY",
             label="Předběžný zápočet (per-item cap)",
             value=q(ftc_summary.foreign_tax_creditable_total_czk),
+            official_line_ref="Příloha 3, ř. 323 (úhrn za všechny státy; daň max. dle SZDZ)",
         ))
 
     if liability:
@@ -293,17 +317,20 @@ def build_form_mapping(
             code="CZ_DAP_FTC_CZ_TAX_ON_FOREIGN",
             label="Česká daň připadající na zahraniční příjmy",
             value=q(liability.czech_tax_on_foreign_income),
+            official_line_ref="Příloha 3, ř. 325 (úhrn za všechny státy)",
             note="Proporční metoda (§38f odst. 1 ZDP)",
         ))
         sec_ftc.lines.append(CzFormLine(
             code="CZ_DAP_FTC_FINAL",
             label="Konečný zápočet zahraniční daně",
             value=q(liability.final_creditable_ftc),
+            official_line_ref="Příloha 3, ř. 328",
         ))
         sec_ftc.lines.append(CzFormLine(
             code="CZ_DAP_FTC_NON_CREDITABLE",
             label="Nezapočitatelná zahraniční daň",
             value=q(liability.non_creditable_ftc),
+            official_line_ref="Příloha 3, ř. 329",
         ))
 
     # Per-country breakdown
@@ -313,6 +340,7 @@ def build_form_mapping(
                 code=f"CZ_DAP_FTC_COUNTRY_{code}",
                 label=f"Země {code} – zaplaceno / započteno",
                 value=q(agg.creditable_czk),
+                official_line_ref=f"Příloha 3 – samostatný list za stát {code} (§38f odst. 8)",
                 note=f"Zaplaceno {q(agg.foreign_tax_paid_czk)}, nezapočitatelné {q(agg.non_creditable_czk)}",
             ))
 
@@ -337,8 +365,12 @@ def build_form_mapping(
     sec_warnings.notes.extend([
         "Threshold pro zvýšenou sazbu se vztahuje na CELKOVÝ příjem poplatníka, "
         "nikoli jen na příjmy z IBKR. Pokud máte další příjmy, práh upravte.",
-        "Sazby SZDZ (country_credit_caps) jsou placeholder hodnoty — "
-        "ověřte proti konkrétním smlouvám o zamezení dvojího zdanění.",
+        "Sazby SZDZ (country_credit_caps) jsou ověřené pro portfoliové "
+        "dividendy (12 států); na úrokové WHT se mohou vztahovat jiné "
+        "smluvní sazby — objeví-li se, ověřte ručně.",
+        "Čísla řádků odpovídají tiskopisům za zdaňovací období 2025 "
+        "(DAP vzor č. 30, Příloha 2 vzor č. 21, Příloha 3 vzor č. 21) — "
+        "při novém vzoru ověřte.",
         "Tento výstup NENÍ oficiální daňové přiznání. Slouží jako podklad "
         "pro ruční přepis do DAP nebo konzultaci s daňovým poradcem.",
     ])

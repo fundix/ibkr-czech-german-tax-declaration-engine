@@ -64,7 +64,7 @@ def main_application():
             positions_end_file_path=args.pos_end,
             corporate_actions_file_path=args.corp_actions,
             interactive_classification_mode=args.interactive,
-            tax_year_to_process=config.TAX_YEAR,
+            tax_year_to_process=args.tax_year,
             country_code=args.country,
         )
     except Exception as e:
@@ -81,7 +81,7 @@ def main_application():
                 # THE FIX IS HERE: Use processed_income_events instead of all_financial_events_enriched
                 current_year_financial_events=processing_results.processed_income_events,
                 asset_resolver=processing_results.asset_resolver,
-                tax_year=config.TAX_YEAR,
+                tax_year=args.tax_year,
                 apply_conceptual_derivative_loss_capping=config.APPLY_CONCEPTUAL_DERIVATIVE_LOSS_CAPPING
             )
             loss_offsetting_summary = loss_engine.calculate_reporting_figures()
@@ -90,7 +90,7 @@ def main_application():
             logger.error(f"Loss offsetting calculation failed: {e}. Tax reports might be incomplete or inaccurate.", exc_info=True)
 
     asset_resolver = processing_results.asset_resolver
-    tax_year = config.TAX_YEAR
+    tax_year = args.tax_year
 
     if args.group_by_type:
         print_assets_by_category_diagnostic(asset_resolver)
@@ -190,7 +190,7 @@ def main_application():
                     realized_gains_losses=processing_results.realized_gains_losses,
                     financial_events=processing_results.processed_income_events,
                     asset_resolver=processing_results.asset_resolver,
-                    tax_year=config.TAX_YEAR,
+                    tax_year=args.tax_year,
                 )
 
             if cz_fx_mode == "compare":

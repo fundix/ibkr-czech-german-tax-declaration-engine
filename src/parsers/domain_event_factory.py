@@ -508,16 +508,19 @@ class DomainEventFactory:
                 elif is_stueckzinsen_received : # If handled as a separate cash event
                      evt_type = FinancialEventType.INTEREST_RECEIVED # Or a more specific type if needed
                      event_params_kw["gross_amount_foreign_currency"] = raw_amount.copy_abs()
-                else: # Regular interest received or paid (e.g. on cash balances, margin loans)
+                elif "INTEREST PAID" in event_type_str_upper or desc_upper.startswith("DEBIT INTEREST"):
+                    # Margin/debit interest paid to the broker ("Broker Interest
+                    # Paid") is a cost, NOT negative interest income. Stored with
+                    # positive = cost paid (IBKR reports it as a negative cash
+                    # amount), so the sign is flipped; a positive row (refund /
+                    # reversal of a prior charge) becomes NEGATIVE and nets
+                    # against the original charge downstream.
+                    evt_type = FinancialEventType.INTEREST_PAID_DEBIT
+                    event_params_kw["gross_amount_foreign_currency"] = raw_amount.copy_negate()
+                else: # Regular interest received (e.g. credit interest on cash balances)
                     evt_type = FinancialEventType.INTEREST_RECEIVED
-                    # If raw_amount is negative (e.g., debit interest), it should be stored as such
-                    # or handled based on event type. For INTEREST_RECEIVED, expect positive.
-                    # Let's assume event_params_kw['gross_amount_foreign_currency'] is already set
-                    # (it was raw_amount.copy_abs() if it was income type)
-                    # This implies interest received will always be positive in event_params_kw.
-                    # If debit interest (negative raw_amount) should be stored as negative, change here.
-                    # For now, INTEREST_RECEIVED events will have positive gross_amount_foreign_currency.
-                    # If debit interest is common, a new event type like INTEREST_PAID_DEBIT might be better.
+                    # Amount keeps its raw sign: a negative row is a reversal of
+                    # previously received interest and must net against it.
 
                 domain_event_instance = CashFlowEvent(
                     asset_for_event.internal_asset_id, event_date_str, event_type=evt_type,

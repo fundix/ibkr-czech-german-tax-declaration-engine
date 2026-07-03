@@ -15,6 +15,14 @@ def parse_arguments():
         help="Country tax module to use (default: de).",
     )
 
+    # Tax year
+    parser.add_argument(
+        "--tax-year",
+        type=int,
+        default=config.TAX_YEAR,
+        help=f"Tax year to process (default from src/config.py: {config.TAX_YEAR}).",
+    )
+
     # File paths
     parser.add_argument("--trades", default=config.TRADES_FILE_PATH, help="Path to trades CSV file.")
     parser.add_argument("--cash", default=config.CASH_TRANSACTIONS_FILE_PATH, help="Path to cash transactions CSV file.")
@@ -55,6 +63,6 @@ def parse_arguments():
         args.interactive = config.IS_INTERACTIVE_CLASSIFICATION # Updated config variable name
 
     if args.report_tax_declaration and args.pdf_output_file is None:
-        args.pdf_output_file = f"tax_report_{config.TAX_YEAR}.pdf"
+        args.pdf_output_file = f"tax_report_{args.tax_year}.pdf"
 
     return args
