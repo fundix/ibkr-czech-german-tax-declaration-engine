@@ -6,6 +6,12 @@
       "runtimeExecutable": "uv",
       "runtimeArgs": ["run", "--extra", "web", "python", "-m", "src.webapp", "--no-browser"],
       "port": 8321
+    },
+    {
+      "name": "webapp-dev",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "--extra", "web", "python", "-m", "src.webapp", "--no-browser", "--port", "8322"],
+      "port": 8322
     }
   ]
 }

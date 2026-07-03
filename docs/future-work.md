@@ -114,6 +114,19 @@ recommended execution order.
       as positions_end ("state as of the last business day") — the engine
       validates FIFO against current holdings and the tax summary is a
       running estimate (badge in the GUI).
+- [x] **API-only bootstrap (empty calculator).** DONE (2026-07-03): a fresh
+      install fills itself via the Flex Web Service without manual exports.
+      (1) Lot-level SOY: the positions query's "Lot" level of detail
+      (`LevelOfDetail=LOT` rows with `OpenDateTime`) feeds
+      `Asset.soy_lots`; when trade-history reconstruction can't cover the
+      reported SOY position, `FifoLedger` seeds per-lot FifoLots with REAL
+      acquisition dates (`SOY_SNAPSHOT_*` ids — time test works, no
+      "odhad" badge) instead of one estimated 31 Dec lot; any snapshot
+      inconsistency falls back to the old behaviour. (2) Optional
+      previous-year queries (period Last Calendar Year) configured on the
+      Files page are fetched ONCE when the previous year's dataset is
+      missing. LIMITATION: the Flex Web Service reaches only ~1 year back;
+      older years still need a manual Client Portal export.
 - [x] **PENDING / manual-review checklist as a first-class output** —
       RESOLVED at the GUI level (2026-07-03): the web GUI's "Ke kontrole"
       page lists PENDING items + section REVIEW notes with a nav badge.

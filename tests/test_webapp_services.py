@@ -157,6 +157,41 @@ class TestExecuteRun:
         assert lot["acquisition_estimated"] is True
         assert lot["time_test_deadline"] is None
 
+    def test_portfolio_uses_lot_level_soy_snapshot(self, service):
+        """A lot-level positions_start (LevelOfDetail=LOT rows with
+        OpenDateTime) seeds SOY lots with REAL acquisition dates — the
+        portfolio shows per-lot time-test deadlines instead of the
+        estimated 31 Dec fallback, and the tax figures stay golden."""
+        _seed_synthetic_year(service)
+        src = (service.data_dir / "2024" / "positions_start.csv").read_text().splitlines()
+        header = src[0] + ",LevelOfDetail,OpenDateTime"
+        rows = [line + ",SUMMARY," for line in src[1:]]
+        divco = next(line for line in src[1:] if "DIVCO" in line)
+        # DIVCO summary: 100 qty / 2500 USD basis -> two lots 40+60
+        rows.append(divco.replace(",100,3000,30,2500,", ",40,1200,30,1000,")
+                    + ",LOT,2020-06-15;103000")
+        rows.append(divco.replace(",100,3000,30,2500,", ",60,1800,30,1500,")
+                    + ",LOT,2020-06-16;110000")
+        (service.data_dir / "2024" / "positions_start.csv").write_text(
+            "\n".join([header] + rows) + "\n")
+
+        meta = service._execute_run(
+            "2024-lots", 2024, "daily",
+            ecb_provider=GoldenEcbProvider(),
+            cz_fx_provider=GoldenCnbProvider(),
+        )
+        # DIVCO is never sold — the golden figures must not move
+        assert Decimal(meta["summary"]["daily"]["final_tax_czk"]) == Decimal("3604.00")
+
+        [divco_pos] = service.load_portfolio("2024-lots")["positions"]
+        lots = divco_pos["lots"]
+        assert [(l["acquisition_date"], Decimal(l["quantity"])) for l in lots] == [
+            ("2020-06-15", Decimal("40")),
+            ("2020-06-16", Decimal("60")),
+        ]
+        assert all(l["acquisition_estimated"] is False for l in lots)
+        assert all(l["time_test_deadline"] is not None for l in lots)
+
     def test_run_without_dataset_raises(self, service):
         with pytest.raises(ValueError, match="2031"):
             service._execute_run("2031-test", 2031, "daily")

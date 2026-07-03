@@ -7,7 +7,8 @@ import logging
 import sys 
 
 from src.domain.assets import (
-    Asset, InvestmentFund, Option, CashBalance, Derivative, Stock, Bond, PrivateSaleAsset, Cfd # Changed Section23EstgAsset to PrivateSaleAsset
+    Asset, InvestmentFund, Option, CashBalance, Derivative, Stock, Bond, PrivateSaleAsset, Cfd, # Changed Section23EstgAsset to PrivateSaleAsset
+    SoyPositionLot,
 )
 # FinancialEvent, OptionLifecycleEvent, TradeEvent for type hinting
 from src.domain.events import FinancialEvent, OptionLifecycleEvent, TradeEvent
@@ -76,6 +77,24 @@ class ParsingOrchestrator:
             self.raw_corporate_actions = parse_corporate_actions_csv(corporate_actions_file)
             logger.info(f"Loaded {len(self.raw_corporate_actions)} raw corporate action records.")
 
+    @staticmethod
+    def _is_lot_row(raw_pos) -> bool:
+        return (raw_pos.level_of_detail or "").strip().upper() == "LOT"
+
+    @staticmethod
+    def _lot_open_date(raw_pos) -> Optional[str]:
+        """ISO date of a LOT row: OpenDateTime, falling back to
+        HoldingPeriodDateTime. IBKR datetimes come as 'YYYY-MM-DD;HHMMSS'
+        or 'YYYYMMDD;HHMMSS' depending on query settings — take the date part."""
+        for value in (raw_pos.open_date_time, raw_pos.holding_period_date_time):
+            if not value:
+                continue
+            date_part = value.split(";")[0].split(",")[0].split(" ")[0]
+            parsed = parse_ibkr_date(date_part)
+            if parsed:
+                return parsed.isoformat()
+        return None
+
     def process_positions(self):
         # ... (implementation is the same)
         logger.info("Processing start-of-year positions...")
@@ -90,6 +109,23 @@ class ParsingOrchestrator:
                 raw_underlying_conid=raw_pos.underlying_conid,
                 raw_underlying_symbol=raw_pos.underlying_symbol
             )
+            if self._is_lot_row(raw_pos):
+                # Lot-level detail row: collect the real acquisition date for
+                # the SOY FIFO seeding; totals come from the SUMMARY row.
+                open_date = self._lot_open_date(raw_pos)
+                if open_date is None:
+                    logger.warning(
+                        f"Asset {asset.get_classification_key()}: SOY LOT row "
+                        f"without a parseable OpenDateTime — lot detail ignored."
+                    )
+                    continue
+                asset.soy_lots.append(SoyPositionLot(
+                    open_date=open_date,
+                    quantity=safe_decimal(raw_pos.position, default=Decimal(0)),
+                    cost_basis_amount=safe_decimal(raw_pos.cost_basis_money),
+                    cost_basis_currency=raw_pos.currency_primary,
+                ))
+                continue
             asset.soy_quantity = safe_decimal(raw_pos.position, default=Decimal(0)) # Changed from initial_quantity_soy
             asset.soy_cost_basis_amount = safe_decimal(raw_pos.cost_basis_money) # Changed from initial_cost_basis_money_soy
             asset.soy_cost_basis_currency = raw_pos.currency_primary # Changed from initial_cost_basis_currency_soy
@@ -97,6 +133,9 @@ class ParsingOrchestrator:
 
         logger.info("Processing end-of-year positions...")
         for raw_pos in self.raw_positions_end:
+            if self._is_lot_row(raw_pos):
+                # EOY totals come from the SUMMARY row only.
+                continue
             asset = self.asset_resolver.get_or_create_asset(
                 raw_isin=raw_pos.isin, raw_conid=raw_pos.conid, raw_symbol=raw_pos.symbol,
                 raw_currency=raw_pos.currency_primary, raw_ibkr_asset_class=raw_pos.asset_class,
@@ -109,7 +148,7 @@ class ParsingOrchestrator:
             )
             asset.eoy_quantity = safe_decimal(raw_pos.position, default=Decimal(0))
             asset.eoy_market_price = safe_decimal(raw_pos.mark_price) # Changed from eoy_mark_price
-            asset.eoy_position_value = safe_decimal(raw_pos.position_value) 
+            asset.eoy_position_value = safe_decimal(raw_pos.position_value)
             asset.eoy_mark_price_currency = raw_pos.currency_primary
             logger.debug(f"Asset {asset.get_classification_key()} EOY: Qty={asset.eoy_quantity}, Val={asset.eoy_position_value} {asset.currency}")
 

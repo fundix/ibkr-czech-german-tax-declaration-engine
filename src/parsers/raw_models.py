@@ -168,6 +168,9 @@ class RawPositionRecord(RawBaseRecord): # For Start and End of Year positions
     percent_of_nav: Optional[Decimal] = Field(None, alias="PercentOfNAV")
     fifo_pnl_unrealized: Optional[Decimal] = Field(None, alias="FifoPnlUnrealized")
     level_of_detail: Optional[str] = Field(None, alias="LevelOfDetail") # e.g. LOT
+    # Lot-level rows only (positions query with "Lot" level of detail):
+    open_date_time: Optional[str] = Field(None, alias="OpenDateTime")
+    holding_period_date_time: Optional[str] = Field(None, alias="HoldingPeriodDateTime")
 
     @field_validator('multiplier', 'strike', 'position', 'mark_price', 'position_value',
                      'cost_basis_price', 'cost_basis_money', 'percent_of_nav', 'fifo_pnl_unrealized', mode='before')
@@ -175,7 +178,8 @@ class RawPositionRecord(RawBaseRecord): # For Start and End of Year positions
     def parse_decimal_fields(cls, v: Any) -> Optional[Decimal]:
         return safe_decimal(v, default=None if v is None or str(v).strip() == "" else Decimal("0.0"))
 
-    @field_validator('report_date', 'expiry', mode='before')
+    @field_validator('report_date', 'expiry', 'open_date_time',
+                     'holding_period_date_time', mode='before')
     @classmethod
     def validate_date_strings(cls, v: Any) -> Optional[str]:
         if v is None or str(v).strip() == "":

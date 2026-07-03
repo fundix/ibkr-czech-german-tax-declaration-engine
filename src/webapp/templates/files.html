@@ -33,7 +33,9 @@
   {% else %}
   <p class="note">V Client Portalu: Settings → Account Settings → Reporting → <strong>Flex Web Service</strong>
     → vygenerujte token. U svých Flex Queries přepněte období na <strong>Year to Date</strong>
-    (pozice na <strong>Last Business Day</strong>) a sem vložte jejich ID.</p>
+    (pozice na <strong>Last Business Day</strong>) a sem vložte jejich ID.
+    V positions query navíc zapněte úroveň detailu <strong>Lot</strong> — přenesou se
+    skutečná data nabytí jednotlivých lotů (přesný časový test i bez staré historie obchodů).</p>
   {% endif %}
   <form method="post" action="/files/flex" class="upload-form">
     <label>Token
@@ -51,6 +53,24 @@
     <label>Query ID — Korporátní akce
       <input type="text" name="q_corp_actions" value="{{ flex.queries.get('corp_actions', '') }}">
     </label>
+    <details {{ "open" if flex.prev_year_queries else "" }}>
+      <summary>Bootstrap loňského roku (volitelné)</summary>
+      <p class="note">Kopie stejných queries s obdobím <strong>Last Calendar Year</strong>.
+        Použijí se jednorázově, když dataset předchozího roku chybí — nová instalace se tak
+        naplní čistě přes API bez ručního exportu.</p>
+      <label>Query ID — Obchody (loňský rok)
+        <input type="text" name="pq_trades" value="{{ flex.prev_year_queries.get('trades', '') }}">
+      </label>
+      <label>Query ID — Cash transakce (loňský rok)
+        <input type="text" name="pq_cash" value="{{ flex.prev_year_queries.get('cash', '') }}">
+      </label>
+      <label>Query ID — Pozice (loňský rok, snapshot k 31.&nbsp;12.)
+        <input type="text" name="pq_positions" value="{{ flex.prev_year_queries.get('positions', '') }}">
+      </label>
+      <label>Query ID — Korporátní akce (loňský rok)
+        <input type="text" name="pq_corp_actions" value="{{ flex.prev_year_queries.get('corp_actions', '') }}">
+      </label>
+    </details>
     <button type="submit">Uložit nastavení</button>
   </form>
   <p class="note">Token je tajemství — ukládá se jen lokálně do <code>data/webapp/ibkr_flex.json</code>

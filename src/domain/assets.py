@@ -2,9 +2,24 @@
 from dataclasses import dataclass, field, KW_ONLY
 from decimal import Decimal
 import uuid
-from typing import Set, Optional
+from typing import List, Set, Optional
 
 from .enums import AssetCategory, InvestmentFundType
+
+
+@dataclass
+class SoyPositionLot:
+    """One start-of-year lot from a lot-level IBKR positions snapshot.
+
+    Present only when the positions Flex query has the "Lot" level of
+    detail enabled — it carries the REAL acquisition date of a lot, so the
+    FIFO seeding can avoid the estimated 31 Dec fallback date.
+    """
+    open_date: str                              # YYYY-MM-DD
+    quantity: Decimal                           # signed as reported (< 0 = short lot)
+    cost_basis_amount: Optional[Decimal] = None # total for the lot (proceeds for short)
+    cost_basis_currency: Optional[str] = None
+
 
 @dataclass # Base class defines eq and hash
 class Asset:
@@ -27,6 +42,8 @@ class Asset:
     soy_quantity: Optional[Decimal] = None # Renamed from initial_quantity_soy
     soy_cost_basis_amount: Optional[Decimal] = None # Renamed from initial_cost_basis_money_soy
     soy_cost_basis_currency: Optional[str] = None # Renamed from initial_cost_basis_currency_soy
+    # Per-lot SOY detail (only when the positions snapshot includes LOT rows)
+    soy_lots: List[SoyPositionLot] = field(default_factory=list)
 
     # End of Year (EOY) position data (from IBKR positions_end_file, for Vorabpauschale, reconciliation)
     eoy_quantity: Optional[Decimal] = None
