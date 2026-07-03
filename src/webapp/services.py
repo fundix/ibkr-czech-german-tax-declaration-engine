@@ -42,6 +42,7 @@ from src.webapp.ibkr_flex import (
     FLEX_SLOTS,
     INTER_QUERY_DELAY_S,
     FlexConfig,
+    FlexFetchError,
     fetch_statement,
     load_flex_config,
     save_flex_config,
@@ -441,16 +442,15 @@ class RunService:
         self,
         token: str,
         queries: Dict[str, str],
-        prev_year_queries: Optional[Dict[str, str]] = None,
+        first_year: Optional[str] = None,
     ) -> None:
         cfg = self.get_flex_config()
         if token.strip():
             cfg.token = token.strip()
         cfg.queries = {k: v.strip() for k, v in queries.items() if v.strip()}
-        if prev_year_queries is not None:
-            cfg.prev_year_queries = {
-                k: v.strip() for k, v in prev_year_queries.items() if v.strip()
-            }
+        if first_year is not None:
+            text = str(first_year).strip()
+            cfg.first_year = int(text) if text.isdigit() else None
         save_flex_config(self.flex_config_path, cfg)
 
     def dataset_age_hours(self, tax_year: int) -> Optional[float]:
@@ -501,12 +501,14 @@ class RunService:
     ) -> Dict[str, Any]:
         cfg = self.get_flex_config()
 
-        def _download(queries: Dict[str, str], year: int, delay_first: bool) -> List[str]:
+        def _download(year: int, delay_first: bool,
+                      from_date: Optional[str] = None,
+                      to_date: Optional[str] = None) -> List[str]:
             year_dir = self.data_dir / str(year)
             year_dir.mkdir(parents=True, exist_ok=True)
             done: List[str] = []
             for slot in FLEX_SLOTS:
-                query_id = queries.get(slot)
+                query_id = cfg.queries.get(slot)
                 if not query_id:
                     continue
                 if done or delay_first:
@@ -514,41 +516,53 @@ class RunService:
                     # consecutive statement downloads.
                     pause(INTER_QUERY_DELAY_S)
                 logger.info(f"IBKR Flex: downloading {slot} for {year} (query {query_id})…")
-                content = fetch(cfg.token, query_id)
+                content = fetch(cfg.token, query_id,
+                                from_date=from_date, to_date=to_date)
                 (year_dir / self._FLEX_SLOT_FILES[slot]).write_bytes(content)
                 done.append(slot)
             return done
 
-        fetched = _download(cfg.queries, tax_year, delay_first=False)
+        # Historical bootstrap FIRST (oldest year first): every missing
+        # dataset year from first_year up to tax_year-1 is fetched via the
+        # fd/td period override on the SAME queries — one calendar year per
+        # request (365 days limits the window span, not how far back it
+        # starts). Positions then arrive as the 31 Dec snapshot of the year.
+        extra_notes: List[str] = []
+        bootstrapped: List[int] = []
+        delay_next = False
+        if cfg.first_year:
+            for year in range(cfg.first_year, tax_year):
+                ds = self.get_year(year)
+                if ds is not None and ds.run_ready:
+                    continue
+                try:
+                    done = _download(year, delay_first=delay_next,
+                                     from_date=f"{year}0101", to_date=f"{year}1231")
+                except FlexFetchError as exc:
+                    # A year IBKR cannot deliver must not sink the whole job.
+                    logger.warning(f"IBKR Flex: bootstrap of {year} failed: {exc}")
+                    extra_notes.append(f"Doplnění roku {year} z IBKR selhalo: {exc}")
+                    delay_next = True
+                    continue
+                delay_next = delay_next or bool(done)
+                if done:
+                    bootstrapped.append(year)
+                    logger.info(f"IBKR Flex: bootstrapped missing {year} dataset.")
+        if bootstrapped:
+            extra_notes.append(
+                "Chybějící datasety doplněny z IBKR (fd/td období přes "
+                f"stávající queries): {', '.join(map(str, bootstrapped))}."
+            )
+
+        fetched = _download(tax_year, delay_first=delay_next)
         if not fetched:
             raise ValueError("Žádná query ID nejsou nastavená.")
         logger.info(f"IBKR Flex: fetched {', '.join(fetched)} for {tax_year}.")
 
-        # One-time bootstrap: when the PREVIOUS year's dataset is missing,
-        # pull it via the optional "Last Calendar Year" queries so the FIFO
-        # trade history and the SOY snapshot exist without a manual export.
-        extra_notes: List[str] = []
-        prev_fetched: List[str] = []
-        prev_year = tax_year - 1
-        if cfg.prev_year_queries:
-            prev_ds = self.get_year(prev_year)
-            if prev_ds is None or not prev_ds.run_ready:
-                prev_fetched = _download(cfg.prev_year_queries, prev_year,
-                                         delay_first=True)
-                if prev_fetched:
-                    logger.info(
-                        f"IBKR Flex: bootstrapped missing {prev_year} dataset "
-                        f"({', '.join(prev_fetched)})."
-                    )
-                    extra_notes.append(
-                        f"Chybějící dataset {prev_year} doplněn z IBKR "
-                        f"(queries s obdobím Last Calendar Year)."
-                    )
-
         meta = self._execute_run(run_id, tax_year, fx_mode, extra_notes=extra_notes)
         meta["fetched_slots"] = fetched
-        if prev_fetched:
-            meta["fetched_slots_prev_year"] = prev_fetched
+        if bootstrapped:
+            meta["bootstrapped_years"] = bootstrapped
         return meta
 
     # ------------------------------------------------------------------

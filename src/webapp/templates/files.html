@@ -53,24 +53,13 @@
     <label>Query ID — Korporátní akce
       <input type="text" name="q_corp_actions" value="{{ flex.queries.get('corp_actions', '') }}">
     </label>
-    <details {{ "open" if flex.prev_year_queries else "" }}>
-      <summary>Bootstrap loňského roku (volitelné)</summary>
-      <p class="note">Kopie stejných queries s obdobím <strong>Last Calendar Year</strong>.
-        Použijí se jednorázově, když dataset předchozího roku chybí — nová instalace se tak
-        naplní čistě přes API bez ručního exportu.</p>
-      <label>Query ID — Obchody (loňský rok)
-        <input type="text" name="pq_trades" value="{{ flex.prev_year_queries.get('trades', '') }}">
-      </label>
-      <label>Query ID — Cash transakce (loňský rok)
-        <input type="text" name="pq_cash" value="{{ flex.prev_year_queries.get('cash', '') }}">
-      </label>
-      <label>Query ID — Pozice (loňský rok, snapshot k 31.&nbsp;12.)
-        <input type="text" name="pq_positions" value="{{ flex.prev_year_queries.get('positions', '') }}">
-      </label>
-      <label>Query ID — Korporátní akce (loňský rok)
-        <input type="text" name="pq_corp_actions" value="{{ flex.prev_year_queries.get('corp_actions', '') }}">
-      </label>
-    </details>
+    <label>První rok obchodování u IBKR (volitelné)
+      <input type="number" name="first_year" min="2000" max="2100"
+             value="{{ flex.first_year or '' }}" placeholder="např. 2024">
+    </label>
+    <p class="note">Když je vyplněný, stažení automaticky doplní všechny <em>chybějící</em>
+      starší roky přes tytéž queries (přepsáním období od 1.&nbsp;1. do 31.&nbsp;12. daného
+      roku) — prázdná kalkulačka se naplní čistě přes API. Existující roky se nepřepisují.</p>
     <button type="submit">Uložit nastavení</button>
   </form>
   <p class="note">Token je tajemství — ukládá se jen lokálně do <code>data/webapp/ibkr_flex.json</code>

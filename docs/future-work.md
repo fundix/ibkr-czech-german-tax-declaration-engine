@@ -122,11 +122,16 @@ recommended execution order.
       reported SOY position, `FifoLedger` seeds per-lot FifoLots with REAL
       acquisition dates (`SOY_SNAPSHOT_*` ids — time test works, no
       "odhad" badge) instead of one estimated 31 Dec lot; any snapshot
-      inconsistency falls back to the old behaviour. (2) Optional
-      previous-year queries (period Last Calendar Year) configured on the
-      Files page are fetched ONCE when the previous year's dataset is
-      missing. LIMITATION: the Flex Web Service reaches only ~1 year back;
-      older years still need a manual Client Portal export.
+      inconsistency falls back to the old behaviour. (2) Historical
+      backfill via the documented `fd`/`td` period override on the SAME
+      queries: with "first trading year" configured, a fetch fills every
+      missing older dataset year (one calendar-year window per request;
+      old-year positions = 31 Dec snapshot). Verified live against real
+      data: full 2024 and 2025 statements fetched in 2026 were
+      byte-identical (TransactionID sets) to the manual exports — the
+      365-day figure limits the request WINDOW, not history depth. The
+      original "Last Calendar Year queries" design was replaced by the
+      override before first use.
 - [x] **PENDING / manual-review checklist as a first-class output** —
       RESOLVED at the GUI level (2026-07-03): the web GUI's "Ke kontrole"
       page lists PENDING items + section REVIEW notes with a nav badge.
