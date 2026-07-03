@@ -145,7 +145,7 @@ class TestServiceFetchFlow:
         executed = {}
         monkeypatch.setattr(
             service, "_execute_run",
-            lambda run_id, year, fx_mode: executed.update(
+            lambda run_id, year, fx_mode, **kw: executed.update(
                 run_id=run_id, year=year, fx_mode=fx_mode) or {"run_id": run_id},
         )
         fetched_queries = []
@@ -168,6 +168,63 @@ class TestServiceFetchFlow:
         assert meta["fetched_slots"] == ["trades", "cash", "positions", "corp_actions"]
         # IBKR throttles per-token bursts — a pause between each download
         assert len(pauses) == 3
+
+    def test_prev_year_bootstrap_fetched_when_dataset_missing(self, service, monkeypatch):
+        service.save_flex_settings(
+            "tok",
+            {"trades": "11", "cash": "22", "positions": "33", "corp_actions": "44"},
+            prev_year_queries={"trades": "91", "cash": "92",
+                               "positions": "93", "corp_actions": "94"},
+        )
+        captured = {}
+        monkeypatch.setattr(
+            service, "_execute_run",
+            lambda run_id, year, fx_mode, **kw: captured.update(kw) or {"run_id": run_id},
+        )
+        pauses = []
+        meta = service._fetch_and_run("2026-x", 2026, "daily",
+                                      fetch=lambda t, q: f"data-{q}".encode(),
+                                      pause=pauses.append)
+
+        prev_dir = service.data_dir / "2025"
+        assert (prev_dir / "trades.csv").read_bytes() == b"data-91"
+        # prev-year positions = snapshot as of 31 Dec -> positions_end
+        assert (prev_dir / "positions_end.csv").read_bytes() == b"data-93"
+        assert meta["fetched_slots_prev_year"] == ["trades", "cash", "positions", "corp_actions"]
+        assert any("2025" in n for n in captured["extra_notes"])
+        # 3 pauses within the current year + 4 for the prev-year batch
+        assert len(pauses) == 7
+
+    def test_prev_year_bootstrap_skipped_when_dataset_ready(self, service, monkeypatch):
+        service.save_flex_settings(
+            "tok",
+            {"trades": "11", "cash": "22", "positions": "33", "corp_actions": "44"},
+            prev_year_queries={"trades": "91", "cash": "92",
+                               "positions": "93", "corp_actions": "94"},
+        )
+        # A run-ready 2025 dataset already exists — must NOT be overwritten
+        for slot, name in (("trades", "trades.csv"), ("cash", "cash_transactions.csv"),
+                           ("positions_end", "positions_end.csv")):
+            service.save_upload(2025, slot, b"existing\n")
+        monkeypatch.setattr(service, "_execute_run",
+                            lambda run_id, year, fx_mode, **kw: {"run_id": run_id})
+        fetched_queries = []
+        meta = service._fetch_and_run("2026-x", 2026, "daily",
+                                      fetch=lambda t, q: fetched_queries.append(q)
+                                      or f"data-{q}".encode(),
+                                      pause=lambda s: None)
+        assert "fetched_slots_prev_year" not in meta
+        assert fetched_queries == ["11", "22", "33", "44"]
+        assert (service.data_dir / "2025" / "trades.csv").read_bytes() == b"existing\n"
+
+    def test_flex_config_prev_year_roundtrip(self, tmp_path):
+        path = tmp_path / "flex.json"
+        save_flex_config(path, FlexConfig(
+            token="abcdef123456", queries={"trades": "1"},
+            prev_year_queries={"trades": "9"},
+        ))
+        cfg = load_flex_config(path)
+        assert cfg.prev_year_queries == {"trades": "9"}
 
     def test_start_fetch_requires_configuration(self, service):
         with pytest.raises(ValueError, match="není nastavená"):

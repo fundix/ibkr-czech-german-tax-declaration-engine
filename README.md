@@ -111,6 +111,21 @@ year, downloaded positions act as the current-state snapshot and the tax
 summary is a running estimate. The token is stored only locally
 (`data/webapp/ibkr_flex.json`, gitignored) and expires after max 1 year.
 
+Two optional extras make a **fresh install bootstrap itself entirely via
+the API** (no manual export):
+
+- **Lot-level positions**: enable the *Lot* level of detail in the
+  positions Flex query — the snapshot then carries each lot's real
+  acquisition date (`OpenDateTime`), so the §4/1/w time test works even
+  for positions bought years before your trade history starts (the SOY
+  seeding uses real dates instead of an estimated 31 Dec lot).
+- **Previous-year queries**: duplicate the four queries with the
+  **Last Calendar Year** period and enter their IDs in the "Bootstrap
+  loňského roku" section. When the previous year's dataset is missing,
+  one fetch fills it automatically (trade history for FIFO + the 31 Dec
+  positions snapshot). Note the Flex Web Service reaches only ~1 year
+  back — older years still need a manual export from Client Portal.
+
 ### Ask Claude about your portfolio (MCP server)
 
 ```bash

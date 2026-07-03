@@ -302,11 +302,16 @@ def files(request: Request, saved: int = 0, flex_saved: int = 0):
 @router.post("/files/flex")
 def save_flex(request: Request, token: str = Form(""),
               q_trades: str = Form(""), q_cash: str = Form(""),
-              q_positions: str = Form(""), q_corp_actions: str = Form("")):
+              q_positions: str = Form(""), q_corp_actions: str = Form(""),
+              pq_trades: str = Form(""), pq_cash: str = Form(""),
+              pq_positions: str = Form(""), pq_corp_actions: str = Form("")):
     svc = _svc(request)
     svc.save_flex_settings(token, {
         "trades": q_trades, "cash": q_cash,
         "positions": q_positions, "corp_actions": q_corp_actions,
+    }, prev_year_queries={
+        "trades": pq_trades, "cash": pq_cash,
+        "positions": pq_positions, "corp_actions": pq_corp_actions,
     })
     return RedirectResponse("/files?flex_saved=1", status_code=303)
 

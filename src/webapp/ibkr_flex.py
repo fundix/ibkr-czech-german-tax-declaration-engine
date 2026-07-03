@@ -69,6 +69,10 @@ class FlexFetchError(RuntimeError):
 class FlexConfig:
     token: str = ""
     queries: Dict[str, str] = field(default_factory=dict)  # slot -> query id
+    # Optional bootstrap queries with the "Last Calendar Year" period —
+    # fetched once into the PREVIOUS year's dataset when it is missing, so
+    # a fresh install fills the running + previous year purely via the API.
+    prev_year_queries: Dict[str, str] = field(default_factory=dict)
 
     @property
     def configured(self) -> bool:
@@ -87,6 +91,8 @@ def load_flex_config(path: Path) -> FlexConfig:
             return FlexConfig(
                 token=str(data.get("token") or ""),
                 queries={k: str(v) for k, v in (data.get("queries") or {}).items() if v},
+                prev_year_queries={k: str(v) for k, v in
+                                   (data.get("prev_year_queries") or {}).items() if v},
             )
     except Exception as exc:
         logger.warning(f"Unreadable ibkr_flex.json: {exc}")
@@ -96,7 +102,8 @@ def load_flex_config(path: Path) -> FlexConfig:
 def save_flex_config(path: Path, config: FlexConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"token": config.token, "queries": config.queries},
+        json.dumps({"token": config.token, "queries": config.queries,
+                    "prev_year_queries": config.prev_year_queries},
                    ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

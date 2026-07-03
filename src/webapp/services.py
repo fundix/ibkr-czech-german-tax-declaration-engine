@@ -312,6 +312,7 @@ class RunService:
         fx_mode: str,
         ecb_provider=None,
         cz_fx_provider=None,
+        extra_notes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Runs the full pipeline + CZ aggregation and persists everything.
 
@@ -323,6 +324,8 @@ class RunService:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         fx_mode, run_notes = _effective_fx_mode(fx_mode, tax_year, datetime.now().year)
+        if extra_notes:
+            run_notes.extend(extra_notes)
 
         inputs = self._prepare_inputs(run_dir, tax_year, notes=run_notes)
 
@@ -416,11 +419,20 @@ class RunService:
     def get_flex_config(self) -> FlexConfig:
         return load_flex_config(self.flex_config_path)
 
-    def save_flex_settings(self, token: str, queries: Dict[str, str]) -> None:
+    def save_flex_settings(
+        self,
+        token: str,
+        queries: Dict[str, str],
+        prev_year_queries: Optional[Dict[str, str]] = None,
+    ) -> None:
         cfg = self.get_flex_config()
         if token.strip():
             cfg.token = token.strip()
         cfg.queries = {k: v.strip() for k, v in queries.items() if v.strip()}
+        if prev_year_queries is not None:
+            cfg.prev_year_queries = {
+                k: v.strip() for k, v in prev_year_queries.items() if v.strip()
+            }
         save_flex_config(self.flex_config_path, cfg)
 
     def dataset_age_hours(self, tax_year: int) -> Optional[float]:
@@ -470,27 +482,55 @@ class RunService:
         pause=time.sleep,
     ) -> Dict[str, Any]:
         cfg = self.get_flex_config()
-        year_dir = self.data_dir / str(tax_year)
-        year_dir.mkdir(parents=True, exist_ok=True)
-        fetched = []
-        for slot in FLEX_SLOTS:
-            query_id = cfg.queries.get(slot)
-            if not query_id:
-                continue
-            if fetched:
-                # IBKR throttles per-token bursts (error 1018) — space out
-                # consecutive statement downloads.
-                pause(INTER_QUERY_DELAY_S)
-            logger.info(f"IBKR Flex: downloading {slot} (query {query_id})…")
-            content = fetch(cfg.token, query_id)
-            target = year_dir / self._FLEX_SLOT_FILES[slot]
-            target.write_bytes(content)
-            fetched.append(slot)
+
+        def _download(queries: Dict[str, str], year: int, delay_first: bool) -> List[str]:
+            year_dir = self.data_dir / str(year)
+            year_dir.mkdir(parents=True, exist_ok=True)
+            done: List[str] = []
+            for slot in FLEX_SLOTS:
+                query_id = queries.get(slot)
+                if not query_id:
+                    continue
+                if done or delay_first:
+                    # IBKR throttles per-token bursts (error 1018) — space out
+                    # consecutive statement downloads.
+                    pause(INTER_QUERY_DELAY_S)
+                logger.info(f"IBKR Flex: downloading {slot} for {year} (query {query_id})…")
+                content = fetch(cfg.token, query_id)
+                (year_dir / self._FLEX_SLOT_FILES[slot]).write_bytes(content)
+                done.append(slot)
+            return done
+
+        fetched = _download(cfg.queries, tax_year, delay_first=False)
         if not fetched:
             raise ValueError("Žádná query ID nejsou nastavená.")
         logger.info(f"IBKR Flex: fetched {', '.join(fetched)} for {tax_year}.")
-        meta = self._execute_run(run_id, tax_year, fx_mode)
+
+        # One-time bootstrap: when the PREVIOUS year's dataset is missing,
+        # pull it via the optional "Last Calendar Year" queries so the FIFO
+        # trade history and the SOY snapshot exist without a manual export.
+        extra_notes: List[str] = []
+        prev_fetched: List[str] = []
+        prev_year = tax_year - 1
+        if cfg.prev_year_queries:
+            prev_ds = self.get_year(prev_year)
+            if prev_ds is None or not prev_ds.run_ready:
+                prev_fetched = _download(cfg.prev_year_queries, prev_year,
+                                         delay_first=True)
+                if prev_fetched:
+                    logger.info(
+                        f"IBKR Flex: bootstrapped missing {prev_year} dataset "
+                        f"({', '.join(prev_fetched)})."
+                    )
+                    extra_notes.append(
+                        f"Chybějící dataset {prev_year} doplněn z IBKR "
+                        f"(queries s obdobím Last Calendar Year)."
+                    )
+
+        meta = self._execute_run(run_id, tax_year, fx_mode, extra_notes=extra_notes)
         meta["fetched_slots"] = fetched
+        if prev_fetched:
+            meta["fetched_slots_prev_year"] = prev_fetched
         return meta
 
     # ------------------------------------------------------------------

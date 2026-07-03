@@ -322,9 +322,11 @@ class FifoLedger:
                            f"(Long: {reconstructed_total_long_qty}, Short: {reconstructed_total_short_qty_abs}, Inconsistent: {historical_simulation_inconsistent}) "
                            f"is insufficient or mismatched for reported SOY Qty ({reported_soy_qty}). Using SOY fallback cost/proceeds for entire quantity.")
             if reported_soy_qty > Decimal(0):
-                self._create_fallback_long_lot(asset, reported_soy_qty, tax_year)
+                if not self._create_lots_from_soy_snapshot(asset, reported_soy_qty, tax_year, long_side=True):
+                    self._create_fallback_long_lot(asset, reported_soy_qty, tax_year)
             elif reported_soy_qty < Decimal(0):
-                self._create_fallback_short_lot(asset, reported_soy_qty.copy_abs(), tax_year)
+                if not self._create_lots_from_soy_snapshot(asset, reported_soy_qty.copy_abs(), tax_year, long_side=False):
+                    self._create_fallback_short_lot(asset, reported_soy_qty.copy_abs(), tax_year)
 
         if self.lots:
             self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
@@ -334,6 +336,98 @@ class FifoLedger:
             self.short_lots.sort(key=lambda lot: (parse_ibkr_date(lot.opening_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
             if any((parse_ibkr_date(lot.opening_date) is None) for lot in self.short_lots):
                  raise ValueError(f"Unparseable opening date found in final SOY short lots for asset {self.asset_internal_id}.")
+
+    def _create_lots_from_soy_snapshot(
+        self,
+        asset: Asset,
+        quantity_abs: Decimal,
+        tax_year: int,
+        long_side: bool,
+    ) -> bool:
+        """Seed SOY lots from a lot-level positions snapshot (real dates).
+
+        Used only when the trade-history reconstruction failed — snapshot
+        lots carry the REAL acquisition dates (time test works), while the
+        classic fallback collapses the position into one lot dated 31 Dec.
+        Returns False (and seeds nothing) unless the snapshot is complete:
+        every lot parseable, dated before the tax year, with a cost basis,
+        and quantities summing exactly to the reported SOY position.
+        """
+        candidates = [
+            lot for lot in getattr(asset, "soy_lots", [])
+            if (lot.quantity > Decimal(0)) == long_side and lot.quantity != Decimal(0)
+        ]
+        if not candidates:
+            return False
+
+        side = "long" if long_side else "short"
+        total = sum((lot.quantity.copy_abs() for lot in candidates), Decimal(0))
+        if total.quantize(global_config.PRECISION_QUANTITY, context=self.ctx) != quantity_abs:
+            logger.warning(
+                f"Asset {asset.get_classification_key()}: SOY snapshot {side} lots sum to "
+                f"{total}, reported SOY is {quantity_abs} — snapshot ignored, using single fallback lot."
+            )
+            return False
+
+        prepared = []
+        for lot in candidates:
+            open_date_obj = parse_ibkr_date(lot.open_date)
+            if open_date_obj is None or open_date_obj >= date_obj(tax_year, 1, 1):
+                logger.warning(
+                    f"Asset {asset.get_classification_key()}: SOY snapshot lot has invalid "
+                    f"open date '{lot.open_date}' — snapshot ignored, using single fallback lot."
+                )
+                return False
+            if lot.cost_basis_amount is None or not lot.cost_basis_currency:
+                logger.warning(
+                    f"Asset {asset.get_classification_key()}: SOY snapshot lot ({lot.open_date}) "
+                    f"has no cost basis — snapshot ignored, using single fallback lot."
+                )
+                return False
+
+            amount = self.ctx.create_decimal(lot.cost_basis_amount).copy_abs()
+            if lot.cost_basis_currency.upper() == "EUR":
+                amount_eur = amount
+            else:
+                # Convert at the lot's open date — the same rate a replayed
+                # historical trade would have used; 1 Jan as a fallback.
+                amount_eur = self.currency_converter.convert_to_eur(
+                    original_amount=amount, original_currency=lot.cost_basis_currency,
+                    date_of_conversion=open_date_obj,
+                ) or self.currency_converter.convert_to_eur(
+                    original_amount=amount, original_currency=lot.cost_basis_currency,
+                    date_of_conversion=date_obj(tax_year, 1, 1),
+                )
+                if amount_eur is None:
+                    logger.warning(
+                        f"Asset {asset.get_classification_key()}: cannot convert SOY snapshot "
+                        f"lot basis ({amount} {lot.cost_basis_currency}) — snapshot ignored."
+                    )
+                    return False
+                amount_eur = self.ctx.create_decimal(amount_eur)
+            prepared.append((lot, amount_eur))
+
+        for index, (lot, amount_eur) in enumerate(prepared):
+            qty = lot.quantity.copy_abs()
+            unit = self.ctx.divide(amount_eur, qty) if qty != Decimal(0) else Decimal(0)
+            source_id = f"SOY_SNAPSHOT_{index}_{self.asset_internal_id}"
+            if long_side:
+                self.lots.append(FifoLot(
+                    acquisition_date=lot.open_date, quantity=qty,
+                    unit_cost_basis_eur=unit, total_cost_basis_eur=amount_eur,
+                    source_transaction_id=source_id,
+                ))
+            else:
+                self.short_lots.append(ShortFifoLot(
+                    opening_date=lot.open_date, quantity_shorted=qty,
+                    unit_sale_proceeds_eur=unit, total_sale_proceeds_eur=amount_eur,
+                    source_transaction_id=source_id,
+                ))
+        logger.info(
+            f"Asset {asset.get_classification_key()}: Seeded {len(prepared)} SOY {side} lot(s) "
+            f"from the lot-level positions snapshot (real acquisition dates)."
+        )
+        return True
 
     def _create_fallback_long_lot(self, asset: Asset, quantity: Decimal, tax_year: int):
         if quantity <= Decimal(0): return
