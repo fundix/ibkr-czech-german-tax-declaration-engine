@@ -55,7 +55,7 @@ Planned next steps live in [docs/future-work.md](docs/future-work.md).
 - Foreign tax credit (§38f ZDP, per-item treaty caps, per-state §38f/8 cap + proportional finalization)
 - Tax liability computation (15 % / 23 % rates)
 - DAP-oriented form mapping
-- Per-event CZK conversion via ČNB daily rates
+- Per-event CZK conversion via ČNB daily rates, or the GFŘ uniform rate ("jednotný kurz") — `--cz-fx-mode compare` computes both and reports the cheaper mode
 - Audit-friendly JSON and XLSX exports
 
 ### Core (country-agnostic)

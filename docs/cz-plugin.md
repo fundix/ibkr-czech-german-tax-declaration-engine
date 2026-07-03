@@ -95,7 +95,7 @@ DAP-oriented output with stable internal line codes (e.g. `CZ_DAP_8_DIVIDENDS`, 
 | Area | Status | Detail |
 |------|--------|--------|
 | Treaty verification | Placeholder | `country_credit_caps` are example values, not verified per-treaty |
-| Jednotný kurz (uniform rate) | Not implemented | Only daily ČNB rates supported |
+| Jednotný kurz (uniform rate) | Implemented (2026-07) | `--cz-fx-mode uniform` uses the GFŘ uniform rates (`uniform_rates.py`, pokyny D-49/D-66/D-75 transcribed); `--cz-fx-mode compare` computes both modes and reports the cheaper one. §10 disposal legs convert via the EUR-enriched amounts (approximation until per-leg original-currency data exists — M17/M18) |
 | Pre-2014 acquisition rule | Not implemented | 6-month rule for pre-2014 securities |
 | Expense deduction (§10/4) | Not implemented | `cost_basis_czk` available on items but rule not applied |
 | Loss carryforward | Not implemented | Negative §10 net floored at zero |

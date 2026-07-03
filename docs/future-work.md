@@ -33,11 +33,16 @@ recommended execution order.
 
 ## 2. CZ tax-logic gaps (these change the resulting tax)
 
-- [ ] **Uniform FX mode ("jednotný kurz", GFŘ D-59).** Currently raises
-      `NotImplementedError` (`CzFxMode.UNIFORM`). Most useful shape: compute
-      BOTH daily and uniform modes in one run and report which one yields
-      the lower tax — the taxpayer may legally choose (one mode per year,
-      no mixing; the plugin already enforces mode consistency).
+- [x] **Uniform FX mode ("jednotný kurz").** DONE (2026-07-03):
+      `src/countries/cz/uniform_rates.py` ships the official GFŘ tables
+      (2020 partial per D-49; 2024 per D-66; 2025 per D-75) with a
+      per-leg-year policy for multi-year holdings; `--cz-fx-mode
+      daily|uniform|compare` computes either mode or both and reports which
+      is cheaper (exports suffixed `.daily`/`.uniform`). Covered by
+      `tests/test_cz_uniform_fx.py` (hand-computed golden run: uniform
+      3,822 vs daily 3,604 CZK). LIMITATION: §10 disposal legs convert via
+      EUR-enriched amounts (daily-ECB leg × uniform EUR/CZK) until the
+      M17/M18 per-component data model lands — noted in the compare output.
 - [ ] **Treaty-by-treaty FTC cap verification.** `country_credit_caps` in
       `src/countries/cz/config.py` are placeholders (US/DE/IE/GB flat 15 %).
       Verify against the actual SZDZ at least for states that appear in the
