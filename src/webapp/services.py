@@ -146,6 +146,24 @@ class RunService:
         logger.info(f"Uploaded {slot} for {year} -> {target}")
         return target
 
+    def delete_year_dataset(self, year: int) -> Path:
+        """Soft-delete a year's input dataset: move it to ``data_dir/_trash``.
+
+        Deliberately NOT a hard delete — the manually exported statements may
+        be irreplaceable (the Flex Web Service reaches only ~1 year back).
+        Persisted runs keep their own input copies, so history stays intact.
+        Returns the trash path the dataset was moved to.
+        """
+        year_dir = self.data_dir / str(year)
+        if not year_dir.is_dir():
+            raise ValueError(f"Pro rok {year} nejsou nahraná žádná data.")
+        trash_dir = self.data_dir / "_trash"
+        trash_dir.mkdir(parents=True, exist_ok=True)
+        target = trash_dir / f"{year}-{datetime.now():%Y%m%d-%H%M%S}"
+        shutil.move(str(year_dir), str(target))
+        logger.info(f"Dataset {year} moved to trash: {target}")
+        return target
+
     def _positions_end_of(self, year: int) -> Optional[Path]:
         p = self.data_dir / str(year) / settings.SLOT_FILES["positions_end"]
         return p if p.is_file() else None

@@ -145,6 +145,8 @@ table.lots th, table.lots td { padding: .3rem .5rem; font-size: .85rem; }
 .split .grow { flex: 1; min-width: 0; }
 .chart-box { width: 250px; flex-shrink: 0; }
 button.small { padding: .3rem .8rem; font-size: .82rem; background: #e8edf3; color: var(--text); }
+button.danger { background: #fdecea; color: #b3261e; }
+button.danger:hover { background: #f9d7d3; filter: none; }
 .sim-card { border-left: 4px solid var(--accent); margin-top: 1rem; }
 .sim-notes { margin-top: .8rem; }
 

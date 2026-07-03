@@ -166,6 +166,29 @@ class TestUpload:
         assert "2030" in r.text
 
 
+class TestDeleteYear:
+    def test_delete_moves_year_to_trash_and_flashes(self, tmp_path):
+        svc = RunService(data_dir=tmp_path / "data", runs_dir=tmp_path / "runs")
+        _seed_synthetic_year(svc, 2029)
+        try:
+            with TestClient(create_app(services=svc)) as tc:
+                r = tc.post("/files/delete-year", data={"tax_year": "2029"},
+                            follow_redirects=False)
+                assert r.status_code == 303
+                assert r.headers["location"] == "/files?deleted=2029"
+                page = tc.get("/files?deleted=2029")
+                assert "přesunuta do koše" in page.text
+                assert (svc.data_dir / "_trash").is_dir()
+                assert svc.get_year(2029) is None
+
+                # Unknown year: no crash, plain redirect without the flash
+                r = tc.post("/files/delete-year", data={"tax_year": "2031"},
+                            follow_redirects=False)
+                assert r.headers["location"] == "/files"
+        finally:
+            svc.runner.shutdown(wait=False)
+
+
 class TestIbkrFlexRoutes:
     def test_files_page_shows_flex_section(self, client):
         r = client.get("/files")

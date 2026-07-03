@@ -67,6 +67,28 @@ class TestDatasets:
         with pytest.raises(ValueError):
             service.save_upload(2025, "evil", b"x")
 
+    def test_delete_year_moves_dataset_to_trash(self, service):
+        _seed_synthetic_year(service)
+        trades_content = (service.data_dir / "2024" / "trades.csv").read_bytes()
+
+        trash = service.delete_year_dataset(2024)
+
+        assert service.list_years() == []           # gone from datasets
+        assert not (service.data_dir / "2024").exists()
+        assert trash.parent == service.data_dir / "_trash"
+        # Soft delete: the files survive in the trash, byte-identical
+        assert (trash / "trades.csv").read_bytes() == trades_content
+
+    def test_delete_year_without_dataset_raises(self, service):
+        with pytest.raises(ValueError, match="2031"):
+            service.delete_year_dataset(2031)
+
+    def test_trash_dir_not_listed_as_dataset(self, service):
+        _seed_synthetic_year(service)
+        service.delete_year_dataset(2024)
+        _seed_synthetic_year(service)               # re-seed after delete
+        assert [d.year for d in service.list_years()] == [2024]
+
 
 class TestInputAssembly:
     def test_trades_merged_across_years_ascending(self, service, tmp_path):

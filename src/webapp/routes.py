@@ -292,11 +292,21 @@ def download(request: Request, run_id: str, mode: str, fmt: str):
 # ---------------------------------------------------------------------------
 
 @router.get("/files", response_class=HTMLResponse)
-def files(request: Request, saved: int = 0, flex_saved: int = 0):
+def files(request: Request, saved: int = 0, flex_saved: int = 0, deleted: int = 0):
     svc = _svc(request)
     return _tpl(request, "files.html", datasets=svc.list_years(), saved=saved,
                 slots=settings.SLOT_FILES, flex=svc.get_flex_config(),
-                flex_saved=flex_saved)
+                flex_saved=flex_saved, deleted=deleted)
+
+
+@router.post("/files/delete-year")
+def delete_year(request: Request, tax_year: int = Form(...)):
+    svc = _svc(request)
+    try:
+        svc.delete_year_dataset(tax_year)
+    except ValueError:
+        return RedirectResponse("/files", status_code=303)
+    return RedirectResponse(f"/files?deleted={tax_year}", status_code=303)
 
 
 @router.post("/files/flex")
