@@ -124,6 +124,16 @@ class JobRunner:
         with self._registry_lock:
             return self._jobs.get(job_id)
 
+    def run_sync(self, fn: Callable[..., Any], *args: Any, timeout: Optional[float] = None, **kwargs: Any) -> Any:
+        """Execute *fn* on the worker thread and wait for the result.
+
+        Used for short interactive work (quote-backed valuation, sale
+        simulation) that must still be serialized with engine runs — it
+        touches the same unlocked FX caches and needs the worker's decimal
+        context. Raises whatever *fn* raises.
+        """
+        return self._executor.submit(fn, *args, **kwargs).result(timeout=timeout)
+
     def shutdown(self, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait)
 

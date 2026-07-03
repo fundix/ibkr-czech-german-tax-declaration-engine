@@ -68,10 +68,19 @@ class RunService:
         data_dir: Optional[Path] = None,
         runs_dir: Optional[Path] = None,
         runner: Optional[JobRunner] = None,
+        quote_service=None,
+        converter_factory=None,
     ):
         self.data_dir = Path(data_dir) if data_dir else settings.DATA_DIR
         self.runs_dir = Path(runs_dir) if runs_dir else settings.RUNS_DIR
         self.runner = runner or JobRunner()
+        from src.webapp.quotes import QuoteService
+        self.quotes = quote_service or QuoteService(
+            overrides_path=self.data_dir / "symbol_map.json"
+        )
+        # Factory (not instance): the CNB provider is built lazily on the
+        # worker thread; tests inject a stub with fixed rates.
+        self._converter_factory = converter_factory or self._cz_converter
 
     # ------------------------------------------------------------------
     # Datasets
@@ -382,6 +391,308 @@ class RunService:
     def load_portfolio(self, run_id: str) -> Optional[Dict[str, Any]]:
         path = self.runs_dir / run_id / "portfolio.json"
         return load_json(path) if path.is_file() else None
+
+    # ------------------------------------------------------------------
+    # Live valuation (quotes + today's CZK), sale simulator, snapshots
+    # ------------------------------------------------------------------
+
+    def _cz_converter(self):
+        """Daily-ČNB converter for 'today' valuations (network-backed cache)."""
+        from src.countries.cz.fx_policy import CzCurrencyConverter
+        from src.utils.fx_provider_factory import create_fx_provider
+
+        cfg = CzTaxConfig()
+        provider = create_fx_provider(
+            cfg.fx_policy.source, cache_file_path=cfg.cnb_cache_file_path
+        )
+        return CzCurrencyConverter(provider, cfg.fx_policy)
+
+    def _to_czk(self, converter, amount: Decimal, currency: str, on_date) -> Optional[Decimal]:
+        if converter is None or amount is None:
+            return None
+        try:
+            rec = converter.convert_to_czk(Decimal(str(amount)), currency, on_date)
+            return rec.converted_amount_czk if rec else None
+        except Exception:
+            return None
+
+    def get_live_portfolio(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Portfolio snapshot augmented with live quotes + CZK valuation.
+
+        Runs on the single-worker executor (shares FX caches with engine
+        runs; worker has the decimal context)."""
+        pf = self.load_portfolio(run_id)
+        if pf is None:
+            return None
+        return self.runner.run_sync(self._compute_live_portfolio, pf, timeout=120)
+
+    def _compute_live_portfolio(self, pf: Dict[str, Any]) -> Dict[str, Any]:
+        from datetime import date as _date
+        today = _date.today()
+        converter = self._converter_factory()
+        quotes_ok = 0
+        total_value_czk = Decimal(0)
+        total_cost_czk = Decimal(0)
+        rows = []
+        for pos in pf.get("positions", []):
+            qty = Decimal(str(pos.get("quantity_long") or 0))
+            if qty == 0:
+                continue
+            row = dict(pos)
+            quote = None
+            if pos.get("category") != "OPTION":
+                quote = self.quotes.get_quote(pos.get("symbol") or "", pos.get("eoy_currency") or "USD")
+            if quote is not None:
+                price, currency, price_source = quote.price, quote.currency, "live"
+                quotes_ok += 1
+            elif pos.get("eoy_market_price"):
+                price = Decimal(str(pos["eoy_market_price"]))
+                currency = pos.get("eoy_currency") or "USD"
+                price_source = "eoy"
+            else:
+                price, currency, price_source = None, None, "none"
+
+            value_czk = cost_czk = unrealized = pct = None
+            value_ccy = None
+            if price is not None:
+                value_ccy = qty * price
+                value_czk = self._to_czk(converter, value_ccy, currency, today)
+                cost_czk = self._to_czk(
+                    converter, Decimal(str(pos.get("total_cost_eur") or 0)), "EUR", today
+                )
+                if value_czk is not None and cost_czk is not None:
+                    unrealized = value_czk - cost_czk
+                    pct = (unrealized / cost_czk * 100) if cost_czk else None
+                    total_value_czk += value_czk
+                    total_cost_czk += cost_czk
+            row.update({
+                "live_price": price, "live_currency": currency,
+                "price_source": price_source, "value_ccy": value_ccy,
+                "value_czk": value_czk, "cost_czk": cost_czk,
+                "unrealized_czk": unrealized, "unrealized_pct": pct,
+            })
+            rows.append(row)
+
+        rows.sort(key=lambda r: r.get("value_czk") or Decimal(0), reverse=True)
+        result = {
+            "as_of": today.isoformat(),
+            "tax_year": pf.get("tax_year"),
+            "positions": rows,
+            "quotes_ok": quotes_ok,
+            "quotes_total": sum(1 for r in rows if r.get("category") != "OPTION"),
+            "total_value_czk": total_value_czk if total_value_czk else None,
+            "total_cost_czk": total_cost_czk if total_cost_czk else None,
+            "total_unrealized_czk": (total_value_czk - total_cost_czk) if total_value_czk else None,
+        }
+        if result["total_value_czk"]:
+            self._maybe_save_snapshot(pf.get("tax_year"), result)
+        return result
+
+    # -- sale simulator -------------------------------------------------
+
+    def simulate_sale(
+        self,
+        run_id: str,
+        symbol: str,
+        quantity: Decimal,
+        price: Optional[Decimal] = None,
+    ) -> Dict[str, Any]:
+        pf = self.load_portfolio(run_id)
+        if pf is None:
+            raise ValueError("Pro tento běh není portfolio k dispozici.")
+        pos = next((p for p in pf.get("positions", []) if p.get("symbol") == symbol), None)
+        if pos is None:
+            raise ValueError(f"Pozice {symbol} v portfoliu není.")
+        meta = self.get_run(run_id) or {}
+        result = self.load_result(run_id, (meta.get("modes") or ["daily"])[0]) or {}
+        return self.runner.run_sync(
+            self._compute_simulation, pos, quantity, price, result, timeout=120
+        )
+
+    def _compute_simulation(
+        self,
+        pos: Dict[str, Any],
+        quantity: Decimal,
+        price: Optional[Decimal],
+        result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        from datetime import date as _date, timedelta as _timedelta
+        today = _date.today()
+        converter = self._converter_factory()
+        currency = pos.get("eoy_currency") or "USD"
+
+        price_source = "manual"
+        if price is None:
+            quote = None
+            if pos.get("category") != "OPTION":
+                quote = self.quotes.get_quote(pos.get("symbol") or "", currency)
+            if quote is not None:
+                price, currency, price_source = quote.price, quote.currency, "live"
+            elif pos.get("eoy_market_price"):
+                price = Decimal(str(pos["eoy_market_price"]))
+                price_source = "eoy"
+            else:
+                raise ValueError("Cena není k dispozici — zadejte ji ručně.")
+
+        available = Decimal(str(pos.get("quantity_long") or 0))
+        qty = min(Decimal(str(quantity)), available)
+        if qty <= 0:
+            raise ValueError("Počet kusů musí být kladný.")
+
+        time_test_applies = bool(pos.get("time_test_applicable"))
+        remaining = qty
+        consumed = []
+        exempt_gain = Decimal(0)
+        taxable_gain = Decimal(0)
+        estimated_involved = False
+        latest_deadline = None
+        for lot in pos.get("lots", []):
+            if remaining <= 0:
+                break
+            lot_qty = Decimal(str(lot["quantity"]))
+            take = min(lot_qty, remaining)
+            remaining -= take
+
+            proceeds_czk = self._to_czk(converter, take * price, currency, today)
+            cost_czk = self._to_czk(
+                converter, take * Decimal(str(lot["unit_cost_eur"])), "EUR", today
+            )
+            gain = (proceeds_czk - cost_czk) if (proceeds_czk is not None and cost_czk is not None) else None
+
+            deadline = lot.get("time_test_deadline")
+            deadline_d = _date.fromisoformat(deadline) if deadline else None
+            estimated = bool(lot.get("acquisition_estimated"))
+            estimated_involved = estimated_involved or estimated
+            exempt = bool(
+                time_test_applies and deadline_d is not None and today > deadline_d
+            )
+            if gain is not None:
+                if exempt:
+                    exempt_gain += gain
+                else:
+                    taxable_gain += gain
+            if deadline_d is not None and not exempt:
+                latest_deadline = max(latest_deadline or deadline_d, deadline_d)
+
+            consumed.append({
+                "acquisition_date": lot["acquisition_date"],
+                "quantity": take,
+                "unit_cost_eur": lot["unit_cost_eur"],
+                "cost_czk": cost_czk,
+                "proceeds_czk": proceeds_czk,
+                "gain_czk": gain,
+                "exempt": exempt,
+                "estimated": estimated,
+                "exempt_from": (
+                    (deadline_d + _timedelta(days=1)).isoformat() if deadline_d else None
+                ),
+            })
+
+        proceeds_total_czk = self._to_czk(converter, qty * price, currency, today)
+
+        # 100k annual limit interplay: simulated proceeds add to this year's
+        # already-realized eligible proceeds.
+        limit_items = (result.get("sections", {})
+                       .get("cz_10_summary", {}).get("line_items", {}))
+        existing = Decimal(str(limit_items.get("annual_limit_eligible_proceeds_czk") or 0))
+        threshold = Decimal(str(limit_items.get("annual_limit_threshold_czk") or 100000))
+        combined = existing + (proceeds_total_czk or Decimal(0))
+        under_limit = time_test_applies and combined <= threshold
+
+        tax = Decimal(0)
+        if not under_limit and taxable_gain > 0:
+            tax = (taxable_gain * Decimal("0.15")).quantize(Decimal("0.01"))
+
+        return {
+            "symbol": pos.get("symbol"),
+            "description": pos.get("description"),
+            "as_of": today.isoformat(),
+            "quantity": qty,
+            "available": available,
+            "price": price,
+            "currency": currency,
+            "price_source": price_source,
+            "proceeds_czk": proceeds_total_czk,
+            "consumed": consumed,
+            "exempt_gain_czk": exempt_gain,
+            "taxable_gain_czk": taxable_gain,
+            "estimated_involved": estimated_involved,
+            "time_test_applicable": time_test_applies,
+            "annual_limit": {
+                "existing_czk": existing,
+                "combined_czk": combined,
+                "threshold_czk": threshold,
+                "under_limit": under_limit,
+            },
+            "estimated_tax_czk": tax,
+            "wait_until": (
+                (latest_deadline + _timedelta(days=1)).isoformat()
+                if latest_deadline else None
+            ),
+        }
+
+    # -- portfolio value snapshots (SQLite) ------------------------------
+
+    def _snapshot_db(self):
+        import sqlite3
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.data_dir / "portfolio.db")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS snapshots ("
+            " taken_at TEXT NOT NULL,"
+            " tax_year INTEGER,"
+            " total_value_czk TEXT NOT NULL,"
+            " total_cost_czk TEXT,"
+            " quotes_ok INTEGER)"
+        )
+        return conn
+
+    def _maybe_save_snapshot(self, tax_year, live: Dict[str, Any]) -> None:
+        """At most one automatic snapshot per day (manual saves unrestricted)."""
+        try:
+            today = datetime.now(timezone.utc).date().isoformat()
+            with self._snapshot_db() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM snapshots WHERE substr(taken_at, 1, 10) = ?",
+                    (today,),
+                ).fetchone()
+                if row[0] == 0:
+                    self._insert_snapshot(conn, tax_year, live)
+        except Exception as exc:
+            logger.warning(f"Snapshot save failed: {exc}")
+
+    def save_snapshot(self, run_id: str) -> None:
+        live = self.get_live_portfolio(run_id)
+        if live and live.get("total_value_czk"):
+            with self._snapshot_db() as conn:
+                self._insert_snapshot(conn, live.get("tax_year"), live)
+
+    def _insert_snapshot(self, conn, tax_year, live: Dict[str, Any]) -> None:
+        conn.execute(
+            "INSERT INTO snapshots (taken_at, tax_year, total_value_czk, total_cost_czk, quotes_ok)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                tax_year,
+                str(live.get("total_value_czk")),
+                str(live.get("total_cost_czk") or ""),
+                live.get("quotes_ok") or 0,
+            ),
+        )
+
+    def list_snapshots(self, limit: int = 365) -> List[Dict[str, Any]]:
+        try:
+            with self._snapshot_db() as conn:
+                rows = conn.execute(
+                    "SELECT taken_at, total_value_czk FROM snapshots ORDER BY taken_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [
+                {"taken_at": r[0], "total_value_czk": r[1]}
+                for r in reversed(rows)
+            ]
+        except Exception:
+            return []
 
     # ------------------------------------------------------------------
     # Reading persisted runs

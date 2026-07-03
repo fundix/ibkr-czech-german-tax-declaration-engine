@@ -107,6 +107,50 @@ class TestRunFlow:
         assert "Neznámý běh" in r.text
 
 
+class TestLiveAndSimulateRoutes:
+    @pytest.fixture()
+    def stub_client(self, tmp_path_factory):
+        from decimal import Decimal
+        from tests.test_webapp_services import StubConverter, StubQuotes
+        tmp = tmp_path_factory.mktemp("webapp-stub")
+        svc = RunService(
+            data_dir=tmp / "data", runs_dir=tmp / "runs",
+            quote_service=StubQuotes({"DIVCO": (Decimal("35"), "USD")}),
+            converter_factory=StubConverter,
+        )
+        _seed_synthetic_year(svc)
+        svc._execute_run(
+            "2024-live", 2024, "daily",
+            ecb_provider=GoldenEcbProvider(),
+            cz_fx_provider=GoldenCnbProvider(),
+        )
+        with TestClient(create_app(services=svc)) as tc:
+            yield tc
+        svc.runner.shutdown(wait=False)
+
+    def test_live_fragment_values_and_allocation(self, stub_client):
+        r = stub_client.get("/results/2024-live/portfolio/live")
+        assert r.status_code == 200
+        assert "DIVCO" in r.text
+        assert "Aktuální hodnota" in r.text
+        assert "alloc-chart" in r.text
+
+    def test_simulate_form_and_post(self, stub_client):
+        r = stub_client.get("/results/2024-live/simulate")
+        assert r.status_code == 200
+        assert "DIVCO" in r.text
+        r = stub_client.post("/results/2024-live/simulate",
+                             data={"symbol": "DIVCO", "quantity": "50", "price": ""})
+        assert r.status_code == 200
+        assert "Odhad daně" in r.text
+        assert "odhad" in r.text  # SOY lot flagged in consumed lots
+
+    def test_simulate_unknown_symbol_shows_error(self, stub_client):
+        r = stub_client.post("/results/2024-live/simulate",
+                             data={"symbol": "GHOST", "quantity": "1", "price": "5"})
+        assert "GHOST" in r.text
+
+
 class TestUpload:
     def test_upload_saves_canonical_files(self, client):
         files = {

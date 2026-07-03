@@ -162,3 +162,143 @@ class TestExecuteRun:
     def test_start_run_validates_fx_mode(self, service):
         with pytest.raises(ValueError, match="režim"):
             service.start_run(2024, "bogus")
+
+
+# ---------------------------------------------------------------------------
+# Live valuation + sale simulator (stubbed quotes + FX: USD→CZK 20, EUR→CZK 25)
+# ---------------------------------------------------------------------------
+
+class StubConverter:
+    RATES = {"USD": Decimal("20"), "EUR": Decimal("25"), "CZK": Decimal("1")}
+
+    def convert_to_czk(self, amount, currency, event_date):
+        from types import SimpleNamespace
+        rate = self.RATES.get(currency)
+        if rate is None:
+            return None
+        return SimpleNamespace(converted_amount_czk=amount * rate)
+
+
+class StubQuotes:
+    def __init__(self, prices):
+        self.prices = prices  # symbol -> (price, currency)
+
+    def get_quote(self, symbol, currency):
+        from types import SimpleNamespace
+        hit = self.prices.get(symbol)
+        if hit is None:
+            return None
+        return SimpleNamespace(ibkr_symbol=symbol, yahoo_symbol=symbol,
+                               price=hit[0], currency=hit[1], fetched_at=0.0)
+
+
+def _sim_position():
+    return {
+        "symbol": "TEST", "description": "Test Corp", "category": "STOCK",
+        "time_test_applicable": True, "quantity_long": "30",
+        "eoy_currency": "USD", "eoy_market_price": "11",
+        "lots": [
+            {"acquisition_date": "2020-01-10", "quantity": "10",
+             "unit_cost_eur": "8", "acquisition_estimated": False,
+             "time_test_deadline": "2023-01-10"},   # long past → exempt
+            {"acquisition_date": "2025-06-01", "quantity": "20",
+             "unit_cost_eur": "10", "acquisition_estimated": False,
+             "time_test_deadline": "2028-06-01"},   # still running
+        ],
+    }
+
+
+def _result_with_proceeds(existing="715704.73"):
+    return {"sections": {"cz_10_summary": {"line_items": {
+        "annual_limit_eligible_proceeds_czk": existing,
+        "annual_limit_threshold_czk": "100000.00",
+    }}}}
+
+
+@pytest.fixture
+def stub_service(tmp_path):
+    svc = RunService(
+        data_dir=tmp_path / "data", runs_dir=tmp_path / "runs",
+        quote_service=StubQuotes({"TEST": (Decimal("12"), "USD")}),
+        converter_factory=StubConverter,
+    )
+    yield svc
+    svc.runner.shutdown(wait=False)
+
+
+class TestSimulator:
+    def test_fifo_split_exempt_vs_taxable_with_loss(self, stub_service):
+        # Sell 25 @ 12 USD: lot A (10 ks, exempt) gain 2400−2000 = +400;
+        # lot B (15 ks) gain 3600−3750 = −150 taxable → tax 0 (loss)
+        sim = stub_service._compute_simulation(
+            _sim_position(), Decimal("25"), Decimal("12"), _result_with_proceeds()
+        )
+        assert [c["quantity"] for c in sim["consumed"]] == [Decimal("10"), Decimal("15")]
+        assert sim["exempt_gain_czk"] == Decimal("400")
+        assert sim["taxable_gain_czk"] == Decimal("-150")
+        assert sim["estimated_tax_czk"] == Decimal("0")
+        assert sim["proceeds_czk"] == Decimal("6000")
+        assert sim["annual_limit"]["under_limit"] is False
+        assert sim["wait_until"] == "2028-06-02"
+
+    def test_positive_taxable_gain_taxed_at_15_percent(self, stub_service):
+        # Sell all 30 @ 15 USD: lot A +1000 exempt; lot B 6000−5000 = +1000
+        # taxable → tax 150.00
+        sim = stub_service._compute_simulation(
+            _sim_position(), Decimal("30"), Decimal("15"), _result_with_proceeds()
+        )
+        assert sim["exempt_gain_czk"] == Decimal("1000")
+        assert sim["taxable_gain_czk"] == Decimal("1000")
+        assert sim["estimated_tax_czk"] == Decimal("150.00")
+
+    def test_annual_limit_exempts_everything(self, stub_service):
+        # No proceeds yet this year: 30×15×20 = 9 000 Kč ≤ 100 000 → no tax
+        sim = stub_service._compute_simulation(
+            _sim_position(), Decimal("30"), Decimal("15"), _result_with_proceeds("0")
+        )
+        assert sim["annual_limit"]["under_limit"] is True
+        assert sim["estimated_tax_czk"] == Decimal("0")
+
+    def test_quantity_capped_at_available(self, stub_service):
+        sim = stub_service._compute_simulation(
+            _sim_position(), Decimal("999"), Decimal("12"), _result_with_proceeds()
+        )
+        assert sim["quantity"] == Decimal("30")
+
+    def test_live_quote_used_when_price_missing(self, stub_service):
+        sim = stub_service._compute_simulation(
+            _sim_position(), Decimal("10"), None, _result_with_proceeds()
+        )
+        assert sim["price"] == Decimal("12")
+        assert sim["price_source"] == "live"
+
+
+class TestLivePortfolio:
+    def _pf(self):
+        return {"tax_year": 2025, "positions": [
+            {**_sim_position(), "total_cost_eur": "280"},
+            {"symbol": "NOQUOTE", "description": "x", "category": "STOCK",
+             "time_test_applicable": True, "quantity_long": "5",
+             "eoy_currency": "USD", "eoy_market_price": "10",
+             "total_cost_eur": "30", "lots": []},
+        ]}
+
+    def test_live_valuation_with_fallback_and_totals(self, stub_service):
+        live = stub_service._compute_live_portfolio(self._pf())
+        by_symbol = {p["symbol"]: p for p in live["positions"]}
+        # TEST: live 12 USD → 30×12×20 = 7 200; cost 280 EUR → 7 000
+        assert by_symbol["TEST"]["price_source"] == "live"
+        assert by_symbol["TEST"]["value_czk"] == Decimal("7200")
+        assert by_symbol["TEST"]["unrealized_czk"] == Decimal("200")
+        # NOQUOTE: falls back to EOY price 10 USD → 5×10×20 = 1 000
+        assert by_symbol["NOQUOTE"]["price_source"] == "eoy"
+        assert by_symbol["NOQUOTE"]["value_czk"] == Decimal("1000")
+        assert live["total_value_czk"] == Decimal("8200")
+        assert live["quotes_ok"] == 1
+
+    def test_snapshot_saved_once_per_day(self, stub_service):
+        stub_service._compute_live_portfolio(self._pf())
+        stub_service._compute_live_portfolio(self._pf())
+        snaps = stub_service.list_snapshots()
+        assert len(snaps) == 1
+        assert Decimal(snaps[0]["total_value_czk"]) == Decimal("8200")

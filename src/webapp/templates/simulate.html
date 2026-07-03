@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Simulace prodeje {{ meta.run_id }}{% endblock %}
+{% block content %}
+{% include "partials/run_nav.html" %}
+
+<section class="card">
+  <h2>Simulace prodeje</h2>
+  {% if positions %}
+  <form hx-post="/results/{{ meta.run_id }}/simulate" hx-target="#sim-result" hx-swap="innerHTML" class="run-form sim-form">
+    <label>Pozice
+      <select name="symbol">
+        {% for p in positions %}
+        <option value="{{ p.symbol }}" {{ 'selected' if p.symbol == selected }}>{{ p.symbol }} — {{ p.quantity_long }} ks ({{ p.description | truncate(40) }})</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Počet kusů
+      <input type="text" name="quantity" required placeholder="např. 50">
+    </label>
+    <label>Cena za kus (prázdné = živá cena / cena k 31.12.)
+      <input type="text" name="price" placeholder="v měně pozice">
+    </label>
+    <button type="submit">Simulovat</button>
+  </form>
+  <div id="sim-result"></div>
+  {% else %}
+  <p>Žádné otevřené long pozice k prodeji.</p>
+  {% endif %}
+  <p class="note">Orientační simulace — přepočty dnešním kurzem ČNB (skutečné zdanění používá
+    kurzy jednotlivých dnů), sazba 15 % (23% pásmo dle celkových příjmů zohledněte sami).
+    Ztráty lze kompenzovat jen v rámci druhu příjmů §10. Nejde o daňové poradenství.</p>
+</section>
+{% endblock %}

@@ -185,6 +185,63 @@ def portfolio(request: Request, run_id: str, mode: Optional[str] = None):
                 exempt_qty=exempt_qty, soon_qty=soon_qty, page="portfolio")
 
 
+@router.get("/results/{run_id}/portfolio/live", response_class=HTMLResponse)
+def portfolio_live(request: Request, run_id: str):
+    svc = _svc(request)
+    try:
+        live = svc.get_live_portfolio(run_id)
+    except Exception as exc:
+        logger.exception("Live valuation failed")
+        return _tpl(request, "partials/job_error.html", error=f"Ocenění selhalo: {exc}")
+    if live is None:
+        return HTMLResponse("")
+    snapshots = svc.list_snapshots()
+    allocation = [
+        {"label": p["symbol"], "value": str(p["value_czk"])}
+        for p in live["positions"] if p.get("value_czk")
+    ][:12]
+    return _tpl(request, "partials/portfolio_live.html", run_id=run_id, live=live,
+                allocation=allocation, snapshots=snapshots)
+
+
+@router.post("/results/{run_id}/portfolio/snapshot", response_class=HTMLResponse)
+def save_snapshot(request: Request, run_id: str):
+    svc = _svc(request)
+    svc.save_snapshot(run_id)
+    return RedirectResponse(f"/results/{run_id}/portfolio", status_code=303)
+
+
+@router.get("/results/{run_id}/simulate", response_class=HTMLResponse)
+def simulate_form(request: Request, run_id: str, mode: Optional[str] = None,
+                  symbol: str = ""):
+    svc = _svc(request)
+    ctx = _run_context(svc, run_id, mode)
+    if ctx is None:
+        return RedirectResponse("/", status_code=303)
+    meta, modes, active = ctx
+    pf = svc.load_portfolio(run_id) or {}
+    sellable = [p for p in pf.get("positions", [])
+                if Decimal(str(p.get("quantity_long") or 0)) > 0]
+    return _tpl(request, "simulate.html", meta=meta, modes=modes, mode=active,
+                positions=sellable, selected=symbol, page="simulate")
+
+
+@router.post("/results/{run_id}/simulate", response_class=HTMLResponse)
+def simulate_run(request: Request, run_id: str,
+                 symbol: str = Form(...), quantity: str = Form(...),
+                 price: str = Form("")):
+    svc = _svc(request)
+    try:
+        sim = svc.simulate_sale(
+            run_id, symbol,
+            quantity=Decimal(quantity.replace(",", ".")),
+            price=Decimal(price.replace(",", ".")) if price.strip() else None,
+        )
+    except (ValueError, ArithmeticError) as exc:
+        return _tpl(request, "partials/job_error.html", error=str(exc))
+    return _tpl(request, "partials/sim_result.html", sim=sim)
+
+
 @router.get("/results/{run_id}/dividends", response_class=HTMLResponse)
 def dividends(request: Request, run_id: str, mode: Optional[str] = None):
     svc = _svc(request)

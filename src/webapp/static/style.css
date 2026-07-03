@@ -140,6 +140,14 @@ pre.compare {
 table.lots { margin: .3rem 0 .6rem; }
 table.lots th, table.lots td { padding: .3rem .5rem; font-size: .85rem; }
 
+/* Live portfolio: allocation chart + layout */
+.split { display: flex; gap: 1.5rem; align-items: flex-start; }
+.split .grow { flex: 1; min-width: 0; }
+.chart-box { width: 250px; flex-shrink: 0; }
+button.small { padding: .3rem .8rem; font-size: .82rem; background: #e8edf3; color: var(--text); }
+.sim-card { border-left: 4px solid var(--accent); margin-top: 1rem; }
+.sim-notes { margin-top: .8rem; }
+
 /* Dividends: monthly bars */
 .bars { display: flex; flex-direction: column; gap: .35rem; }
 .bar-row { display: flex; align-items: center; gap: .6rem; }

@@ -22,6 +22,27 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Mini-taxomat (Phase 4)** — live valuation, sale simulator, charts:
+  - **live quotes** without new dependencies (Yahoo chart endpoint via
+    `requests`; no yfinance/pandas): 15-min TTL cache incl. failures,
+    IBKR→Yahoo symbol heuristics (venue-marker stripping, currency
+    exchange suffixes, HKD zero-padding) + user overrides in
+    `data/webapp/symbol_map.json`; graceful fallback to the EOY mark
+    price with a "31.12." tag;
+  - **unrealized P/L in CZK** per position (today's ČNB daily rate; EUR
+    cost basis converted the same way — labelled as approximate), totals,
+    allocation doughnut (vendored Chart.js);
+  - **sale simulator** (`/results/<run>/simulate`): FIFO lot consumption
+    preview, per-lot exempt/taxable split using the persisted §4/1/w
+    deadlines, 100k annual-limit interplay with the year's already
+    realized proceeds, 15% tax estimate, and a "co kdybyste počkal(a) do
+    <datum>" hint; losses annotated with §10 bucket-offsetting rules;
+  - **portfolio value history**: SQLite snapshots (`data/webapp/
+    portfolio.db`, stdlib sqlite3) — at most one automatic snapshot per
+    day plus a manual save button; value-over-time line chart;
+  - `JobRunner.run_sync` executes short interactive work (valuation,
+    simulation) on the engine worker thread — serialized with runs,
+    correct decimal context.
 - **Portfolio view (Phase 3)** — the web GUI gains per-run *Portfolio* and
   *Dividendy* pages:
   - the calculation engine now returns its final FIFO ledgers

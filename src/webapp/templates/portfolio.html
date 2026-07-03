@@ -7,6 +7,10 @@
 <section class="card"><p>Na konci roku {{ meta.tax_year }} nezůstaly žádné otevřené pozice.</p></section>
 {% else %}
 
+<div hx-get="/results/{{ meta.run_id }}/portfolio/live" hx-trigger="load" hx-swap="outerHTML">
+  <section class="card"><p><span class="spinner"></span> Načítám živé ceny a přepočet na Kč…</p></section>
+</div>
+
 <section class="cards-row">
   <div class="card stat">
     <h3>Otevřené pozice k 31. 12. {{ meta.tax_year }}</h3>
