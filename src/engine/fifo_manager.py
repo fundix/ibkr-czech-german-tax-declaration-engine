@@ -318,9 +318,15 @@ class FifoLedger:
         if use_fallback:
             self.lots.clear()
             self.short_lots.clear()
+            # Reconstruction from trade history alone was insufficient. Prefer
+            # the lot-level SOY snapshot (real acquisition dates) when present
+            # and complete; only if that is unavailable fall back to a single
+            # estimated 31 Dec lot from the reported totals. The chosen branch
+            # logs which path it took, so this message stays neutral.
             logger.warning(f"Asset {asset.get_classification_key()}: Historical FIFO reconstruction "
                            f"(Long: {reconstructed_total_long_qty}, Short: {reconstructed_total_short_qty_abs}, Inconsistent: {historical_simulation_inconsistent}) "
-                           f"is insufficient or mismatched for reported SOY Qty ({reported_soy_qty}). Using SOY fallback cost/proceeds for entire quantity.")
+                           f"is insufficient or mismatched for reported SOY Qty ({reported_soy_qty}). "
+                           f"Seeding SOY from the lot-level snapshot if available, else the reported totals.")
             if reported_soy_qty > Decimal(0):
                 if not self._create_lots_from_soy_snapshot(asset, reported_soy_qty, tax_year, long_side=True):
                     self._create_fallback_long_lot(asset, reported_soy_qty, tax_year)
