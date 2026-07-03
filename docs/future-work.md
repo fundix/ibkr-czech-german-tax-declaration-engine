@@ -18,11 +18,14 @@ recommended execution order.
       hand-computed figures (per-leg CZK conversions, time-test exemption,
       100k limit, §38f/8 FTC cap edge 356.33, final tax 3 604 CZK).
       Runs offline; no network.
-- [ ] **Extend golden scenarios** to audit-fixed mechanics not yet covered
-      end-to-end: option exercise/assignment with premium folded into stock
-      basis, partial fills (M5), weekend/holiday dividend (rate fallback +
-      `conversion_note`, L9), splits/mergers, `C;O` position flip (M19),
-      negative net proceeds (L5).
+- [x] **Extend golden scenarios.** DONE (2026-07-03):
+      `tests/test_golden_scenarios_cz.py` — six hand-computed scenarios
+      pinning assignment with premium-into-stock-basis + pro-rata partial
+      consumption (M5; also documents the current M17/M18 mixed-FX-date
+      behaviour of the premium component), weekend-dividend ČNB fallback
+      audit trail (L9), forward split preserving the acquisition date,
+      cash merger (L6), `C;O` flip (M19), and negative net proceeds (L5).
+      S3–S5 additionally pin the under-100k annual-limit exemption branch.
 - [ ] **Run on real statements + reconciliation.** Process the user's real
       2024/2025 IBKR exports and reconcile against IBKR's own annual
       statements. Also unblocks M11 and L14 (both waiting on real data —
