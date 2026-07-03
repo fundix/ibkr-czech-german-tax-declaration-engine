@@ -161,3 +161,31 @@ class TestUpload:
         assert r.status_code == 303
         r = client.get("/files")
         assert "2030" in r.text
+
+
+class TestIbkrFlexRoutes:
+    def test_files_page_shows_flex_section(self, client):
+        r = client.get("/files")
+        assert "Flex Web Service" in r.text
+        assert 'name="q_trades"' in r.text
+
+    def test_flex_settings_roundtrip(self, client):
+        r = client.post("/files/flex", data={
+            "token": "secret-token-xyz",
+            "q_trades": "111", "q_cash": "222",
+            "q_positions": "333", "q_corp_actions": "444",
+        }, follow_redirects=False)
+        assert r.status_code == 303
+        r = client.get("/files")
+        assert "nastaveno" in r.text
+        assert "secret-token-xyz" not in r.text  # token never echoed back
+
+    def test_fetch_without_config_shows_error(self, tmp_path):
+        svc = RunService(data_dir=tmp_path / "data", runs_dir=tmp_path / "runs")
+        try:
+            with TestClient(create_app(services=svc)) as tc:
+                r = tc.post("/ibkr/fetch", data={"tax_year": "2026"})
+                assert r.status_code == 200
+                assert "není nastavená" in r.text
+        finally:
+            svc.runner.shutdown(wait=False)

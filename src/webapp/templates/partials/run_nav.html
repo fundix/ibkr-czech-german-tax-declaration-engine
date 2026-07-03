@@ -2,6 +2,7 @@
   <h1>Výpočet {{ meta.tax_year }} <span class="muted">({{ meta.run_id }})</span></h1>
   <p class="muted">Režim: {{ meta.fx_mode }} · {{ meta.created_at[:19] | replace("T", " ") }} · {{ meta.duration_s }} s
     {% if meta.eoy_mismatch_error_count %} · <span class="badge warn">{{ meta.eoy_mismatch_error_count }} neshod EOY pozic!</span>{% endif %}
+    {% if meta.tax_year >= today_year() %} · <span class="badge warn" title="Rok ještě není uzavřen — obchody a pozice jsou k datu posledního stažení, daňová čísla jsou průběžný odhad.">běžící rok — průběžný odhad</span>{% endif %}
   </p>
 
   {% if modes | length > 1 %}

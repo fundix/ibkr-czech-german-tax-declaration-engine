@@ -37,6 +37,13 @@ from src.countries.cz.time_test import time_test_deadline
 from src.pipeline_runner import run_core_processing_pipeline
 from src.utils.type_utils import parse_ibkr_date
 from src.webapp import settings
+from src.webapp.ibkr_flex import (
+    FLEX_SLOTS,
+    FlexConfig,
+    fetch_statement,
+    load_flex_config,
+    save_flex_config,
+)
 from src.webapp.jobs import JobRunner, JobState, engine_file_lock
 from src.webapp.serializers import dump_json, load_json
 
@@ -310,6 +317,100 @@ class RunService:
         }
         dump_json(meta, run_dir / "meta.json")
         logger.info(f"Run {run_id} finished in {meta['duration_s']} s.")
+        return meta
+
+    # ------------------------------------------------------------------
+    # IBKR Flex Web Service (automated statement download)
+    # ------------------------------------------------------------------
+
+    # slot -> canonical dataset file. Positions land as positions_end: for
+    # the RUNNING year that means "state as of the last business day" — the
+    # engine then validates FIFO against the current holdings and the tax
+    # summary is a running estimate.
+    _FLEX_SLOT_FILES = {
+        "trades": "trades.csv",
+        "cash": "cash_transactions.csv",
+        "positions": "positions_end.csv",
+        "corp_actions": "corporate_actions.csv",
+    }
+
+    @property
+    def flex_config_path(self) -> Path:
+        return self.data_dir / "ibkr_flex.json"
+
+    def get_flex_config(self) -> FlexConfig:
+        return load_flex_config(self.flex_config_path)
+
+    def save_flex_settings(self, token: str, queries: Dict[str, str]) -> None:
+        cfg = self.get_flex_config()
+        if token.strip():
+            cfg.token = token.strip()
+        cfg.queries = {k: v.strip() for k, v in queries.items() if v.strip()}
+        save_flex_config(self.flex_config_path, cfg)
+
+    def dataset_age_hours(self, tax_year: int) -> Optional[float]:
+        """Hours since the newest dataset file for the year; None if absent."""
+        year_dir = self.data_dir / str(tax_year)
+        mtimes = [f.stat().st_mtime for f in year_dir.glob("*.csv")] if year_dir.is_dir() else []
+        if not mtimes:
+            return None
+        return (time.time() - max(mtimes)) / 3600
+
+    def should_auto_fetch(self, tax_year: int, max_age_hours: float = 12.0) -> bool:
+        if not self.get_flex_config().configured:
+            return False
+        age = self.dataset_age_hours(tax_year)
+        return age is None or age > max_age_hours
+
+    def start_fetch_and_run(self, tax_year: int, fx_mode: str = "compare") -> Tuple[str, str]:
+        """Download fresh YTD statements from IBKR, then recompute — one job."""
+        if not self.get_flex_config().configured:
+            raise ValueError(
+                "IBKR Flex Web Service není nastavená — vyplňte token a query ID "
+                "na stránce Soubory."
+            )
+        run_id = f"{tax_year}-{datetime.now():%Y%m%d-%H%M%S}"
+        job_id = self.runner.submit(
+            f"Stažení z IBKR + výpočet {tax_year} ({fx_mode})",
+            self._fetch_and_run, run_id, tax_year, fx_mode,
+        )
+        return job_id, run_id
+
+    def fetch_and_run_sync(self, tax_year: int, fx_mode: str = "compare") -> Dict[str, Any]:
+        """Synchronous variant for MCP tools."""
+        if not self.get_flex_config().configured:
+            raise ValueError("IBKR Flex Web Service is not configured "
+                             "(token + query IDs in data/webapp/ibkr_flex.json).")
+        run_id = f"{tax_year}-{datetime.now():%Y%m%d-%H%M%S}"
+        return self.runner.run_sync(
+            self._fetch_and_run, run_id, tax_year, fx_mode, timeout=900
+        )
+
+    def _fetch_and_run(
+        self,
+        run_id: str,
+        tax_year: int,
+        fx_mode: str,
+        fetch=fetch_statement,
+    ) -> Dict[str, Any]:
+        cfg = self.get_flex_config()
+        year_dir = self.data_dir / str(tax_year)
+        year_dir.mkdir(parents=True, exist_ok=True)
+        fetched = []
+        for slot in FLEX_SLOTS:
+            query_id = cfg.queries.get(slot)
+            if not query_id:
+                continue
+            logger.info(f"IBKR Flex: downloading {slot} (query {query_id})…")
+            content = fetch(cfg.token, query_id)
+            target = year_dir / self._FLEX_SLOT_FILES[slot]
+            target.write_bytes(content)
+            fetched.append(slot)
+        if not fetched:
+            raise ValueError("Žádná query ID nejsou nastavená.")
+        logger.info(f"IBKR Flex: fetched {', '.join(fetched)} for {tax_year}.")
+        meta = self._execute_run(run_id, tax_year, fx_mode)
+        meta["fetched_slots"] = fetched
         return meta
 
     # ------------------------------------------------------------------

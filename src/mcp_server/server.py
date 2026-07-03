@@ -87,6 +87,12 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
         return _jsonable(svc.run_pipeline_sync(tax_year, fx_mode))
 
     @mcp.tool()
+    def refresh_data(fx_mode: str = "compare") -> dict:
+        """Download fresh Year-to-Date statements from IBKR (Flex Web Service) for the CURRENT year and recompute. Requires the token + query IDs configured on the web GUI's Files page. May take a few minutes (IBKR generates the statements server-side)."""
+        from datetime import date as _date
+        return _jsonable(svc.fetch_and_run_sync(_date.today().year, fx_mode))
+
+    @mcp.tool()
     def get_tax_summary(tax_year: int, fx_mode: str = "daily") -> dict:
         """Tax result sections for a year (§8 dividends/interest, §10 securities/options netting, §38f foreign tax credit, final liability) from the latest run."""
         run_id = _require_run(tax_year)

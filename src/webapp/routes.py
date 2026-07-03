@@ -36,11 +36,28 @@ def _svc(request: Request):
 @router.get("/", response_class=HTMLResponse)
 def index(request: Request):
     svc = _svc(request)
+    current_year = date.today().year
+    flex = svc.get_flex_config()
     return _tpl(
         request, "index.html",
         datasets=svc.list_years(),
         runs=svc.list_runs(),
+        current_year=current_year,
+        flex_configured=flex.configured,
+        auto_fetch=svc.should_auto_fetch(current_year),
+        dataset_age=svc.dataset_age_hours(current_year),
     )
+
+
+@router.post("/ibkr/fetch", response_class=HTMLResponse)
+def ibkr_fetch(request: Request, tax_year: Optional[int] = Form(None)):
+    svc = _svc(request)
+    year = tax_year or date.today().year
+    try:
+        job_id, run_id = svc.start_fetch_and_run(year)
+    except ValueError as exc:
+        return _tpl(request, "partials/job_error.html", error=str(exc))
+    return _tpl(request, "partials/job_status.html", job_id=job_id, run_id=run_id)
 
 
 @router.post("/runs", response_class=HTMLResponse)
@@ -275,10 +292,23 @@ def download(request: Request, run_id: str, mode: str, fmt: str):
 # ---------------------------------------------------------------------------
 
 @router.get("/files", response_class=HTMLResponse)
-def files(request: Request, saved: int = 0):
+def files(request: Request, saved: int = 0, flex_saved: int = 0):
     svc = _svc(request)
     return _tpl(request, "files.html", datasets=svc.list_years(), saved=saved,
-                slots=settings.SLOT_FILES)
+                slots=settings.SLOT_FILES, flex=svc.get_flex_config(),
+                flex_saved=flex_saved)
+
+
+@router.post("/files/flex")
+def save_flex(request: Request, token: str = Form(""),
+              q_trades: str = Form(""), q_cash: str = Form(""),
+              q_positions: str = Form(""), q_corp_actions: str = Form("")):
+    svc = _svc(request)
+    svc.save_flex_settings(token, {
+        "trades": q_trades, "cash": q_cash,
+        "positions": q_positions, "corp_actions": q_corp_actions,
+    })
+    return RedirectResponse("/files?flex_saved=1", status_code=303)
 
 
 @router.post("/files/upload")

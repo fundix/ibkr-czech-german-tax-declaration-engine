@@ -26,6 +26,39 @@
 </section>
 
 <section class="card">
+  <h2>IBKR Flex Web Service (automatické stahování)</h2>
+  {% if flex_saved %}<p class="badge ok">Nastavení uloženo.</p>{% endif %}
+  {% if flex.configured %}
+  <p><span class="badge ok">nastaveno</span> <span class="muted">token {{ flex.masked_token() }}</span></p>
+  {% else %}
+  <p class="note">V Client Portalu: Settings → Account Settings → Reporting → <strong>Flex Web Service</strong>
+    → vygenerujte token. U svých Flex Queries přepněte období na <strong>Year to Date</strong>
+    (pozice na <strong>Last Business Day</strong>) a sem vložte jejich ID.</p>
+  {% endif %}
+  <form method="post" action="/files/flex" class="upload-form">
+    <label>Token
+      <input type="password" name="token" placeholder="{{ 'uložen — vyplňte jen při změně' if flex.token else 'token z Client Portalu' }}">
+    </label>
+    <label>Query ID — Obchody (Trades)
+      <input type="text" name="q_trades" value="{{ flex.queries.get('trades', '') }}">
+    </label>
+    <label>Query ID — Cash transakce
+      <input type="text" name="q_cash" value="{{ flex.queries.get('cash', '') }}">
+    </label>
+    <label>Query ID — Pozice (Last Business Day)
+      <input type="text" name="q_positions" value="{{ flex.queries.get('positions', '') }}">
+    </label>
+    <label>Query ID — Korporátní akce
+      <input type="text" name="q_corp_actions" value="{{ flex.queries.get('corp_actions', '') }}">
+    </label>
+    <button type="submit">Uložit nastavení</button>
+  </form>
+  <p class="note">Token je tajemství — ukládá se jen lokálně do <code>data/webapp/ibkr_flex.json</code>
+    (mimo git) a má platnost max. 1 rok. U běžícího roku se stažené pozice použijí jako
+    „stav k poslednímu obchodnímu dni" a daňový souhrn je průběžný odhad.</p>
+</section>
+
+<section class="card">
   <h2>Nahraná data</h2>
   {% if datasets %}
   <table>

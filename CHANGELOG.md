@@ -22,6 +22,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **IBKR Flex Web Service sync (Phase 6)** — automatic statement download
+  instead of manual CSV exports: token + query IDs configured on the
+  Files page (stored locally in gitignored `data/webapp/ibkr_flex.json`,
+  token masked in the UI), client with SendRequest → GetStatement polling
+  and friendly error hints (token expiry, rate limits). One job downloads
+  all Year-to-Date statements and recomputes; dashboard button plus
+  auto-fetch on open when the current year's data are older than 12 h;
+  new MCP tool `refresh_data`. For the RUNNING year the downloaded
+  positions act as positions_end ("state as of the last business day") —
+  the engine validates FIFO against current holdings and results carry a
+  "běžící rok — průběžný odhad" badge.
 - **MCP server for Claude (Phase 5)** — `uv run --extra mcp python -m
   src.mcp_server` (stdio, official `mcp` SDK / FastMCP; `mcp` optional
   dependency group). Nine tools wrap the same `RunService` layer the web

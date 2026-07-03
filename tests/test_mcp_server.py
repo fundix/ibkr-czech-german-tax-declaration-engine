@@ -30,9 +30,9 @@ from tests.test_webapp_services import (  # noqa: E402
 from decimal import Decimal  # noqa: E402
 
 EXPECTED_TOOLS = {
-    "list_datasets", "run_pipeline", "get_tax_summary", "get_form_mapping",
-    "get_pending_review_items", "get_positions", "get_time_test_status",
-    "get_dividends", "simulate_sale",
+    "list_datasets", "run_pipeline", "refresh_data", "get_tax_summary",
+    "get_form_mapping", "get_pending_review_items", "get_positions",
+    "get_time_test_status", "get_dividends", "simulate_sale",
 }
 
 
@@ -142,3 +142,8 @@ class TestErrors:
         result = _call(server, "run_pipeline",
                        {"tax_year": 2024, "fx_mode": "bogus"})
         assert result.isError
+
+    def test_refresh_data_without_flex_config_reports_setup_hint(self, server):
+        result = _call(server, "refresh_data", {})
+        assert result.isError
+        assert "not configured" in result.content[0].text

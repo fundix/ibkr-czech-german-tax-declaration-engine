@@ -94,8 +94,18 @@ recommended execution order.
       aggregation, default PDF filename). Together with the existing file
       path flags, a full run no longer requires editing `src/config.py`
       (only cosmetic PDF fields TAXPAYER_NAME/ACCOUNT_ID remain there).
-- [ ] **Direct IBKR Flex Query download** (token + query ID) instead of
-      manual CSV export.
+- [x] **Direct IBKR Flex Query download.** DONE (2026-07-03): Flex Web
+      Service client (`src/webapp/ibkr_flex.py` — SendRequest →
+      ReferenceCode → GetStatement with 1019 polling and friendly error
+      hints incl. token expiry). Token + the 4 query IDs configured on the
+      Files page (stored in gitignored `data/webapp/ibkr_flex.json`);
+      queries must be set to Year-to-Date (positions: Last Business Day).
+      One job downloads all statements and recomputes; dashboard button +
+      auto-fetch on open when data are older than 12 h; MCP tool
+      `refresh_data`. For the RUNNING year the downloaded positions serve
+      as positions_end ("state as of the last business day") — the engine
+      validates FIFO against current holdings and the tax summary is a
+      running estimate (badge in the GUI).
 - [x] **PENDING / manual-review checklist as a first-class output** —
       RESOLVED at the GUI level (2026-07-03): the web GUI's "Ke kontrole"
       page lists PENDING items + section REVIEW notes with a nav badge.
