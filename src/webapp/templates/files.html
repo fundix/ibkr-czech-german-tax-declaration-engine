@@ -80,9 +80,11 @@
 
 <section class="card">
   <h2>Nahraná data</h2>
+  {% if deleted %}<p class="badge ok">Data roku {{ deleted }} přesunuta do koše
+    (<code>data/webapp/_trash/</code>) — případně je odtud lze vrátit zpět.</p>{% endif %}
   {% if datasets %}
   <table>
-    <thead><tr><th>Rok</th>{% for slot, label in slot_labels.items() %}<th>{{ label }}</th>{% endfor %}</tr></thead>
+    <thead><tr><th>Rok</th>{% for slot, label in slot_labels.items() %}<th>{{ label }}</th>{% endfor %}<th></th></tr></thead>
     <tbody>
       {% for ds in datasets | reverse %}
       <tr>
@@ -90,10 +92,19 @@
         {% for slot in slot_labels %}
         <td>{{ "✓" if ds.files[slot] else "–" }}</td>
         {% endfor %}
+        <td>
+          <form method="post" action="/files/delete-year"
+                onsubmit="return confirm('Smazat nahraná data roku {{ ds.year }}?\n\nSoubory se přesunou do data/webapp/_trash (nesmažou se nenávratně). Hotové výpočty zůstanou — mají vlastní kopie vstupů.');">
+            <input type="hidden" name="tax_year" value="{{ ds.year }}">
+            <button type="submit" class="small danger">Smazat</button>
+          </form>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  <p class="note">Smazání dataset přesune do koše — hodí se pro vyzkoušení čistého importu
+    z IBKR (bootstrap přes API) nebo úklid. Uložené výpočty v <code>out/webapp_runs/</code> zůstávají.</p>
   {% else %}
   <p>Zatím nic nenahráno.</p>
   {% endif %}
