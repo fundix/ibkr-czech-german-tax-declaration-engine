@@ -99,6 +99,27 @@ per-item detail, verified DAP form line references, a manual-review
 checklist, and JSON/XLSX downloads. Everything runs locally — no data leaves
 your machine.
 
+### Ask Claude about your portfolio (MCP server)
+
+```bash
+# Claude Code (one-time registration):
+claude mcp add ibkr-tax -- uv --directory /path/to/this/repo run --extra mcp python -m src.mcp_server
+```
+
+Claude Desktop — add to `claude_desktop_config.json`:
+
+```json
+{"mcpServers": {"ibkr-tax": {"command": "uv", "args": ["--directory",
+ "/path/to/this/repo", "run", "--extra", "mcp", "python", "-m", "src.mcp_server"]}}}
+```
+
+Then ask things like *"Jaký je stav časového testu u BYDDY?"*, *"Kolik jsem letos
+dostal na dividendách?"* or *"Co by mě stál prodej 100 ks PYPL?"*. Tools:
+`list_datasets`, `run_pipeline`, `get_tax_summary`, `get_form_mapping`,
+`get_pending_review_items`, `get_positions`, `get_time_test_status`,
+`get_dividends`, `simulate_sale` — thin wrappers over the same service layer
+the web GUI uses, reading the latest persisted run.
+
 ### Prerequisites
 - Python 3.10+
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/) package manager

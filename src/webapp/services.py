@@ -718,6 +718,102 @@ class RunService:
         meta_path = self.runs_dir / run_id / "meta.json"
         return load_json(meta_path) if meta_path.is_file() else None
 
+    def latest_run_id(self, tax_year: int) -> Optional[str]:
+        for meta in self.list_runs(limit=100):
+            if meta.get("tax_year") == tax_year:
+                return meta.get("run_id")
+        return None
+
+    def run_pipeline_sync(self, tax_year: int, fx_mode: str = "compare") -> Dict[str, Any]:
+        """Run the full pipeline synchronously (MCP tools wait for the result)."""
+        if fx_mode not in FX_MODES:
+            raise ValueError(f"Neznámý kurzový režim: {fx_mode}")
+        run_id = f"{tax_year}-{datetime.now():%Y%m%d-%H%M%S}"
+        return self.runner.run_sync(
+            self._execute_run, run_id, tax_year, fx_mode, timeout=600
+        )
+
+    def dividend_summary(self, run_id: str, mode: str) -> Optional[Dict[str, Any]]:
+        """Per-asset and per-month dividend aggregation from a persisted run.
+
+        Single source for the web dividends page AND the MCP tool."""
+        result = self.load_result(run_id, mode)
+        if result is None:
+            return None
+        by_asset: Dict[str, Dict[str, Any]] = {}
+        by_month: Dict[str, Decimal] = {}
+        total_czk = Decimal(0)
+        total_wht = Decimal(0)
+        for it in result.get("items", []):
+            if it.get("item_type") not in ("DIVIDEND", "FUND_DISTRIBUTION"):
+                continue
+            sym = it.get("asset_symbol") or "?"
+            a = by_asset.setdefault(sym, {
+                "symbol": sym, "description": it.get("asset_description"),
+                "country": it.get("source_country"), "count": 0,
+                "gross_czk": Decimal(0), "wht_czk": Decimal(0),
+            })
+            gross = Decimal(it.get("amount_czk") or 0)
+            wht = Decimal(it.get("wht_total_czk") or 0)
+            a["count"] += 1
+            a["gross_czk"] += gross
+            a["wht_czk"] += wht
+            total_czk += gross
+            total_wht += wht
+            month = (it.get("event_date") or "")[:7]
+            by_month[month] = by_month.get(month, Decimal(0)) + gross
+        TWO = Decimal("0.01")
+        for a in by_asset.values():
+            a["gross_czk"] = a["gross_czk"].quantize(TWO)
+            a["wht_czk"] = a["wht_czk"].quantize(TWO)
+        return {
+            "assets": sorted(by_asset.values(), key=lambda a: a["gross_czk"], reverse=True),
+            "months": [(m, v.quantize(TWO)) for m, v in sorted(by_month.items())],
+            "total_gross_czk": total_czk.quantize(TWO),
+            "total_wht_czk": total_wht.quantize(TWO),
+        }
+
+    def time_test_overview(self, run_id: str, symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Per-lot §4/1/w countdown computed from the persisted portfolio."""
+        from datetime import date as _date, timedelta as _timedelta
+        pf = self.load_portfolio(run_id)
+        if pf is None:
+            return None
+        today = _date.today()
+        positions = []
+        for pos in pf.get("positions", []):
+            if symbol and pos.get("symbol") != symbol:
+                continue
+            lots = []
+            for lot in pos.get("lots", []):
+                deadline = lot.get("time_test_deadline")
+                entry = {
+                    "acquisition_date": lot.get("acquisition_date"),
+                    "quantity": lot.get("quantity"),
+                    "acquisition_estimated": bool(lot.get("acquisition_estimated")),
+                }
+                if not pos.get("time_test_applicable"):
+                    entry["status"] = "not_applicable_derivative"
+                elif deadline is None:
+                    entry["status"] = "unknown_verify_manually"
+                else:
+                    d = _date.fromisoformat(deadline)
+                    entry["exempt_from"] = (d + _timedelta(days=1)).isoformat()
+                    days = (d - today).days + 1
+                    entry["days_remaining"] = max(days, 0)
+                    entry["status"] = "exempt_now" if days <= 0 else "running"
+                lots.append(entry)
+            positions.append({
+                "symbol": pos.get("symbol"),
+                "description": pos.get("description"),
+                "category": pos.get("category"),
+                "quantity_long": pos.get("quantity_long"),
+                "time_test_applicable": pos.get("time_test_applicable"),
+                "lots": lots,
+            })
+        return {"as_of": today.isoformat(), "tax_year": pf.get("tax_year"),
+                "positions": positions}
+
     def load_result(self, run_id: str, mode: str) -> Optional[Dict[str, Any]]:
         path = self.runs_dir / run_id / f"result.{mode}.json"
         return load_json(path) if path.is_file() else None
