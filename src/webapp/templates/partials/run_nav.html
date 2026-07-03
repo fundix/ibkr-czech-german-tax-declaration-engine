@@ -1,0 +1,27 @@
+<div class="run-header">
+  <h1>Výpočet {{ meta.tax_year }} <span class="muted">({{ meta.run_id }})</span></h1>
+  <p class="muted">Režim: {{ meta.fx_mode }} · {{ meta.created_at[:19] | replace("T", " ") }} · {{ meta.duration_s }} s
+    {% if meta.eoy_mismatch_error_count %} · <span class="badge warn">{{ meta.eoy_mismatch_error_count }} neshod EOY pozic!</span>{% endif %}
+  </p>
+
+  {% if modes | length > 1 %}
+  <div class="tabs">
+    {% for m in modes %}
+    <a class="tab {{ 'active' if m == mode }}" href="?mode={{ m }}">{{ "Denní kurz" if m == "daily" else "Jednotný kurz" }}</a>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% set pending = meta.summary.get(mode, {}).get("pending_review_count", 0) if mode else 0 %}
+  <nav class="subnav">
+    <a class="{{ 'active' if page == 'results' }}" href="/results/{{ meta.run_id }}?mode={{ mode }}">Souhrn</a>
+    <a class="{{ 'active' if page == 'items' }}" href="/results/{{ meta.run_id }}/items?mode={{ mode }}">Položky</a>
+    <a class="{{ 'active' if page == 'form' }}" href="/results/{{ meta.run_id }}/form?mode={{ mode }}">Řádky DAP</a>
+    <a class="{{ 'active' if page == 'review' }}" href="/results/{{ meta.run_id }}/review?mode={{ mode }}">
+      Ke kontrole{% if pending %} <span class="badge warn">{{ pending }}</span>{% endif %}
+    </a>
+    <span class="spacer"></span>
+    <a href="/results/{{ meta.run_id }}/download/{{ mode }}.json">⬇ JSON</a>
+    <a href="/results/{{ meta.run_id }}/download/{{ mode }}.xlsx">⬇ XLSX</a>
+  </nav>
+</div>

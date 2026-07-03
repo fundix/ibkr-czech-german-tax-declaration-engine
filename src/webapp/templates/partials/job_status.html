@@ -1,0 +1,12 @@
+<div id="job-status" hx-get="/runs/{{ job_id }}/status" hx-trigger="every 1.5s" hx-swap="outerHTML">
+  <div class="job running">
+    <span class="spinner"></span>
+    <strong>Výpočet běží…</strong>
+    {% if state and state.log_tail %}
+    <pre class="log-tail">{% for line in log_tail %}{{ line }}
+{% endfor %}</pre>
+    {% else %}
+    <p class="note">Startuje (stahování kurzů ČNB může poprvé trvat i minutu)…</p>
+    {% endif %}
+  </div>
+</div>

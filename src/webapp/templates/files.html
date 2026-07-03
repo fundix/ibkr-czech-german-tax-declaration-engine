@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Soubory{% endblock %}
+{% block content %}
+<h1>Vstupní soubory</h1>
+
+{% if saved %}
+<p class="badge ok">Uloženo {{ saved }} souborů.</p>
+{% endif %}
+
+<section class="card">
+  <h2>Nahrát výpisy IBKR (Flex Query CSV)</h2>
+  <form method="post" action="/files/upload" enctype="multipart/form-data" class="upload-form">
+    <label>Daňový rok
+      <input type="number" name="tax_year" min="2000" max="2100" required placeholder="2025">
+    </label>
+    {% for slot, label in slot_labels.items() %}
+    <label>{{ label }}
+      <input type="file" name="{{ slot }}" accept=".csv">
+    </label>
+    {% endfor %}
+    <button type="submit">Uložit</button>
+  </form>
+  <p class="note">Povinné pro běh: obchody, cash transakce a pozice na konci roku. Pozice na začátku roku
+    se automaticky převezmou z konce předchozího roku (pokud existuje); obchody a korporátní akce se před
+    výpočtem slučují ze všech nahraných let — engine z historie rekonstruuje FIFO loty.</p>
+</section>
+
+<section class="card">
+  <h2>Nahraná data</h2>
+  {% if datasets %}
+  <table>
+    <thead><tr><th>Rok</th>{% for slot, label in slot_labels.items() %}<th>{{ label }}</th>{% endfor %}</tr></thead>
+    <tbody>
+      {% for ds in datasets | reverse %}
+      <tr>
+        <td><strong>{{ ds.year }}</strong></td>
+        {% for slot in slot_labels %}
+        <td>{{ "✓" if ds.files[slot] else "–" }}</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>Zatím nic nenahráno.</p>
+  {% endif %}
+</section>
+{% endblock %}

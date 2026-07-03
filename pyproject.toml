@@ -13,6 +13,14 @@ dependencies = [
     "openpyxl>=3.1.0",
 ]
 
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
+
 [project.urls]
 Repository = "https://github.com/fundix/ibkr-czech-german-tax-declaration-engine"
 
@@ -21,4 +29,5 @@ dev = [
     "pymupdf>=1.24.11",
     "pytest",
     "pyyaml",
+    "httpx2",  # starlette TestClient backend (route tests)
 ]

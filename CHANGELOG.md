@@ -22,7 +22,26 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- `src/webapp/jobs.py` — Phase 0 server-safety primitives for the upcoming
+- **Local web GUI (Phase 1)** — `uv run --extra web python -m src.webapp`
+  starts a localhost FastAPI + Jinja2 + HTMX app (Czech UI, optional `web`
+  dependency group; no Node/build step, htmx vendored):
+  - per-year input datasets (`data/webapp/<year>/`, gitignored) with upload
+    page; trades/corporate actions merged across years for FIFO history,
+    start-of-year positions derived from the previous year's end;
+  - runs execute on the Phase 0 `JobRunner` with live HTMX progress
+    (captured engine log), each run persists its exact merged inputs +
+    JSON/XLSX exports + DAP form mapping under `out/webapp_runs/<run_id>/`;
+  - result pages: summary with daily/uniform comparison, filterable
+    per-item table, verified DAP form line references, and a
+    **manual-review checklist page** (PENDING items + section REVIEW notes
+    with a nav badge — the future-work "checklist as first-class output"
+    item, resolved at the GUI level), JSON/XLSX downloads;
+  - service layer (`src/webapp/services.py`) is framework-free and will be
+    shared with the planned MCP server.
+- `src/countries/cz/aggregation_service.py` — reusable
+  `run_cz_aggregation`/`run_cz_compare` extracted from the CLI (`main.py`
+  delegates; supports FX provider injection for offline tests).
+- `src/webapp/jobs.py` — Phase 0 server-safety primitives for the
   local web GUI: single-worker `JobRunner` (serializes engine runs, sets the
   decimal context in the worker via initializer, captures log tail and
   failures) and `engine_file_lock` (cross-process `flock` guard for the

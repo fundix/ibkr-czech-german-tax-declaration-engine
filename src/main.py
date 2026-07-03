@@ -152,44 +152,18 @@ def main_application():
     cz_fx_mode = getattr(args, "cz_fx_mode", "daily")
     if args.output_json or args.output_xlsx or cz_fx_mode == "compare":
         if args.country == "cz":
-            from src.countries.registry import get_tax_plugin
-            from src.countries.cz.config import CzTaxConfig
-            from src.countries.cz.fx_policy import uniform_fx_policy
-            from src.countries.cz.uniform_rates import CzUniformRateProvider
-            from src.utils.fx_provider_factory import create_fx_provider
-
-            # Without an FX provider the plugin degrades to EUR-only output
-            # (no CZK figures, annual limit and rate threshold inactive), so
-            # a real CZ run always wires a provider for the chosen mode.
-            def _cz_aggregate(mode: str):
-                if mode == "uniform":
-                    cfg = CzTaxConfig(fx_policy=uniform_fx_policy())
-                    provider = CzUniformRateProvider()
-                else:
-                    cfg = CzTaxConfig()
-                    provider = create_fx_provider(
-                        cfg.fx_policy.source,
-                        cache_file_path=cfg.cnb_cache_file_path,
-                    )
-                plugin = get_tax_plugin("cz", config=cfg, fx_provider=provider)
-                return plugin.get_tax_aggregator().aggregate(
-                    realized_gains_losses=processing_results.realized_gains_losses,
-                    financial_events=processing_results.processed_income_events,
-                    asset_resolver=processing_results.asset_resolver,
-                    tax_year=args.tax_year,
-                )
+            from src.countries.cz.aggregation_service import (
+                run_cz_aggregation,
+                run_cz_compare,
+            )
 
             if cz_fx_mode == "compare":
-                from src.countries.cz.fx_mode_compare import CzFxModeComparison
-                comparison = CzFxModeComparison(
-                    daily=_cz_aggregate("daily"),
-                    uniform=_cz_aggregate("uniform"),
-                )
+                comparison = run_cz_compare(processing_results, args.tax_year)
                 for line in comparison.render_lines():
                     print(line)
                 cz_exports = [("daily", comparison.daily), ("uniform", comparison.uniform)]
             else:
-                cz_exports = [(cz_fx_mode, _cz_aggregate(cz_fx_mode))]
+                cz_exports = [(cz_fx_mode, run_cz_aggregation(processing_results, args.tax_year, cz_fx_mode))]
 
             def _mode_suffixed(path: str, mode: str) -> str:
                 # In compare mode both results are exported side by side:

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Přehled</h1>
+
+<section class="card">
+  <h2>Spustit výpočet</h2>
+  {% set ready = datasets | selectattr("run_ready") | list %}
+  {% if ready %}
+  <form hx-post="/runs" hx-target="#job-status" hx-swap="innerHTML" class="run-form">
+    <label>Daňový rok
+      <select name="tax_year">
+        {% for ds in ready | reverse %}
+        <option value="{{ ds.year }}">{{ ds.year }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <fieldset>
+      <legend>Kurzový režim (§38/1 ZDP)</legend>
+      <label><input type="radio" name="fx_mode" value="compare" checked> Porovnat oba (doporučeno)</label>
+      <label><input type="radio" name="fx_mode" value="daily"> Denní kurz ČNB</label>
+      <label><input type="radio" name="fx_mode" value="uniform"> Jednotný kurz</label>
+    </fieldset>
+    <button type="submit">Spustit výpočet</button>
+  </form>
+  <div id="job-status"></div>
+  {% else %}
+  <p>Zatím nejsou nahraná žádná kompletní data. <a href="/files">Nahrát výpisy →</a></p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Datové sady</h2>
+  {% if datasets %}
+  <table>
+    <thead><tr><th>Rok</th><th>Obchody</th><th>Cash</th><th>Pozice začátek</th><th>Pozice konec</th><th>Korp. akce</th><th>Stav</th></tr></thead>
+    <tbody>
+      {% for ds in datasets | reverse %}
+      <tr>
+        <td><strong>{{ ds.year }}</strong></td>
+        <td>{{ "✓" if ds.files.trades else "–" }}</td>
+        <td>{{ "✓" if ds.files.cash else "–" }}</td>
+        <td>{{ "✓" if ds.files.positions_start else "auto" }}</td>
+        <td>{{ "✓" if ds.files.positions_end else "–" }}</td>
+        <td>{{ "✓" if ds.files.corp_actions else "auto" }}</td>
+        <td>
+          {% if ds.run_ready %}<span class="badge ok">připraveno</span>
+          {% else %}<span class="badge warn">chybí soubory</span>{% endif %}
+          {% for note in ds.notes %}<div class="note">{{ note }}</div>{% endfor %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>Žádná data. <a href="/files">Nahrát výpisy →</a></p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Poslední běhy</h2>
+  {% if runs %}
+  <table>
+    <thead><tr><th>Běh</th><th>Rok</th><th>Režim</th><th>Výsledná daň (denní)</th><th>Trvání</th><th></th></tr></thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td>{{ run.run_id }}</td>
+        <td>{{ run.tax_year }}</td>
+        <td>{{ run.fx_mode }}</td>
+        <td class="num">{% if run.summary.daily %}{{ run.summary.daily.final_tax_czk | czk }} Kč{% else %}–{% endif %}</td>
+        <td>{{ run.duration_s }} s</td>
+        <td><a href="/results/{{ run.run_id }}">Výsledky →</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>Zatím žádné běhy.</p>
+  {% endif %}
+</section>
+{% endblock %}

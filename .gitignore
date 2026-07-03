@@ -115,3 +115,7 @@ cache/
 data/
 
 .DS_Store
+
+# Web GUI: personal input data and run outputs — never commit
+data/webapp/
+out/
