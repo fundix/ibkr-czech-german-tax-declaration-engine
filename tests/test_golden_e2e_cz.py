@@ -27,14 +27,12 @@ Scenario (all USD):
 Annual 100k limit: taxable disposal proceeds (ALPHA only) = 136,256.86 CZK
 > 100,000 -> deliberately NOT applied.
 """
-import datetime
 from decimal import Decimal
-from typing import Dict, Optional, Set, Tuple
 
 from src.countries.cz.config import CzTaxConfig
 from src.countries.registry import get_tax_plugin
-from src.utils.exchange_rate_provider import ExchangeRateProvider
 from tests.support.base import FifoTestCaseBase
+from tests.support.golden_fx import GoldenCnbProvider, GoldenEcbProvider
 
 TAX_YEAR = 2024
 TWO = Decimal("0.01")
@@ -42,85 +40,6 @@ TWO = Decimal("0.01")
 
 def q2(value) -> Decimal:
     return Decimal(value).quantize(TWO)
-
-
-# ---------------------------------------------------------------------------
-# Pinned real FX rates (fetched 2026-07-02 straight from the public APIs)
-# ---------------------------------------------------------------------------
-
-class GoldenEcbProvider(ExchangeRateProvider):
-    """Real ECB reference rates, pinned. Convention: USD units per 1 EUR."""
-
-    USD_PER_EUR: Dict[datetime.date, Decimal] = {
-        datetime.date(2020, 6, 15): Decimal("1.1253"),
-        # SOY fallback lot for DIVCO asks for Jan 1; the real provider
-        # falls back to the 2023-12-29 fixing (1.105).
-        datetime.date(2024, 1, 1): Decimal("1.105"),
-        datetime.date(2024, 2, 12): Decimal("1.0773"),
-        datetime.date(2024, 3, 5): Decimal("1.0849"),
-        datetime.date(2024, 4, 15): Decimal("1.0656"),
-        datetime.date(2024, 5, 20): Decimal("1.0861"),
-        datetime.date(2024, 9, 10): Decimal("1.1031"),
-    }
-
-    def get_rate(self, date_of_conversion: datetime.date, currency_code: str) -> Optional[Decimal]:
-        ccy = currency_code.upper()
-        if ccy == "EUR":
-            return Decimal("1")
-        if ccy == "USD":
-            return self.USD_PER_EUR.get(date_of_conversion)
-        return None
-
-    def prefetch_rates(self, start_date: datetime.date, end_date: datetime.date, currencies: Set[str]):
-        pass
-
-    def get_currency_code_mapping(self) -> Dict[str, str]:
-        return {"CNH": "CNY"}
-
-    def get_max_fallback_days(self) -> int:
-        return 7
-
-
-class GoldenCnbProvider(ExchangeRateProvider):
-    """Real ČNB rates, pinned. Stored as CZK per 1 foreign unit; ``get_rate``
-    returns the provider convention (foreign units per 1 CZK)."""
-
-    CZK_PER_UNIT: Dict[Tuple[str, datetime.date], Decimal] = {
-        ("EUR", datetime.date(2020, 6, 15)): Decimal("26.680"),
-        ("EUR", datetime.date(2024, 2, 12)): Decimal("25.215"),
-        ("EUR", datetime.date(2024, 3, 5)): Decimal("25.355"),
-        # Only gates the zero-amount cost leg of the option expiry.
-        ("EUR", datetime.date(2024, 3, 15)): Decimal("25.155"),
-        ("EUR", datetime.date(2024, 5, 20)): Decimal("24.745"),
-        ("EUR", datetime.date(2024, 9, 10)): Decimal("25.055"),
-        ("USD", datetime.date(2024, 4, 15)): Decimal("23.768"),
-    }
-
-    def get_rate(self, date_of_conversion: datetime.date, currency_code: str) -> Optional[Decimal]:
-        ccy = currency_code.upper()
-        if ccy == "CZK":
-            return Decimal("1")
-        czk = self.CZK_PER_UNIT.get((ccy, date_of_conversion))
-        if czk is None:
-            return None
-        return Decimal("1") / czk
-
-    def get_rate_info(
-        self, date_of_conversion: datetime.date, currency_code: str
-    ) -> Optional[Tuple[Decimal, datetime.date]]:
-        rate = self.get_rate(date_of_conversion, currency_code)
-        if rate is None:
-            return None
-        return rate, date_of_conversion
-
-    def prefetch_rates(self, start_date: datetime.date, end_date: datetime.date, currencies: Set[str]):
-        pass
-
-    def get_currency_code_mapping(self) -> Dict[str, str]:
-        return {}
-
-    def get_max_fallback_days(self) -> int:
-        return 7
 
 
 # ---------------------------------------------------------------------------
