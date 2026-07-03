@@ -7,7 +7,8 @@
     </div>
     <div class="card stat">
       <h3>Nerealizovaný zisk/ztráta</h3>
-      <p class="big {{ 'neg' if live.total_unrealized_czk and live.total_unrealized_czk < 0 }}">{{ live.total_unrealized_czk | czk }} Kč</p>
+      <p class="big {{ 'neg' if live.total_unrealized_czk and live.total_unrealized_czk < 0 }}">{{
+        live.total_unrealized_czk | czk }} Kč</p>
       <p class="muted">vs. pořizovací náklady {{ live.total_cost_czk | czk }} Kč</p>
     </div>
     <div class="card stat">
@@ -25,68 +26,80 @@
 
   <section class="card">
     <div class="split">
+      {% if allocation %}
+      <div class="chart-box">
+        <h2>Alokace</h2>
+        <canvas id="alloc-chart" width="230" height="230"></canvas>
+      </div>
+      {% endif %}
       <div class="grow">
         <h2>Živé ocenění</h2>
         <table class="items">
           <thead>
-            <tr><th>Symbol</th><th class="num">Kusů</th><th class="num">Cena</th>
-                <th class="num">Hodnota Kč</th><th class="num">Náklady Kč</th>
-                <th class="num">Nerealizováno Kč</th><th class="num">%</th></tr>
+            <tr>
+              <th>Symbol</th>
+              <th class="num">Kusů</th>
+              <th class="num">Cena</th>
+              <th class="num">Hodnota Kč</th>
+              <th class="num">Náklady Kč</th>
+              <th class="num">Nerealizováno Kč</th>
+              <th class="num">%</th>
+            </tr>
           </thead>
           <tbody>
             {% for p in live.positions %}
             <tr>
               <td><strong>{{ p.symbol }}</strong>
-                {% if p.price_source == "eoy" %}<span class="badge muted" title="Živá cena nedostupná — použita cena k 31.12. Přidejte mapování do data/webapp/symbol_map.json.">31.12.</span>
+                {% if p.price_source == "eoy" %}<span class="badge muted"
+                  title="Živá cena nedostupná — použita cena k 31.12. Přidejte mapování do data/webapp/symbol_map.json.">31.12.</span>
                 {% elif p.price_source == "none" %}<span class="badge warn">bez ceny</span>{% endif %}
               </td>
               <td class="num">{{ p.quantity_long }}</td>
               <td class="num">{{ p.live_price | czk if p.live_price else "–" }} {{ p.live_currency or "" }}</td>
               <td class="num">{{ p.value_czk | czk if p.value_czk else "–" }}</td>
               <td class="num">{{ p.cost_czk | czk if p.cost_czk else "–" }}</td>
-              <td class="num {{ 'neg' if p.unrealized_czk and p.unrealized_czk < 0 }}">{{ p.unrealized_czk | czk if p.unrealized_czk is not none else "–" }}</td>
-              <td class="num {{ 'neg' if p.unrealized_pct and p.unrealized_pct < 0 }}">{{ "%.1f"|format(p.unrealized_pct) if p.unrealized_pct is not none else "–" }}</td>
+              <td class="num {{ 'neg' if p.unrealized_czk and p.unrealized_czk < 0 }}">{{ p.unrealized_czk | czk if
+                p.unrealized_czk is not none else "–" }}</td>
+              <td class="num {{ 'neg' if p.unrealized_pct and p.unrealized_pct < 0 }}">{{
+                "%.1f"|format(p.unrealized_pct) if p.unrealized_pct is not none else "–" }}</td>
             </tr>
             {% endfor %}
           </tbody>
         </table>
         <p class="note">Přepočet na Kč dnešním denním kurzem ČNB (náklady z EUR — orientační).
-          Chybějící živé ceny lze mapovat v <code>data/webapp/symbol_map.json</code> ({"IBKR_SYMBOL": "YAHOO.SYMBOL"}).</p>
+          Chybějící živé ceny lze mapovat v <code>data/webapp/symbol_map.json</code> ({"IBKR_SYMBOL": "YAHOO.SYMBOL"}).
+        </p>
       </div>
-      {% if allocation %}
-      <div class="chart-box">
-        <h3>Alokace</h3>
-        <canvas id="alloc-chart" width="230" height="230"></canvas>
-      </div>
-      {% endif %}
+
     </div>
   </section>
 
   <script>
-    (function() {
-      const alloc = {{ allocation | tojson }};
-      if (alloc.length && window.Chart) {
-        new Chart(document.getElementById('alloc-chart'), {
-          type: 'doughnut',
-          data: {
-            labels: alloc.map(a => a.label),
-            datasets: [{ data: alloc.map(a => parseFloat(a.value)) }]
-          },
-          options: { plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } } } }
-        });
-      }
-      const snaps = {{ snapshots | tojson }};
-      const el = document.getElementById('value-chart');
-      if (el && snaps.length > 1 && window.Chart) {
-        new Chart(el, {
-          type: 'line',
-          data: {
-            labels: snaps.map(s => s.taken_at.slice(0, 10)),
-            datasets: [{ data: snaps.map(s => parseFloat(s.total_value_czk)), fill: true, tension: .25, pointRadius: 2 }]
-          },
-          options: { plugins: { legend: { display: false } }, scales: { y: { ticks: { font: { size: 9 } } }, x: { ticks: { font: { size: 9 } } } } }
-        });
-      }
-    })();
+    (function () {
+      const alloc = {{ allocation | tojson
+    }};
+    if (alloc.length && window.Chart) {
+      new Chart(document.getElementById('alloc-chart'), {
+        type: 'doughnut',
+        data: {
+          labels: alloc.map(a => a.label),
+          datasets: [{ data: alloc.map(a => parseFloat(a.value)) }]
+        },
+        options: { plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } } } }
+      });
+    }
+    const snaps = {{ snapshots | tojson }};
+    const el = document.getElementById('value-chart');
+    if (el && snaps.length > 1 && window.Chart) {
+      new Chart(el, {
+        type: 'line',
+        data: {
+          labels: snaps.map(s => s.taken_at.slice(0, 10)),
+          datasets: [{ data: snaps.map(s => parseFloat(s.total_value_czk)), fill: true, tension: .25, pointRadius: 2 }]
+        },
+        options: { plugins: { legend: { display: false } }, scales: { y: { ticks: { font: { size: 9 } } }, x: { ticks: { font: { size: 9 } } } } }
+      });
+    }
+    }) ();
   </script>
 </div>
