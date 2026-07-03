@@ -115,7 +115,8 @@ class TestExecuteRun:
         assert meta["eoy_mismatch_error_count"] == 0
 
         run_dir = service.runs_dir / "2024-test"
-        for name in ("meta.json", "result.daily.json", "result.daily.xlsx", "form.daily.json"):
+        for name in ("meta.json", "result.daily.json", "result.daily.xlsx",
+                     "result.daily.pdf", "form.daily.json"):
             assert (run_dir / name).is_file(), f"missing {name}"
         # The exact inputs the engine consumed are preserved for audit
         assert (run_dir / "inputs" / "trades.csv").is_file()
@@ -130,6 +131,7 @@ class TestExecuteRun:
         assert "CZ_DAP_8_TOTAL" in codes
         assert service.list_runs()[0]["run_id"] == "2024-test"
         assert service.export_path("2024-test", "daily", "xlsx").is_file()
+        assert service.export_path("2024-test", "daily", "pdf").is_file()
 
     def test_portfolio_snapshot_from_open_fifo_lots(self, service):
         _seed_synthetic_year(service)

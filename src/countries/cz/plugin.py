@@ -354,10 +354,9 @@ class CzechTaxAggregator:
 
 class CzechOutputRenderer:
     """
-    Renders a CZ ``TaxResult`` to console / PDF.
+    Renders a CZ ``TaxResult`` to the console (simple section dump).
 
-    PLACEHOLDER: only console output implemented (simple dump).
-    PDF generation is a future step.
+    File outputs live in ``src/countries/cz/exporters/`` (JSON, XLSX, PDF).
     """
 
     def render_console(

@@ -10,7 +10,7 @@ Data layout:
 - inputs:  ``data/webapp/<year>/<canonical name>`` (see settings.SLOT_FILES)
 - runs:    ``out/webapp_runs/<run_id>/`` with ``inputs/`` (the exact merged
            files the engine consumed), ``meta.json``, ``result.<mode>.json``,
-           ``result.<mode>.xlsx``, ``form.<mode>.json``
+           ``result.<mode>.xlsx``, ``result.<mode>.pdf``, ``form.<mode>.json``
 
 Trades and corporate actions are merged across ALL dataset years <= the tax
 year (ascending) before a run: the engine reconstructs start-of-year FIFO
@@ -296,12 +296,14 @@ class RunService:
                 mode_results = [(fx_mode, result)]
 
         from src.countries.cz.exporters.json_exporter import export_cz_to_json
+        from src.countries.cz.exporters.pdf_exporter import export_cz_to_pdf
         from src.countries.cz.exporters.xlsx_exporter import export_cz_to_xlsx
 
         summary: Dict[str, Dict[str, Any]] = {}
         for mode, result in mode_results:
             export_cz_to_json(result, output=str(run_dir / f"result.{mode}.json"))
             export_cz_to_xlsx(result, output=str(run_dir / f"result.{mode}.xlsx"))
+            export_cz_to_pdf(result, output=str(run_dir / f"result.{mode}.pdf"))
 
             cr = result.country_result or {}
             form_mapping = cr.get("form_mapping")
@@ -947,7 +949,7 @@ class RunService:
         return load_json(path) if path.is_file() else None
 
     def export_path(self, run_id: str, mode: str, fmt: str) -> Optional[Path]:
-        if fmt not in ("json", "xlsx"):
+        if fmt not in ("json", "xlsx", "pdf"):
             return None
         path = self.runs_dir / run_id / f"result.{mode}.{fmt}"
         return path if path.is_file() else None

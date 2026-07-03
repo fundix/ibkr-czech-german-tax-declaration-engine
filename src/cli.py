@@ -45,6 +45,7 @@ def parse_arguments():
     # Export options (primarily for CZ plugin)
     parser.add_argument("--output-json", type=str, default=None, metavar="FILE", help="Export tax result to JSON file (CZ plugin).")
     parser.add_argument("--output-xlsx", type=str, default=None, metavar="FILE", help="Export tax result to XLSX file (CZ plugin).")
+    parser.add_argument("--output-pdf", type=str, default=None, metavar="FILE", help="Export tax result to a PDF report (CZ plugin).")
     parser.add_argument(
         "--cz-fx-mode",
         choices=["daily", "uniform", "compare"],

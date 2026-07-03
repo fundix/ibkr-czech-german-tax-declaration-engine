@@ -89,6 +89,9 @@ class TestPages:
         r = client.get("/results/2024-test/download/daily.xlsx")
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("application/")
+        r = client.get("/results/2024-test/download/daily.pdf")
+        assert r.status_code == 200
+        assert r.content[:5] == b"%PDF-"
         assert client.get("/results/2024-test/download/daily.exe").status_code == 404
 
     def test_unknown_run_redirects_home(self, client):

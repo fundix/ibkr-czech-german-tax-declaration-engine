@@ -150,7 +150,7 @@ def main_application():
 
     # --- CZ aggregation: JSON/XLSX exports and/or FX-mode comparison ---
     cz_fx_mode = getattr(args, "cz_fx_mode", "daily")
-    if args.output_json or args.output_xlsx or cz_fx_mode == "compare":
+    if args.output_json or args.output_xlsx or args.output_pdf or cz_fx_mode == "compare":
         if args.country == "cz":
             from src.countries.cz.aggregation_service import (
                 run_cz_aggregation,
@@ -184,6 +184,16 @@ def main_application():
                     out_path = _mode_suffixed(args.output_xlsx, mode)
                     export_cz_to_xlsx(cz_result, output=out_path)
                     logger.info(f"CZ XLSX export ({mode} FX mode) written to {out_path}")
+                if args.output_pdf:
+                    from src.countries.cz.exporters.pdf_exporter import export_cz_to_pdf
+                    out_path = _mode_suffixed(args.output_pdf, mode)
+                    export_cz_to_pdf(
+                        cz_result,
+                        output=out_path,
+                        taxpayer_name=getattr(config, "TAXPAYER_NAME", None),
+                        account_id=getattr(config, "ACCOUNT_ID", None),
+                    )
+                    logger.info(f"CZ PDF export ({mode} FX mode) written to {out_path}")
         else:
             logger.warning(f"JSON/XLSX export and --cz-fx-mode are currently only supported for --country cz, not '{args.country}'.")
 
