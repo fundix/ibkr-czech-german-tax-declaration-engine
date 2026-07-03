@@ -69,10 +69,11 @@ class FlexFetchError(RuntimeError):
 class FlexConfig:
     token: str = ""
     queries: Dict[str, str] = field(default_factory=dict)  # slot -> query id
-    # Optional bootstrap queries with the "Last Calendar Year" period —
-    # fetched once into the PREVIOUS year's dataset when it is missing, so
-    # a fresh install fills the running + previous year purely via the API.
-    prev_year_queries: Dict[str, str] = field(default_factory=dict)
+    # Optional: first year of trading at IBKR. When set, a fetch also
+    # bootstraps every MISSING older dataset year via the fd/td period
+    # override on the same queries (365 days is the max WINDOW per request,
+    # not a history-depth limit — verified empirically 2026-07).
+    first_year: Optional[int] = None
 
     @property
     def configured(self) -> bool:
@@ -88,11 +89,11 @@ def load_flex_config(path: Path) -> FlexConfig:
     try:
         if path.is_file():
             data = json.loads(path.read_text(encoding="utf-8"))
+            raw_year = data.get("first_year")
             return FlexConfig(
                 token=str(data.get("token") or ""),
                 queries={k: str(v) for k, v in (data.get("queries") or {}).items() if v},
-                prev_year_queries={k: str(v) for k, v in
-                                   (data.get("prev_year_queries") or {}).items() if v},
+                first_year=int(raw_year) if raw_year else None,
             )
     except Exception as exc:
         logger.warning(f"Unreadable ibkr_flex.json: {exc}")
@@ -103,7 +104,7 @@ def save_flex_config(path: Path, config: FlexConfig) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps({"token": config.token, "queries": config.queries,
-                    "prev_year_queries": config.prev_year_queries},
+                    "first_year": config.first_year},
                    ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -132,16 +133,28 @@ def fetch_statement(
     query_id: str,
     http_get: Callable[[str, Dict[str, str]], bytes] = _http_get,
     sleep: Callable[[float], None] = time.sleep,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
 ) -> bytes:
     """Download one Flex Query statement (CSV bytes). Raises FlexFetchError.
+
+    ``from_date``/``to_date`` (yyyymmdd) override the query's saved period
+    via the documented fd/td parameters — the window may span at most 365
+    days but can start arbitrarily far back (Open Positions sections then
+    return the snapshot as of ``to_date``).
 
     IBKR throttles per-token request bursts (error 1018) — both protocol
     steps treat 1018 as RETRYABLE with a longer backoff instead of failing
     the whole download.
     """
+    request_params = {"t": token, "q": query_id, "v": "3"}
+    if from_date and to_date:
+        request_params["fd"] = from_date
+        request_params["td"] = to_date
+
     ref = None
     for attempt in range(_RATE_LIMIT_RETRIES):
-        body = http_get(SEND_REQUEST_URL, {"t": token, "q": query_id, "v": "3"}).decode(
+        body = http_get(SEND_REQUEST_URL, request_params).decode(
             "utf-8", errors="replace"
         )
         err = _parse_error(body)

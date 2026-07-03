@@ -119,12 +119,12 @@ the API** (no manual export):
   acquisition date (`OpenDateTime`), so the §4/1/w time test works even
   for positions bought years before your trade history starts (the SOY
   seeding uses real dates instead of an estimated 31 Dec lot).
-- **Previous-year queries**: duplicate the four queries with the
-  **Last Calendar Year** period and enter their IDs in the "Bootstrap
-  loňského roku" section. When the previous year's dataset is missing,
-  one fetch fills it automatically (trade history for FIFO + the 31 Dec
-  positions snapshot). Note the Flex Web Service reaches only ~1 year
-  back — older years still need a manual export from Client Portal.
+- **First trading year**: fill in "První rok obchodování" in the Flex
+  section. A fetch then automatically backfills every *missing* dataset
+  year using the documented `fd`/`td` period override on the same
+  queries — one calendar year per request (365 days limits the request
+  *window*, not how far back it may start; old-year positions arrive as
+  the 31 Dec snapshot). Existing years are never overwritten.
 
 ### Ask Claude about your portfolio (MCP server)
 

@@ -37,6 +37,20 @@ class TestFetchStatement:
         assert calls[0] == ("SendRequest", {"t": "tok", "q": "42", "v": "3"})
         assert calls[1] == ("GetStatement", {"t": "tok", "q": "REF123", "v": "3"})
 
+    def test_period_override_adds_fd_td_to_send_request_only(self):
+        calls = []
+
+        def http_get(url, params):
+            calls.append((url.rsplit("/", 1)[-1], dict(params)))
+            return SEND_OK if "SendRequest" in url else CSV_BODY
+
+        fetch_statement("tok", "42", http_get=http_get,
+                        from_date="20250101", to_date="20251231")
+        assert calls[0] == ("SendRequest", {"t": "tok", "q": "42", "v": "3",
+                                            "fd": "20250101", "td": "20251231"})
+        # GetStatement polls the reference code — no period params there
+        assert calls[1] == ("GetStatement", {"t": "tok", "q": "REF123", "v": "3"})
+
     def test_polls_while_generating(self):
         responses = iter([SEND_OK, GENERATING, GENERATING, CSV_BODY])
         slept = []
@@ -150,7 +164,7 @@ class TestServiceFetchFlow:
         )
         fetched_queries = []
 
-        def fake_fetch(token, query_id):
+        def fake_fetch(token, query_id, from_date=None, to_date=None):
             fetched_queries.append((token, query_id))
             return f"data-{query_id}".encode()
 
@@ -169,62 +183,96 @@ class TestServiceFetchFlow:
         # IBKR throttles per-token bursts — a pause between each download
         assert len(pauses) == 3
 
-    def test_prev_year_bootstrap_fetched_when_dataset_missing(self, service, monkeypatch):
+    def test_bootstrap_fetches_all_missing_years_via_fd_td(self, service, monkeypatch):
         service.save_flex_settings(
             "tok",
             {"trades": "11", "cash": "22", "positions": "33", "corp_actions": "44"},
-            prev_year_queries={"trades": "91", "cash": "92",
-                               "positions": "93", "corp_actions": "94"},
+            first_year="2024",
         )
         captured = {}
         monkeypatch.setattr(
             service, "_execute_run",
             lambda run_id, year, fx_mode, **kw: captured.update(kw) or {"run_id": run_id},
         )
+        fetch_calls = []
+
+        def fake_fetch(token, query_id, from_date=None, to_date=None):
+            fetch_calls.append((query_id, from_date, to_date))
+            return f"data-{query_id}-{to_date}".encode()
+
         pauses = []
         meta = service._fetch_and_run("2026-x", 2026, "daily",
-                                      fetch=lambda t, q: f"data-{q}".encode(),
-                                      pause=pauses.append)
+                                      fetch=fake_fetch, pause=pauses.append)
 
-        prev_dir = service.data_dir / "2025"
-        assert (prev_dir / "trades.csv").read_bytes() == b"data-91"
-        # prev-year positions = snapshot as of 31 Dec -> positions_end
-        assert (prev_dir / "positions_end.csv").read_bytes() == b"data-93"
-        assert meta["fetched_slots_prev_year"] == ["trades", "cash", "positions", "corp_actions"]
-        assert any("2025" in n for n in captured["extra_notes"])
-        # 3 pauses within the current year + 4 for the prev-year batch
-        assert len(pauses) == 7
+        # Missing 2024 + 2025 bootstrapped oldest-first with full-year fd/td;
+        # the current year keeps the queries' saved (YTD) period.
+        assert fetch_calls[:4] == [(q, "20240101", "20241231")
+                                   for q in ("11", "22", "33", "44")]
+        assert fetch_calls[4:8] == [(q, "20250101", "20251231")
+                                    for q in ("11", "22", "33", "44")]
+        assert fetch_calls[8:] == [(q, None, None) for q in ("11", "22", "33", "44")]
 
-    def test_prev_year_bootstrap_skipped_when_dataset_ready(self, service, monkeypatch):
+        # Positions land as positions_end (31 Dec snapshot for old years)
+        assert (service.data_dir / "2024" / "positions_end.csv").read_bytes() \
+            == b"data-33-20241231"
+        assert (service.data_dir / "2025" / "trades.csv").read_bytes() \
+            == b"data-11-20251231"
+        assert meta["bootstrapped_years"] == [2024, 2025]
+        assert any("2024, 2025" in n for n in captured["extra_notes"])
+        # A pause between every consecutive download: 12 requests -> 11 pauses
+        assert len(pauses) == 11
+
+    def test_bootstrap_skips_existing_years_and_survives_a_failed_one(self, service, monkeypatch):
         service.save_flex_settings(
             "tok",
             {"trades": "11", "cash": "22", "positions": "33", "corp_actions": "44"},
-            prev_year_queries={"trades": "91", "cash": "92",
-                               "positions": "93", "corp_actions": "94"},
+            first_year="2024",
         )
         # A run-ready 2025 dataset already exists — must NOT be overwritten
-        for slot, name in (("trades", "trades.csv"), ("cash", "cash_transactions.csv"),
-                           ("positions_end", "positions_end.csv")):
+        for slot in ("trades", "cash", "positions_end"):
             service.save_upload(2025, slot, b"existing\n")
+        captured = {}
+        monkeypatch.setattr(
+            service, "_execute_run",
+            lambda run_id, year, fx_mode, **kw: captured.update(kw) or {"run_id": run_id},
+        )
+
+        def fake_fetch(token, query_id, from_date=None, to_date=None):
+            if to_date == "20241231":  # IBKR cannot deliver 2024
+                raise FlexFetchError("stará data nejsou", code="1020")
+            return f"data-{query_id}".encode()
+
+        meta = service._fetch_and_run("2026-x", 2026, "daily",
+                                      fetch=fake_fetch, pause=lambda s: None)
+
+        # 2024 failed but the job carried on; 2025 untouched; 2026 fetched
+        assert "bootstrapped_years" not in meta
+        assert any("2024" in n and "selhalo" in n for n in captured["extra_notes"])
+        assert (service.data_dir / "2025" / "trades.csv").read_bytes() == b"existing\n"
+        assert (service.data_dir / "2026" / "trades.csv").read_bytes() == b"data-11"
+
+    def test_no_bootstrap_without_first_year(self, service, monkeypatch):
+        service.save_flex_settings("tok", {"trades": "11"})
         monkeypatch.setattr(service, "_execute_run",
                             lambda run_id, year, fx_mode, **kw: {"run_id": run_id})
-        fetched_queries = []
-        meta = service._fetch_and_run("2026-x", 2026, "daily",
-                                      fetch=lambda t, q: fetched_queries.append(q)
-                                      or f"data-{q}".encode(),
-                                      pause=lambda s: None)
-        assert "fetched_slots_prev_year" not in meta
-        assert fetched_queries == ["11", "22", "33", "44"]
-        assert (service.data_dir / "2025" / "trades.csv").read_bytes() == b"existing\n"
+        fetch_calls = []
+        service._fetch_and_run(
+            "2026-x", 2026, "daily",
+            fetch=lambda t, q, from_date=None, to_date=None:
+                fetch_calls.append((q, from_date)) or b"data",
+            pause=lambda s: None)
+        assert fetch_calls == [("11", None)]
 
-    def test_flex_config_prev_year_roundtrip(self, tmp_path):
+    def test_flex_config_first_year_roundtrip(self, tmp_path):
         path = tmp_path / "flex.json"
         save_flex_config(path, FlexConfig(
-            token="abcdef123456", queries={"trades": "1"},
-            prev_year_queries={"trades": "9"},
+            token="abcdef123456", queries={"trades": "1"}, first_year=2024,
         ))
         cfg = load_flex_config(path)
-        assert cfg.prev_year_queries == {"trades": "9"}
+        assert cfg.first_year == 2024
+        # And absent stays absent
+        save_flex_config(path, FlexConfig(token="abcdef123456", queries={"trades": "1"}))
+        assert load_flex_config(path).first_year is None
 
     def test_start_fetch_requires_configuration(self, service):
         with pytest.raises(ValueError, match="není nastavená"):
