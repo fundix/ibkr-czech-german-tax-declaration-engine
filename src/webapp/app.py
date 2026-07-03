@@ -1,6 +1,7 @@
 # src/webapp/app.py
 """FastAPI application factory for the local web GUI."""
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +27,7 @@ def create_app(services: Optional[RunService] = None) -> FastAPI:
 
     templates = Jinja2Templates(directory=str(_HERE / "templates"))
     templates.env.filters["czk"] = format_czk
+    templates.env.globals["today_year"] = lambda: date.today().year
     app.state.templates = templates
 
     app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")

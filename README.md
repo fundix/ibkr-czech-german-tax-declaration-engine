@@ -99,6 +99,18 @@ per-item detail, verified DAP form line references, a manual-review
 checklist, and JSON/XLSX downloads. Everything runs locally — no data leaves
 your machine.
 
+### Automatic statement download (IBKR Flex Web Service)
+
+Instead of exporting CSVs by hand: in Client Portal enable *Settings →
+Account Settings → Reporting → Flex Web Service* and generate a token; set
+your Flex Queries' period to **Year to Date** (positions: **Last Business
+Day**). Enter the token + query IDs on the web GUI's *Soubory* page. The
+dashboard then offers one-click "Stáhnout z IBKR a přepočítat" and
+auto-refreshes stale data (> 12 h) when you open the app. For the running
+year, downloaded positions act as the current-state snapshot and the tax
+summary is a running estimate. The token is stored only locally
+(`data/webapp/ibkr_flex.json`, gitignored) and expires after max 1 year.
+
 ### Ask Claude about your portfolio (MCP server)
 
 ```bash
