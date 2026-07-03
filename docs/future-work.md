@@ -11,12 +11,13 @@ recommended execution order.
 
 ## 1. Lock in correctness (highest value, lowest effort)
 
-- [ ] **Golden dataset → offline pytest regression.** Convert the synthetic
-      end-to-end scenario (`data/synthetic_2024/`, currently local-only and
-      network-dependent) into a pytest test using the mock FX providers in
-      `tests/support/mock_providers.py`, with the hand-computed expected
-      values pinned. Runs in CI without network; locks the audit fixes
-      against regression.
+- [x] **Golden dataset → offline pytest regression.** DONE (2026-07-02):
+      `tests/test_golden_e2e_cz.py` runs the full pipeline (CSV parsing →
+      enrichment → FIFO → CZ aggregation) on the synthetic 2024 scenario
+      with pinned real ECB/ČNB rates and asserts the independently
+      hand-computed figures (per-leg CZK conversions, time-test exemption,
+      100k limit, §38f/8 FTC cap edge 356.33, final tax 3 604 CZK).
+      Runs offline; no network.
 - [ ] **Extend golden scenarios** to audit-fixed mechanics not yet covered
       end-to-end: option exercise/assignment with premium folded into stock
       basis, partial fills (M5), weekend/holiday dividend (rate fallback +
