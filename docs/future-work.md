@@ -108,9 +108,13 @@ recommended execution order.
       checklist, download exports. Phase 3 DONE (2026-07-03): portfolio view
       (EOY open FIFO lots via `ProcessingOutput.fifo_ledgers_by_asset_id`,
       per-lot §4/1/w time-test countdown via pure `time_test_deadline()`,
-      EOY valuation, dividend overview per asset/month). Roadmap continues:
-      classification UI (Phase 2), mini-taxomat with live prices + sale
-      simulator (Phase 4), MCP server for Claude (Phase 5).
+      EOY valuation, dividend overview per asset/month). Phase 4 DONE
+      (2026-07-03): live quotes (Yahoo via requests, symbol_map.json
+      overrides), unrealized P/L in CZK, allocation + value-history charts
+      (vendored Chart.js, SQLite snapshots), sale simulator with FIFO
+      preview, time-test split, annual-limit interplay and wait-hint.
+      Roadmap continues: classification UI (Phase 2), MCP server for
+      Claude (Phase 5).
 
 ## 5. Documentation
 
