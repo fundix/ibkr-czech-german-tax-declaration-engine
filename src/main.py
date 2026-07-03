@@ -162,40 +162,70 @@ def main_application():
             tax_year=tax_year
         )
 
-    # --- CZ JSON/XLSX export (if requested) ---
-    if args.output_json or args.output_xlsx:
+    # --- CZ aggregation: JSON/XLSX exports and/or FX-mode comparison ---
+    cz_fx_mode = getattr(args, "cz_fx_mode", "daily")
+    if args.output_json or args.output_xlsx or cz_fx_mode == "compare":
         if args.country == "cz":
-            # Build CZ TaxResult for export
             from src.countries.registry import get_tax_plugin
             from src.countries.cz.config import CzTaxConfig
+            from src.countries.cz.fx_policy import uniform_fx_policy
+            from src.countries.cz.uniform_rates import CzUniformRateProvider
             from src.utils.fx_provider_factory import create_fx_provider
 
             # Without an FX provider the plugin degrades to EUR-only output
             # (no CZK figures, annual limit and rate threshold inactive), so
-            # the ČNB provider must be wired in for a real CZ run.
-            cz_config = CzTaxConfig()
-            cnb_provider = create_fx_provider(
-                cz_config.fx_policy.source,
-                cache_file_path=cz_config.cnb_cache_file_path,
-            )
-            cz_plugin = get_tax_plugin("cz", config=cz_config, fx_provider=cnb_provider)
-            cz_aggregator = cz_plugin.get_tax_aggregator()
-            cz_result = cz_aggregator.aggregate(
-                realized_gains_losses=processing_results.realized_gains_losses,
-                financial_events=processing_results.processed_income_events,
-                asset_resolver=processing_results.asset_resolver,
-                tax_year=config.TAX_YEAR,
-            )
-            if args.output_json:
-                from src.countries.cz.exporters.json_exporter import export_cz_to_json
-                export_cz_to_json(cz_result, output=args.output_json)
-                logger.info(f"CZ JSON export written to {args.output_json}")
-            if args.output_xlsx:
-                from src.countries.cz.exporters.xlsx_exporter import export_cz_to_xlsx
-                export_cz_to_xlsx(cz_result, output=args.output_xlsx)
-                logger.info(f"CZ XLSX export written to {args.output_xlsx}")
+            # a real CZ run always wires a provider for the chosen mode.
+            def _cz_aggregate(mode: str):
+                if mode == "uniform":
+                    cfg = CzTaxConfig(fx_policy=uniform_fx_policy())
+                    provider = CzUniformRateProvider()
+                else:
+                    cfg = CzTaxConfig()
+                    provider = create_fx_provider(
+                        cfg.fx_policy.source,
+                        cache_file_path=cfg.cnb_cache_file_path,
+                    )
+                plugin = get_tax_plugin("cz", config=cfg, fx_provider=provider)
+                return plugin.get_tax_aggregator().aggregate(
+                    realized_gains_losses=processing_results.realized_gains_losses,
+                    financial_events=processing_results.processed_income_events,
+                    asset_resolver=processing_results.asset_resolver,
+                    tax_year=config.TAX_YEAR,
+                )
+
+            if cz_fx_mode == "compare":
+                from src.countries.cz.fx_mode_compare import CzFxModeComparison
+                comparison = CzFxModeComparison(
+                    daily=_cz_aggregate("daily"),
+                    uniform=_cz_aggregate("uniform"),
+                )
+                for line in comparison.render_lines():
+                    print(line)
+                cz_exports = [("daily", comparison.daily), ("uniform", comparison.uniform)]
+            else:
+                cz_exports = [(cz_fx_mode, _cz_aggregate(cz_fx_mode))]
+
+            def _mode_suffixed(path: str, mode: str) -> str:
+                # In compare mode both results are exported side by side:
+                # out.json -> out.daily.json / out.uniform.json
+                if cz_fx_mode != "compare":
+                    return path
+                root, dot, ext = path.rpartition(".")
+                return f"{root}.{mode}.{ext}" if dot else f"{path}.{mode}"
+
+            for mode, cz_result in cz_exports:
+                if args.output_json:
+                    from src.countries.cz.exporters.json_exporter import export_cz_to_json
+                    out_path = _mode_suffixed(args.output_json, mode)
+                    export_cz_to_json(cz_result, output=out_path)
+                    logger.info(f"CZ JSON export ({mode} FX mode) written to {out_path}")
+                if args.output_xlsx:
+                    from src.countries.cz.exporters.xlsx_exporter import export_cz_to_xlsx
+                    out_path = _mode_suffixed(args.output_xlsx, mode)
+                    export_cz_to_xlsx(cz_result, output=out_path)
+                    logger.info(f"CZ XLSX export ({mode} FX mode) written to {out_path}")
         else:
-            logger.warning(f"JSON/XLSX export is currently only supported for --country cz, not '{args.country}'.")
+            logger.warning(f"JSON/XLSX export and --cz-fx-mode are currently only supported for --country cz, not '{args.country}'.")
 
     logger.info("Processing finished.")
     if processing_results.eoy_mismatch_error_count > 0:

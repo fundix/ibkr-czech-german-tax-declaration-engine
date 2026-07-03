@@ -102,7 +102,9 @@ class CzechTaxAggregator:
     ``TaxResult.country_result["items"]`` for downstream use (time test,
     WHT credit, JSON/XLSX export).
 
-    PLACEHOLDER: expense deduction rules (§10/4 ZDP) not applied.
+    §10/4 expenses: acquisition costs and trade commissions are already
+    reflected in cost basis / net proceeds; additional external expenses
+    directly attributable to a sale must be added manually.
     """
 
     def __init__(
@@ -247,7 +249,7 @@ class CzechTaxAggregator:
 
         # §10 netting summary (from loss_offsetting module)
         netting_items = netting.to_line_items(cur)
-        cz10_notes = ["PLACEHOLDER: expense deduction rules (§10/4 ZDP) not applied"]
+        cz10_notes = ["§10/4 expenses: acquisition costs and trade commissions are already reflected in cost basis / net proceeds per item; additional external expenses directly attributable to the sale (if any) must be added manually"]
         # M15: FX gains from currency conversions are NOT computed (no cash-
         # balance FIFO). They are taxable §10 income in CZ — make the gap
         # loud whenever conversions exist in the data.

@@ -37,6 +37,14 @@ def parse_arguments():
     # Export options (primarily for CZ plugin)
     parser.add_argument("--output-json", type=str, default=None, metavar="FILE", help="Export tax result to JSON file (CZ plugin).")
     parser.add_argument("--output-xlsx", type=str, default=None, metavar="FILE", help="Export tax result to XLSX file (CZ plugin).")
+    parser.add_argument(
+        "--cz-fx-mode",
+        choices=["daily", "uniform", "compare"],
+        default="daily",
+        help="CZ FX conversion mode: 'daily' ČNB rates (default), 'uniform' "
+             "jednotný kurz per §38/1 ZDP (pokyn GFŘ), or 'compare' to compute "
+             "both, print which is cheaper, and export both (suffixed .daily/.uniform).",
+    )
 
     args = parser.parse_args()
 

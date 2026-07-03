@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class CzFxMode(Enum):
     """FX rate selection mode for a CZ tax year."""
     DAILY = auto()       # Denní kurz ČNB (default)
-    UNIFORM = auto()     # Jednotný kurz ČNB (roční průměr) — NOT YET IMPLEMENTED
+    UNIFORM = auto()     # Jednotný kurz podle §38/1 ZDP (pokyn GFŘ řady D)
 
 
 class CzFxWeekendFallback(Enum):
@@ -53,12 +53,11 @@ class CzFxPolicyConfig:
     source: str = "cnb"
     weekend_fallback: CzFxWeekendFallback = CzFxWeekendFallback.PREVIOUS_VALID_RATE
 
-    def __post_init__(self):
-        if self.mode == CzFxMode.UNIFORM:
-            raise NotImplementedError(
-                "CzFxMode.UNIFORM (jednotný kurz) is not yet implemented. "
-                "Use CzFxMode.DAILY."
-            )
+
+def uniform_fx_policy() -> "CzFxPolicyConfig":
+    """Policy descriptor for the uniform ("jednotný kurz") mode — pair it
+    with ``CzUniformRateProvider`` when constructing the plugin."""
+    return CzFxPolicyConfig(mode=CzFxMode.UNIFORM, source="gfr-jednotny-kurz")
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +172,11 @@ class CzCurrencyConverter:
             conversion_note = (
                 f"Weekend/holiday fallback: ČNB rate of {fx_date_str} used "
                 f"for event date {event_date_str}."
+            )
+        if self._policy.mode == CzFxMode.UNIFORM:
+            conversion_note = (
+                f"Jednotný kurz {event_date.year} podle §38 odst. 1 ZDP "
+                "(pokyn GFŘ řady D)."
             )
         rate_inverse = Decimal("1") / rate if rate != Decimal(0) else Decimal(0)
 

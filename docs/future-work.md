@@ -33,19 +33,34 @@ recommended execution order.
 
 ## 2. CZ tax-logic gaps (these change the resulting tax)
 
-- [ ] **Uniform FX mode ("jednotný kurz", GFŘ D-59).** Currently raises
-      `NotImplementedError` (`CzFxMode.UNIFORM`). Most useful shape: compute
-      BOTH daily and uniform modes in one run and report which one yields
-      the lower tax — the taxpayer may legally choose (one mode per year,
-      no mixing; the plugin already enforces mode consistency).
-- [ ] **Treaty-by-treaty FTC cap verification.** `country_credit_caps` in
-      `src/countries/cz/config.py` are placeholders (US/DE/IE/GB flat 15 %).
-      Verify against the actual SZDZ at least for states that appear in the
-      user's data; extend the table.
-- [ ] **Pre-2014 time test rule** (6-month test for securities acquired
-      before 2014-01-01). Only relevant for very old positions.
-- [ ] **§10/4 expense deduction rules.** The export currently carries the
-      note "PLACEHOLDER: expense deduction rules (§10/4 ZDP) not applied".
+- [x] **Uniform FX mode ("jednotný kurz").** DONE (2026-07-03):
+      `src/countries/cz/uniform_rates.py` ships the official GFŘ tables
+      (2020 partial per D-49; 2024 per D-66; 2025 per D-75) with a
+      per-leg-year policy for multi-year holdings; `--cz-fx-mode
+      daily|uniform|compare` computes either mode or both and reports which
+      is cheaper (exports suffixed `.daily`/`.uniform`). Covered by
+      `tests/test_cz_uniform_fx.py` (hand-computed golden run: uniform
+      3,822 vs daily 3,604 CZK). LIMITATION: §10 disposal legs convert via
+      EUR-enriched amounts (daily-ECB leg × uniform EUR/CZK) until the
+      M17/M18 per-component data model lands — noted in the compare output.
+- [x] **Treaty-by-treaty FTC cap verification.** DONE (2026-07-03):
+      `country_credit_caps` now ships 12 verified portfolio-dividend caps
+      with treaty citations (US/DE/IE/GB/CH/CA/JP/AU 15 %; NL/FR/AT/LU
+      10 % — NL withholds 15 % domestically but only 10 % is creditable).
+      LIMITATION (documented in config): one cap per country is applied to
+      all WHT; interest caps differ (often 0 %) — review manually if an
+      interest WHT row appears.
+- [x] **Pre-2014 time test rule.** DONE (2026-07-03): securities acquired
+      before 2014-01-01 use the 6-month test (čl. II bod 5 zák. opatření
+      č. 344/2013 Sb.) with the ≤5 % direct-share assumption noted on
+      items; month-end clamping per §33 daňového řádu; configurable via
+      `pre_2014_rule_enabled`.
+- [x] **§10/4 expense deduction rules.** RESOLVED as documentation
+      (2026-07-03): acquisition costs and trade commissions are already
+      reflected in cost basis / net proceeds per item, so no separate
+      expense engine is needed for IBKR data; the output note now says
+      exactly that and points out that external expenses directly
+      attributable to a sale must be added manually.
 
 ## 3. Filing-ready outputs
 

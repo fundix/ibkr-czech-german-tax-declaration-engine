@@ -152,9 +152,15 @@ class TestCzFxPolicyConfig:
         with pytest.raises(AttributeError):
             cfg.mode = CzFxMode.UNIFORM  # type: ignore
 
-    def test_uniform_raises(self):
-        with pytest.raises(NotImplementedError, match="jednotný kurz"):
-            CzFxPolicyConfig(mode=CzFxMode.UNIFORM)
+    def test_uniform_mode_is_supported(self):
+        # Historically raised NotImplementedError; the uniform mode is now
+        # implemented (see uniform_rates.py / test_cz_uniform_fx.py).
+        from src.countries.cz.fx_policy import uniform_fx_policy
+        cfg = CzFxPolicyConfig(mode=CzFxMode.UNIFORM)
+        assert cfg.mode == CzFxMode.UNIFORM
+        helper = uniform_fx_policy()
+        assert helper.mode == CzFxMode.UNIFORM
+        assert helper.source == "gfr-jednotny-kurz"
 
     def test_custom_source(self):
         cfg = CzFxPolicyConfig(source="ecb")

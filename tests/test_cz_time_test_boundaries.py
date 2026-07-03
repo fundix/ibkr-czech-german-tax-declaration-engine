@@ -293,3 +293,76 @@ class TestSharedMapping:
 
     def test_unknown_defaults_to_securities(self):
         assert category_to_cz_section("UNKNOWN_THING") == CzTaxSection.CZ_10_SECURITIES
+
+
+# =========================================================================
+# 7. Pre-2014 acquisitions: 6-month test (čl. II bod 5 z. o. 344/2013 Sb.)
+# =========================================================================
+
+def _disposal(acq: str, sold: str) -> "CzTaxItem":
+    from src.countries.cz.tax_items import CzTaxItem, CzTaxItemType
+    return CzTaxItem(
+        item_type=CzTaxItemType.SECURITY_DISPOSAL,
+        section=CzTaxSection.CZ_10_SECURITIES,
+        source_event_id=uuid.uuid4(),
+        event_date=sold,
+        acquisition_date=acq,
+        gain_loss_eur=Decimal("100"),
+    )
+
+
+class TestPre2014SixMonthRule:
+    """Securities acquired before 2014-01-01 use the 6-MONTH holding test
+    instead of 3 years (transitional provision of 344/2013 Sb.). The rule
+    only discriminates for sales in 2014 (>6m but <3y) — later sales pass
+    either test — but historical runs must apply the correct regime."""
+
+    def test_pre2014_exempt_after_six_months_even_below_three_years(self):
+        # 2013-11-15 + 6 months = 2014-05-15; sold later -> exempt,
+        # although the 3-year test would NOT pass.
+        items = [_disposal("2013-11-15", "2014-06-02")]
+        evaluate_time_test(items, CzTaxConfig())
+        assert items[0].is_exempt is True
+        assert items[0].exemption_reason == CzExemptionReason.TIME_TEST_PASSED
+        assert "344/2013" in (items[0].tax_review_note or "")
+
+    def test_pre2014_taxable_within_six_months(self):
+        items = [_disposal("2013-11-15", "2014-03-01")]
+        evaluate_time_test(items, CzTaxConfig())
+        assert items[0].is_taxable is True
+        assert "344/2013" in (items[0].tax_review_note or "")
+
+    def test_pre2014_anniversary_day_is_not_yet_exempt(self):
+        # Must EXCEED the 6-month anniversary (2014-05-15).
+        items = [_disposal("2013-11-15", "2014-05-15")]
+        evaluate_time_test(items, CzTaxConfig())
+        assert items[0].is_taxable is True
+
+    def test_pre2014_month_end_clamp(self):
+        # 2013-08-31 + 6 months: Feb 31 does not exist -> period ends
+        # 2014-02-28 (§33 daňového řádu); the next day is exempt.
+        on_boundary = [_disposal("2013-08-31", "2014-02-28")]
+        evaluate_time_test(on_boundary, CzTaxConfig())
+        assert on_boundary[0].is_taxable is True
+
+        past_boundary = [_disposal("2013-08-31", "2014-03-01")]
+        evaluate_time_test(past_boundary, CzTaxConfig())
+        assert past_boundary[0].is_exempt is True
+
+    def test_pre2014_rule_can_be_disabled(self):
+        cfg = CzTaxConfig(pre_2014_rule_enabled=False)
+        items = [_disposal("2013-11-15", "2014-06-02")]
+        evaluate_time_test(items, cfg)
+        # Falls back to the 3-year test -> taxable
+        assert items[0].is_taxable is True
+
+    def test_boundary_acquisition_on_cutoff_uses_three_year_test(self):
+        # Acquired exactly ON 2014-01-01 -> new regime (3 years).
+        items = [_disposal("2014-01-01", "2014-08-01")]
+        evaluate_time_test(items, CzTaxConfig())
+        assert items[0].is_taxable is True
+
+    def test_pre2014_sold_recently_is_exempt_under_both_rules(self):
+        items = [_disposal("2013-06-14", "2024-05-20")]
+        evaluate_time_test(items, CzTaxConfig())
+        assert items[0].is_exempt is True

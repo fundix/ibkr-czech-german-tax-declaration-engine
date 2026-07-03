@@ -8,18 +8,22 @@ Sets taxability fields on ``CzTaxItem`` objects:
 - ``tax_review_status`` / ``tax_review_note``
 
 Rules applied:
-- **SECURITY_DISPOSAL** (stocks, bonds, funds): if held > threshold days → exempt.
+- **SECURITY_DISPOSAL** (stocks, bonds, funds): if held > threshold → exempt.
+  Securities acquired on/after 2014-01-01 use the 3-calendar-year test;
+  securities acquired BEFORE 2014-01-01 use the pre-2014 6-month test
+  (přechodné ustanovení čl. II bod 5 zák. opatření č. 344/2013 Sb.),
+  assuming a direct issuer share ≤ 5 % (noted on the item).
 - **DIVIDEND / INTEREST**: always taxable (time test not applicable).
 - **OPTION_CLOSE / OPTION_EXPIRY_WORTHLESS**: time test NOT applied
   (options are derivative instruments, not securities under §4/1/w).
 - If ``acquisition_date`` is missing on a disposal → ``PENDING_MANUAL_REVIEW``.
 
-NOT YET IMPLEMENTED:
-- CZK 100k annual exempt limit (2025+ amendment)
-- Acquisition-date vs. 2014-01-01 threshold (6-month vs. 3-year rule)
+The CZK 100k annual exempt limit lives in ``annual_limit.py`` (run AFTER
+this evaluator).
 """
 from __future__ import annotations
 
+import calendar
 import datetime
 import logging
 from typing import List
@@ -47,6 +51,26 @@ def _add_years(d: datetime.date, years: int) -> datetime.date:
         return d.replace(year=d.year + years)
     except ValueError:
         return d.replace(year=d.year + years, day=28)
+
+
+def _add_months(d: datetime.date, months: int) -> datetime.date:
+    """Date *months* calendar months after *d* (§33 daňového řádu).
+
+    When the numerically matching day does not exist in the target month
+    (e.g. Aug 31 + 6 months), the period ends on the last day of that month.
+    """
+    month_index = d.month - 1 + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    try:
+        return d.replace(year=year, month=month)
+    except ValueError:
+        return datetime.date(year, month, calendar.monthrange(year, month)[1])
+
+
+# Securities acquired before this date fall under the pre-2014 exemption
+# regime (6-month test) per the transitional provision of 344/2013 Sb.
+_PRE_2014_CUTOFF = datetime.date(2014, 1, 1)
 
 # Item types subject to the holding-period time test
 _TIME_TEST_ITEM_TYPES = {
@@ -201,17 +225,43 @@ def evaluate_time_test(
                 continue
 
         # Apply the time test (§4/1/w ZDP): exempt only if the holding period
-        # EXCEEDS holding_test_years CALENDAR years — time counted per §33
-        # daňového řádu (the period ends on the day of the anniversary). A
-        # fixed day-count (years × 365) misfires whenever the window contains
-        # Feb 29, so the dates take precedence; the day threshold is only a
-        # fallback when the dates cannot be parsed.
+        # EXCEEDS the threshold — time counted per §33 daňového řádu (the
+        # period ends on the day of the anniversary). A fixed day-count
+        # (years × 365) misfires whenever the window contains Feb 29, so the
+        # dates take precedence; the day threshold is only a fallback when
+        # the dates cannot be parsed.
+        #
+        # Securities acquired BEFORE 2014-01-01 keep the pre-2014 regime:
+        # a 6-MONTH test (přechodné ustanovení čl. II bod 5 zák. opatření
+        # č. 344/2013 Sb.), under the ≤5% direct-share assumption documented
+        # in the config.
         acq_d = parse_ibkr_date(item.acquisition_date)
         evt_d = parse_ibkr_date(item.event_date)
+        pre_2014 = (
+            config.pre_2014_rule_enabled
+            and acq_d is not None
+            and acq_d < _PRE_2014_CUTOFF
+        )
         if acq_d is not None and evt_d is not None:
-            is_exempt = evt_d > _add_years(acq_d, config.holding_test_years)
+            if pre_2014:
+                threshold_date = _add_months(
+                    acq_d, config.pre_2014_holding_test_months
+                )
+            else:
+                threshold_date = _add_years(acq_d, config.holding_test_years)
+            is_exempt = evt_d > threshold_date
         else:
             is_exempt = holding_days > config.holding_test_days
+
+        if pre_2014:
+            rule_desc = (
+                f"{config.pre_2014_holding_test_months} months — pre-2014 "
+                "acquisition, čl. II bod 5 zák. opatření č. 344/2013 Sb. "
+                "(assumes direct issuer share ≤ 5 % in the 24 months before "
+                "the sale)"
+            )
+        else:
+            rule_desc = f"{config.holding_test_years} calendar years (§4/1/w ZDP)"
 
         if is_exempt:
             item.is_taxable = False
@@ -220,8 +270,7 @@ def evaluate_time_test(
             item.included_in_tax_base = False
             item.tax_review_status = CzTaxReviewStatus.RESOLVED
             item.tax_review_note = (
-                f"Exempt: held {holding_days} days > "
-                f"{config.holding_test_years} calendar years (§4/1/w ZDP)"
+                f"Exempt: held {holding_days} days > {rule_desc}"
             )
         else:
             item.is_taxable = True
@@ -230,6 +279,5 @@ def evaluate_time_test(
             item.included_in_tax_base = True
             item.tax_review_status = CzTaxReviewStatus.RESOLVED
             item.tax_review_note = (
-                f"Taxable: held {holding_days} days ≤ "
-                f"{config.holding_test_years} calendar years (§4/1/w ZDP)"
+                f"Taxable: held {holding_days} days ≤ {rule_desc}"
             )
