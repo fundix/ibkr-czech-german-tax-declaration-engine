@@ -96,10 +96,25 @@ recommended execution order.
       (only cosmetic PDF fields TAXPAYER_NAME/ACCOUNT_ID remain there).
 - [ ] **Direct IBKR Flex Query download** (token + query ID) instead of
       manual CSV export.
-- [ ] **PENDING / manual-review checklist as a first-class output** —
-      dedicated XLSX sheet and/or non-zero exit code, so flagged items
-      cannot be overlooked.
-- [ ] UI / web interface (low priority).
+- [x] **PENDING / manual-review checklist as a first-class output** —
+      RESOLVED at the GUI level (2026-07-03): the web GUI's "Ke kontrole"
+      page lists PENDING items + section REVIEW notes with a nav badge.
+      (A non-zero exit code for the CLI remains open — deliberate, since
+      it would make automated runs look failed; revisit if CLI automation
+      appears.)
+- [x] **UI / web interface.** Phase 1 DONE (2026-07-03): local FastAPI +
+      HTMX app (`uv run --extra web python -m src.webapp`) — upload per-year
+      CSVs, run daily/uniform/compare, browse summary/items/DAP-lines/review
+      checklist, download exports. Phase 3 DONE (2026-07-03): portfolio view
+      (EOY open FIFO lots via `ProcessingOutput.fifo_ledgers_by_asset_id`,
+      per-lot §4/1/w time-test countdown via pure `time_test_deadline()`,
+      EOY valuation, dividend overview per asset/month). Phase 4 DONE
+      (2026-07-03): live quotes (Yahoo via requests, symbol_map.json
+      overrides), unrealized P/L in CZK, allocation + value-history charts
+      (vendored Chart.js, SQLite snapshots), sale simulator with FIFO
+      preview, time-test split, annual-limit interplay and wait-hint.
+      Roadmap continues: classification UI (Phase 2), MCP server for
+      Claude (Phase 5).
 
 ## 5. Documentation
 

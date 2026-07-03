@@ -1,0 +1,62 @@
+<section class="card sim-card">
+  <h2>{{ sim.symbol }} — prodej {{ sim.quantity }} ks @ {{ sim.price | czk }} {{ sim.currency }}
+    <span class="badge muted">{{ "živá cena" if sim.price_source == "live" else ("cena k 31.12." if sim.price_source == "eoy" else "ruční cena") }}</span>
+  </h2>
+
+  <section class="cards-row">
+    <div class="card stat">
+      <h3>Hrubý výnos</h3>
+      <p class="big">{{ sim.proceeds_czk | czk }} Kč</p>
+    </div>
+    <div class="card stat">
+      <h3>Zdanitelný zisk</h3>
+      <p class="big {{ 'neg' if sim.taxable_gain_czk < 0 }}">{{ sim.taxable_gain_czk | czk }} Kč</p>
+      <p class="muted">osvobozeno navíc: {{ sim.exempt_gain_czk | czk }} Kč</p>
+    </div>
+    <div class="card stat highlight">
+      <h3>Odhad daně (15 %)</h3>
+      <p class="big">{{ sim.estimated_tax_czk | czk }} Kč</p>
+      {% if sim.annual_limit.under_limit %}
+      <p class="muted">pod ročním limitem 100 000 Kč — vše osvobozeno</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <table class="items">
+    <thead><tr><th>Lot (pořízen)</th><th class="num">Kusů</th><th class="num">Náklady Kč</th><th class="num">Výnos Kč</th><th class="num">Zisk Kč</th><th>Časový test</th></tr></thead>
+    <tbody>
+      {% for lot in sim.consumed %}
+      <tr>
+        <td>{{ lot.acquisition_date }}{% if lot.estimated %} <span class="badge warn">odhad</span>{% endif %}</td>
+        <td class="num">{{ lot.quantity }}</td>
+        <td class="num">{{ lot.cost_czk | czk }}</td>
+        <td class="num">{{ lot.proceeds_czk | czk }}</td>
+        <td class="num {{ 'neg' if lot.gain_czk and lot.gain_czk < 0 }}">{{ lot.gain_czk | czk }}</td>
+        <td>
+          {% if lot.exempt %}<span class="badge ok">osvobozeno</span>
+          {% elif lot.exempt_from %}<span class="badge">zdanitelné — osvobozeno od {{ lot.exempt_from }}</span>
+          {% else %}<span class="badge muted">bez testu</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="sim-notes">
+    <p class="note">Roční limit §4/1/x: letos realizované příjmy {{ sim.annual_limit.existing_czk | czk }} Kč
+      + simulace {{ sim.proceeds_czk | czk }} Kč = {{ sim.annual_limit.combined_czk | czk }} Kč
+      ({{ "POD" if sim.annual_limit.under_limit else "nad" }} limitem {{ sim.annual_limit.threshold_czk | czk }} Kč).</p>
+    {% if sim.wait_until %}
+    <div class="job warn-box">💡 <strong>Co kdybyste počkal(a)?</strong> Pokud prodáte až
+      <strong>{{ sim.wait_until }}</strong> nebo později, projdou časovým testem i zbývající loty
+      a daň z nich bude 0 Kč.</div>
+    {% endif %}
+    {% if sim.estimated_involved %}
+    <div class="job warn-box">⚠ Některé loty mají odhadnuté datum pořízení (SOY) — jejich časový
+      test ověřte ručně.</div>
+    {% endif %}
+    {% if sim.taxable_gain_czk < 0 %}
+    <p class="note">Simulovaná ztráta — lze ji kompenzovat jen se zisky stejného druhu příjmů (§10 cenné papíry) v témže roce.</p>
+    {% endif %}
+  </div>
+</section>

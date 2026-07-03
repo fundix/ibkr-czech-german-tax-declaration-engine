@@ -84,13 +84,28 @@ uv run python -m src.main --report-tax-declaration
 uv run python -m src.main --country cz --report-tax-declaration
 ```
 
+### Local web GUI (CZ)
+
+```bash
+uv run --extra web python -m src.webapp   # opens http://127.0.0.1:8321/
+```
+
+Upload the IBKR Flex Query CSVs per year on the *Soubory* page (trades, cash
+transactions and end-of-year positions are required; start-of-year positions
+are taken from the previous year's end automatically, and trades/corporate
+actions are merged across all uploaded years for FIFO history). Then run a
+tax year in daily/uniform/compare FX mode and browse the results: summary,
+per-item detail, verified DAP form line references, a manual-review
+checklist, and JSON/XLSX downloads. Everything runs locally — no data leaves
+your machine.
+
 ### Prerequisites
-- Python 3.8+
+- Python 3.10+
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/) package manager
 - IBKR Flex Query CSV reports (see `input_data_spec.md`)
 
 ### Configuration
-Edit `src/config.py`: set `TAX_YEAR`, file paths, and `TAXPAYER_NAME`. See `src/config_example.py` for all options.
+Edit `src/config.py`: set `TAX_YEAR`, file paths, and `TAXPAYER_NAME`, or override per-run with `--tax-year` and the file path flags. See `src/config_example.py` for all options. The web GUI needs no config edits.
 
 ## Project Structure
 

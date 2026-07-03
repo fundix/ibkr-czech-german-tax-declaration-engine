@@ -1,0 +1,9 @@
+<div id="job-status">
+  <div class="job failed">
+    <strong>Běh selhal:</strong> {{ error }}
+    {% if log_tail %}
+    <pre class="log-tail">{% for line in log_tail %}{{ line }}
+{% endfor %}</pre>
+    {% endif %}
+  </div>
+</div>

@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Portfolio {{ meta.run_id }}{% endblock %}
+{% block content %}
+{% include "partials/run_nav.html" %}
+
+{% if not positions %}
+<section class="card"><p>Na konci roku {{ meta.tax_year }} nezůstaly žádné otevřené pozice.</p></section>
+{% else %}
+
+<div hx-get="/results/{{ meta.run_id }}/portfolio/live" hx-trigger="load" hx-swap="outerHTML">
+  <section class="card"><p><span class="spinner"></span> Načítám živé ceny a přepočet na Kč…</p></section>
+</div>
+
+<section class="cards-row">
+  <div class="card stat">
+    <h3>Otevřené pozice k 31. 12. {{ meta.tax_year }}</h3>
+    <p class="big">{{ positions | length }}</p>
+    <p class="muted">titulů v FIFO knize</p>
+  </div>
+  <div class="card stat">
+    <h3>Osvobozeno časovým testem</h3>
+    <p class="big">{{ exempt_qty }}</p>
+    <p class="muted">kusů lze dnes prodat osvobozeně (§4/1/w)</p>
+  </div>
+  <div class="card stat">
+    <h3>Osvobození do 90 dnů</h3>
+    <p class="big">{{ soon_qty }}</p>
+    <p class="muted">kusů čeká na blížící se konec testu</p>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Pozice (stav k 31. 12. {{ meta.tax_year }}, odpočet k {{ today }})</h2>
+  <table class="items">
+    <thead>
+      <tr>
+        <th></th><th>Symbol</th><th>Kategorie</th>
+        <th class="num">Kusů (long)</th><th class="num">Náklady EUR</th>
+        <th class="num">Cena 31.12.</th><th class="num">Hodnota 31.12.</th>
+        <th>Časový test</th>
+      </tr>
+    </thead>
+    {% for pos in positions %}
+    <tbody>
+      <tr>
+        <td>
+          {% if pos.lots %}
+          <button type="button" class="expander" onclick="document.getElementById('lots-{{ loop.index }}').classList.toggle('hidden'); this.textContent = this.textContent === '▸' ? '▾' : '▸';">▸</button>
+          {% endif %}
+        </td>
+        <td title="{{ pos.description }} · {{ pos.isin or '' }}"><strong>{{ pos.symbol }}</strong></td>
+        <td>{{ pos.category }}</td>
+        <td class="num">{{ pos.quantity_long }}{% if pos.quantity_short != "0" and pos.quantity_short %} <span class="badge warn">short {{ pos.quantity_short }}</span>{% endif %}</td>
+        <td class="num">{{ pos.total_cost_eur | czk }}</td>
+        <td class="num">{{ pos.eoy_market_price | czk if pos.eoy_market_price else "–" }} {{ pos.eoy_currency or "" }}</td>
+        <td class="num">{{ pos.eoy_position_value | czk if pos.eoy_position_value else "–" }} {{ pos.eoy_currency or "" }}</td>
+        <td>
+          {% if not pos.time_test_applicable %}
+          <span class="badge muted">neuplatní se (derivát)</span>
+          {% else %}
+            {% set exempt = pos.lots | selectattr("tt_status", "equalto", "exempt") | list | length %}
+            {% set soon = pos.lots | selectattr("tt_status", "equalto", "soon") | list | length %}
+            {% if exempt == pos.lots | length %}<span class="badge ok">vše osvobozeno</span>
+            {% elif exempt or soon %}<span class="badge warn">částečně / brzy</span>
+            {% else %}<span class="badge">test běží</span>{% endif %}
+          {% endif %}
+        </td>
+      </tr>
+      {% if pos.lots %}
+      <tr id="lots-{{ loop.index }}" class="hidden lots-row">
+        <td></td>
+        <td colspan="7">
+          <table class="lots">
+            <thead><tr><th>Pořízeno</th><th class="num">Kusů</th><th class="num">Cena/ks EUR</th><th>Osvobozeno od</th><th>Zbývá</th></tr></thead>
+            <tbody>
+              {% for lot in pos.lots %}
+              <tr>
+                <td>{{ lot.acquisition_date }}{% if lot.acquisition_estimated %} <span class="badge warn" title="Syntetické datum ze SOY pozice — skutečné datum nákupu ověřte ručně">odhad</span>{% endif %}</td>
+                <td class="num">{{ lot.quantity }}</td>
+                <td class="num">{{ lot.unit_cost_eur | czk }}</td>
+                <td>{{ lot.exempt_from or "–" }}</td>
+                <td>
+                  {% if lot.tt_status == "exempt" %}<span class="badge ok">osvobozeno ✓</span>
+                  {% elif lot.tt_status == "soon" %}<span class="badge warn">{{ lot.days_remaining }} dní</span>
+                  {% elif lot.tt_status == "running" %}<span class="badge">{{ lot.days_remaining }} dní</span>
+                  {% else %}<span class="badge muted">–</span>{% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </td>
+      </tr>
+      {% endif %}
+    </tbody>
+    {% endfor %}
+  </table>
+  <p class="note">Ocenění pochází z MarkPrice v souboru pozic (stav k 31. 12.). Odpočet časového testu
+    se počítá z FIFO lotů podle §4/1/w ZDP (3 roky; nákupy před 2014 podle 6měsíčního testu) —
+    prodej je osvobozen až PO uvedeném datu. U lotů s odhadnutým datem pořízení test ověřte ručně.
+    Živé ceny a simulace prodeje přijdou v další fázi.</p>
+</section>
+{% endif %}
+{% endblock %}

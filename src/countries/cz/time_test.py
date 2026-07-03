@@ -72,6 +72,22 @@ def _add_months(d: datetime.date, months: int) -> datetime.date:
 # regime (6-month test) per the transitional provision of 344/2013 Sb.
 _PRE_2014_CUTOFF = datetime.date(2014, 1, 1)
 
+
+def time_test_deadline(
+    acquisition_date: datetime.date,
+    config: CzTaxConfig,
+) -> datetime.date:
+    """Last day of the §4/1/w holding period for a security acquired on
+    *acquisition_date* — a disposal strictly AFTER this date is exempt.
+
+    Single source of the deadline arithmetic (3-year test, pre-2014 6-month
+    test, §33 daňového řádu month-end clamping), shared by the in-place
+    evaluator below and by portfolio/countdown views.
+    """
+    if config.pre_2014_rule_enabled and acquisition_date < _PRE_2014_CUTOFF:
+        return _add_months(acquisition_date, config.pre_2014_holding_test_months)
+    return _add_years(acquisition_date, config.holding_test_years)
+
 # Item types subject to the holding-period time test
 _TIME_TEST_ITEM_TYPES = {
     CzTaxItemType.SECURITY_DISPOSAL,
@@ -243,12 +259,7 @@ def evaluate_time_test(
             and acq_d < _PRE_2014_CUTOFF
         )
         if acq_d is not None and evt_d is not None:
-            if pre_2014:
-                threshold_date = _add_months(
-                    acq_d, config.pre_2014_holding_test_months
-                )
-            else:
-                threshold_date = _add_years(acq_d, config.holding_test_years)
+            threshold_date = time_test_deadline(acq_d, config)
             is_exempt = evt_d > threshold_date
         else:
             is_exempt = holding_days > config.holding_test_days

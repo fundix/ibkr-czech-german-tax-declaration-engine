@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Položky {{ meta.run_id }}{% endblock %}
+{% block content %}
+{% include "partials/run_nav.html" %}
+
+<section class="card">
+  <form method="get" class="filters">
+    <input type="hidden" name="mode" value="{{ mode }}">
+    <label>Sekce
+      <select name="section" onchange="this.form.submit()">
+        <option value="">všechny</option>
+        {% for s in sections %}<option value="{{ s }}" {{ 'selected' if s == section }}>{{ s }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Stav
+      <select name="status" onchange="this.form.submit()">
+        <option value="">vše</option>
+        <option value="taxable" {{ 'selected' if status == 'taxable' }}>zdanitelné</option>
+        <option value="exempt" {{ 'selected' if status == 'exempt' }}>osvobozené</option>
+        <option value="pending" {{ 'selected' if status == 'pending' }}>k ruční kontrole</option>
+      </select>
+    </label>
+    <span class="muted">{{ items | length }} položek</span>
+  </form>
+
+  <table class="items">
+    <thead>
+      <tr>
+        <th>Typ</th><th>Symbol</th><th>Pořízeno</th><th>Realizováno</th>
+        <th class="num">Množství</th><th class="num">Náklady Kč</th>
+        <th class="num">Výnos Kč</th><th class="num">Zisk/ztráta Kč</th><th>Stav</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for it in items %}
+      <tr title="{{ it.asset_description }} · FX {{ it.fx_rate }} ({{ it.fx_date_used }}, {{ it.fx_source }})">
+        <td>{{ it.item_type }}</td>
+        <td><strong>{{ it.asset_symbol or "–" }}</strong></td>
+        <td>{{ it.acquisition_date or "–" }}</td>
+        <td>{{ it.event_date }}</td>
+        <td class="num">{{ it.quantity or "" }}</td>
+        <td class="num">{{ it.cost_basis_czk | czk if it.cost_basis_czk else "–" }}</td>
+        <td class="num">{{ it.proceeds_czk | czk if it.proceeds_czk else (it.amount_czk | czk if it.amount_czk else "–") }}</td>
+        <td class="num {{ 'neg' if it.gain_loss_czk and it.gain_loss_czk.startswith('-') }}">{{ it.gain_loss_czk | czk if it.gain_loss_czk else "–" }}</td>
+        <td>
+          {% if it.tax_review_status == "PENDING_MANUAL_REVIEW" %}<span class="badge warn">kontrola</span>
+          {% elif it.is_exempt %}<span class="badge ok">osvobozeno{% if it.exemption_reason %} ({{ it.exemption_reason }}){% endif %}</span>
+          {% elif it.included_in_tax_base %}<span class="badge">zdanitelné</span>
+          {% else %}<span class="badge muted">mimo základ</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

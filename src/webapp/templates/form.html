@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Řádky DAP {{ meta.run_id }}{% endblock %}
+{% block content %}
+{% include "partials/run_nav.html" %}
+
+{% if form %}
+{% for sec in form.sections %}
+<section class="card">
+  <h2>{{ sec.label }}</h2>
+  {% if sec.lines %}
+  <table>
+    <thead><tr><th>Řádek formuláře</th><th>Položka</th><th class="num">Hodnota</th><th>Poznámka</th></tr></thead>
+    <tbody>
+      {% for line in sec.lines %}
+      <tr>
+        <td>{% if line.official_line_ref %}<strong>{{ line.official_line_ref }}</strong>{% else %}<span class="muted">–</span>{% endif %}</td>
+        <td>{{ line.label }}</td>
+        <td class="num">{{ line.value | czk }}</td>
+        <td class="note">{{ line.note or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% for note in sec.notes %}<p class="note">⚠ {{ note }}</p>{% endfor %}
+</section>
+{% endfor %}
+{% else %}
+<p>Mapování formuláře není pro tento běh k dispozici.</p>
+{% endif %}
+{% endblock %}

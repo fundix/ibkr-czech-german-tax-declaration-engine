@@ -189,13 +189,17 @@ def run_main_calculations(
     internal_calculation_precision: int, # Renamed from internal_working_precision
     decimal_rounding_mode: str,
     tax_classifier: Optional[Any] = None,
-) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int]:
+) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger]]:
     """
     Runs the main calculation logic:
     1. Separates historical and current year events.
     2. Initializes FIFO ledgers based on SOY positions and historical trades.
     3. Processes current year events chronologically using dedicated processors.
     4. Performs EOY quantity validation (logs errors but does not halt).
+
+    The final FIFO ledgers (open lots remaining after all tax-year events)
+    are returned as the fifth element so downstream consumers (portfolio
+    view, time-test countdown) can read end-of-year open positions.
     5. Calculates Vorabpauschale (currently placeholder).
     6. Returns calculated results (Realized G/L, Vorabpauschale), processed events, and EOY mismatch count.
     """
@@ -512,7 +516,7 @@ def run_main_calculations(
     logger.info(f"Calculation engine finished. Produced {len(realized_gains_losses)} RealizedGainLoss records.")
     logger.info(f"Calculation engine produced {len(vorabpauschale_data_items)} VorabpauschaleData records (expected 0 for 2023).")
 
-    return realized_gains_losses, vorabpauschale_data_items, processed_income_events_for_output, eoy_mismatch_errors
+    return realized_gains_losses, vorabpauschale_data_items, processed_income_events_for_output, eoy_mismatch_errors, fifo_ledgers
 
 
 def _create_excess_dividend_event(original_event, excess_amount, asset_object):

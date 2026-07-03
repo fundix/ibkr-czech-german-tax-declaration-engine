@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Ke kontrole {{ meta.run_id }}{% endblock %}
+{% block content %}
+{% include "partials/run_nav.html" %}
+
+<section class="card">
+  <h2>Checklist ruční kontroly</h2>
+  {% if not pending and not section_notes %}
+  <p class="badge ok">Žádné položky nevyžadují ruční kontrolu. 🎉</p>
+  {% endif %}
+
+  {% for n in section_notes %}
+  <div class="job warn-box">
+    <strong>{{ n.section }}:</strong> {{ n.note }}
+  </div>
+  {% endfor %}
+</section>
+
+{% if pending %}
+<section class="card">
+  <h2>Položky k ruční kontrole ({{ pending | length }})</h2>
+  <table class="items">
+    <thead><tr><th>Typ</th><th>Symbol</th><th>Datum</th><th class="num">Částka Kč</th><th>Důvod</th></tr></thead>
+    <tbody>
+      {% for it in pending %}
+      <tr>
+        <td>{{ it.item_type }}</td>
+        <td><strong>{{ it.asset_symbol or "–" }}</strong> <span class="muted">{{ it.asset_description }}</span></td>
+        <td>{{ it.event_date }}</td>
+        <td class="num">{{ it.amount_czk | czk if it.amount_czk else "–" }}</td>
+        <td class="note">{{ it.tax_review_note or "bez poznámky" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% if warnings and (warnings.unlinked_wht_count or 0) > 0 %}
+<section class="card">
+  <h2>Nespárovaná srážková daň</h2>
+  <p>{{ warnings.unlinked_wht_count }} WHT záznamů se nepodařilo spárovat s příjmem — zkontrolujte je v XLSX exportu (list WithholdingTax).</p>
+</section>
+{% endif %}
+{% endblock %}

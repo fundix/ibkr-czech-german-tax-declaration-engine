@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Výsledky {{ meta.run_id }}{% endblock %}
+{% block content %}
+{% include "partials/run_nav.html" %}
+
+{% if meta.compare_lines %}
+<section class="card">
+  <h2>Porovnání kurzových režimů</h2>
+  <pre class="compare">{% for line in meta.compare_lines %}{{ line }}
+{% endfor %}</pre>
+</section>
+{% endif %}
+
+<section class="cards-row">
+  {% for m, s in meta.summary.items() %}
+  <div class="card stat {{ 'highlight' if m == mode }}">
+    <h3>{{ "Denní kurz" if m == "daily" else "Jednotný kurz" }}</h3>
+    <p class="big">{{ s.final_tax_czk | czk }} Kč</p>
+    <p class="muted">výsledná daň · základ {{ s.combined_base_czk | czk }} Kč</p>
+  </div>
+  {% endfor %}
+</section>
+
+{% if result %}
+{% for key, sec in result.sections.items() %}
+<section class="card">
+  <h2>{{ sec.label }}</h2>
+  <table class="kv">
+    <tbody>
+      {% for k, v in sec.line_items.items() %}
+      <tr>
+        <td>{{ k }}</td>
+        <td class="num">{% if k.endswith("_czk") or k.endswith("_eur") %}{{ v | czk }}{% else %}{{ v }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% for note in sec.notes %}<p class="note">⚠ {{ note }}</p>{% endfor %}
+</section>
+{% endfor %}
+{% endif %}
+{% endblock %}
