@@ -1,6 +1,11 @@
 # src/config.py
 
 from decimal import Decimal # Added for Decimal type hint
+from pathlib import Path
+
+# Project root — cache/data defaults are anchored here so the engine works
+# regardless of the caller's cwd (CLI from repo root, web/MCP server, tests).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # File paths for IBKR Flex Query reports
 """ TRADES_FILE_PATH = "data/trades_2023.csv"
@@ -36,10 +41,10 @@ TAX_YEAR = 2024
 # TAX_YEAR = 2023
 
 # Cache file for user classifications
-CLASSIFICATION_CACHE_FILE_PATH = "cache/user_classifications.json" # Renamed from CLASSIFICATION_CACHE_FILE
+CLASSIFICATION_CACHE_FILE_PATH = str(_PROJECT_ROOT / "cache" / "user_classifications.json") # Renamed from CLASSIFICATION_CACHE_FILE
 
 # Cache file for ECB exchange rates
-ECB_RATES_CACHE_FILE_PATH = "cache/ecb_exchange_rates.json" # Renamed from ECB_RATES_CACHE_FILE
+ECB_RATES_CACHE_FILE_PATH = str(_PROJECT_ROOT / "cache" / "ecb_exchange_rates.json") # Renamed from ECB_RATES_CACHE_FILE
 
 # Taxpayer Information (NEW)
 TAXPAYER_NAME = "Warren Buffet"  # Placeholder - Please update

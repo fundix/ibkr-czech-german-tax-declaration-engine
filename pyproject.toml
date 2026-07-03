@@ -3,18 +3,18 @@ name = "ibkr-tax-declaration-engine"
 version = "4.0.0"
 description = "Multi-country tax declaration engine for Interactive Brokers (DE + CZ)"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
     "python-dateutil>=2.8.0",
     "requests>=2.25.0",
-    "pydantic>=1.8,<2.0",
+    "pydantic>=2.7",
     "reportlab>=3.5.0",
     "openpyxl>=3.1.0",
 ]
 
 [project.urls]
-Repository = "https://github.com/fundix/ibkr-german-tax-declaration-engine-czech"
+Repository = "https://github.com/fundix/ibkr-czech-german-tax-declaration-engine"
 
 [dependency-groups]
 dev = [

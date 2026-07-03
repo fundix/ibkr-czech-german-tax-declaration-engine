@@ -7,6 +7,27 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **pydantic v1 → v2** (`raw_models.py`; the wildcard Decimal-coercion
+  semantics — empty CSV cell on a Decimal field → `0.0` — are preserved
+  exactly). `requires-python` raised to `>=3.10`. Unblocks the planned
+  local web GUI (FastAPI) and MCP server (official SDK); verified by the
+  full suite plus a golden JSON export diff on `data/synthetic_2024`.
+- Cache paths (`user_classifications.json`, ECB/ČNB rates) are anchored to
+  the project root instead of the caller's cwd.
+- `setup_decimal_context()` moved from `main.py` to
+  `src/utils/decimal_context.py` — `decimal.getcontext()` is thread-local,
+  so non-main-thread callers (job workers) must set it themselves.
+
+### Added
+
+- `src/webapp/jobs.py` — Phase 0 server-safety primitives for the upcoming
+  local web GUI: single-worker `JobRunner` (serializes engine runs, sets the
+  decimal context in the worker via initializer, captures log tail and
+  failures) and `engine_file_lock` (cross-process `flock` guard for the
+  unlocked FX/classification caches). Covered by `tests/test_webapp_jobs.py`.
+
 ### Fixed
 
 - **Margin/debit interest no longer reduces the CZ §8 base.** IBKR "Broker
