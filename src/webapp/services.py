@@ -22,6 +22,7 @@ header-only file.
 """
 from __future__ import annotations
 
+import csv
 import logging
 import shutil
 import time
@@ -153,8 +154,26 @@ class RunService:
     # Input assembly
     # ------------------------------------------------------------------
 
-    def _merge_years(self, slot: str, tax_year: int, target: Path) -> Optional[Path]:
-        """Concatenate a slot's files across all dataset years <= tax_year."""
+    # ID columns used to drop duplicate rows when dataset years overlap
+    # (e.g. a rolling-window Flex query period instead of Year to Date).
+    _DEDUP_ID_COLUMNS = ("TransactionID", "ActionID")
+
+    def _merge_years(
+        self,
+        slot: str,
+        tax_year: int,
+        target: Path,
+        notes: Optional[List[str]] = None,
+    ) -> Optional[Path]:
+        """Concatenate a slot's files across all dataset years <= tax_year.
+
+        Byte-identical rows sharing the same TransactionID/ActionID are
+        written only once: overlapping Flex query periods export the same
+        trades into two year files, and duplicated trades corrupt the SOY
+        FIFO reconstruction. Rows are never dropped on the ID alone —
+        distinct rows may legitimately share an ActionID (multi-leg
+        corporate actions). Files without an ID column are kept verbatim.
+        """
         sources = []
         for ds in self.list_years():
             if ds.year <= tax_year and ds.files.get(slot):
@@ -163,6 +182,9 @@ class RunService:
             return None
 
         header = None
+        id_index: Optional[int] = None
+        seen: set = set()
+        dropped = 0
         with open(target, "w", encoding="utf-8", newline="") as out:
             for year, src in sources:
                 with open(src, encoding="utf-8-sig", newline="") as fh:
@@ -172,6 +194,12 @@ class RunService:
                 if header is None:
                     header = lines[0].strip()
                     out.write(lines[0] if lines[0].endswith("\n") else lines[0] + "\n")
+                    columns = next(csv.reader([header]))
+                    id_index = next(
+                        (columns.index(c) for c in self._DEDUP_ID_COLUMNS
+                         if c in columns),
+                        None,
+                    )
                 elif lines[0].strip() != header:
                     raise ValueError(
                         f"Soubor {src.name} pro rok {year} má jinou hlavičku než "
@@ -179,11 +207,36 @@ class RunService:
                         f"všechny roky stejnou Flex Query šablonou."
                     )
                 for line in lines[1:]:
-                    if line.strip():
-                        out.write(line if line.endswith("\n") else line + "\n")
+                    if not line.strip():
+                        continue
+                    if id_index is not None:
+                        row = next(csv.reader([line]), [])
+                        row_id = row[id_index] if id_index < len(row) else ""
+                        if row_id:
+                            key = (row_id, line.strip())
+                            if key in seen:
+                                dropped += 1
+                                continue
+                            seen.add(key)
+                    out.write(line if line.endswith("\n") else line + "\n")
+
+        if dropped:
+            note = (
+                f"Sloučení souborů ({settings.SLOT_LABELS[slot]}): odstraněno "
+                f"{dropped} duplicitních řádků — období Flex queries se "
+                f"překrývají, zkontrolujte nastavení Year to Date."
+            )
+            logger.warning(note)
+            if notes is not None:
+                notes.append(note)
         return target
 
-    def _prepare_inputs(self, run_dir: Path, tax_year: int) -> Dict[str, Path]:
+    def _prepare_inputs(
+        self,
+        run_dir: Path,
+        tax_year: int,
+        notes: Optional[List[str]] = None,
+    ) -> Dict[str, Path]:
         ds = self.get_year(tax_year)
         if ds is None:
             raise ValueError(f"Pro rok {tax_year} nejsou nahraná žádná data.")
@@ -194,7 +247,8 @@ class RunService:
         inputs_dir = run_dir / "inputs"
         inputs_dir.mkdir(parents=True, exist_ok=True)
 
-        trades = self._merge_years("trades", tax_year, inputs_dir / "trades.csv")
+        trades = self._merge_years("trades", tax_year, inputs_dir / "trades.csv",
+                                   notes=notes)
 
         cash = inputs_dir / "cash_transactions.csv"
         shutil.copyfile(ds.files["cash"], cash)
@@ -212,7 +266,8 @@ class RunService:
             else:
                 pos_start.write_text(settings.POSITIONS_HEADER, encoding="utf-8")
 
-        corp = self._merge_years("corp_actions", tax_year, inputs_dir / "corporate_actions.csv")
+        corp = self._merge_years("corp_actions", tax_year,
+                                 inputs_dir / "corporate_actions.csv", notes=notes)
         if corp is None:
             corp = inputs_dir / "corporate_actions.csv"
             corp.write_text(settings.CORP_ACTIONS_HEADER, encoding="utf-8")
@@ -269,7 +324,7 @@ class RunService:
 
         fx_mode, run_notes = _effective_fx_mode(fx_mode, tax_year, datetime.now().year)
 
-        inputs = self._prepare_inputs(run_dir, tax_year)
+        inputs = self._prepare_inputs(run_dir, tax_year, notes=run_notes)
 
         with engine_file_lock():
             processing = run_core_processing_pipeline(
