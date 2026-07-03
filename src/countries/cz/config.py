@@ -64,6 +64,15 @@ class CzTaxConfig:
     # Securities acquired after 2014-01-01: exempt if held > 3 years.
     time_test_enabled: bool = True
     holding_test_years: int = 3
+    # Securities acquired BEFORE 2014-01-01 keep the pre-2014 exemption
+    # regime (přechodné ustanovení čl. II bod 5 zákonného opatření Senátu
+    # č. 344/2013 Sb.): 6-month holding test instead of 3 years.
+    # ASSUMPTION: the taxpayer's direct share in the issuer did not exceed
+    # 5 % in the 24 months before the sale (the pre-2014 6-month test only
+    # applied below that threshold) — typical for portfolio investors; the
+    # evaluator notes this assumption on affected items.
+    pre_2014_rule_enabled: bool = True
+    pre_2014_holding_test_months: int = 6
     # Annual exempt limit for security disposal proceeds (2025+ amendment).
     # If total gross disposal proceeds (proceeds_czk) for eligible items
     # do not exceed this threshold, those items are exempt.
@@ -88,13 +97,30 @@ class CzTaxConfig:
     default_max_credit_rate: Decimal = Decimal("0.15")
     # Per-country treaty cap overrides (ISO-2 → max rate).
     # If a country is NOT in this dict, default_max_credit_rate applies.
+    #
+    # Rates below are the SZDZ caps for PORTFOLIO DIVIDENDS (the "all other
+    # cases" rate; participation rates for ≥10/25 % holdings are NOT
+    # modelled). Verified 2026-07-03 against the treaty overview (KODAP) and
+    # spot-checked against treaty texts; the Sb. number identifies the
+    # treaty (all čl. 10). LIMITATION: one cap per country is applied to ALL
+    # WHT of that country — interest caps differ (often 0 %); IBKR normally
+    # withholds no treaty-country interest WHT, but review manually if an
+    # interest WHT row appears.
     country_credit_caps: Dict[str, Decimal] = field(default_factory=lambda: {
-        # Examples — these are PLACEHOLDERS based on common SZDZ rates.
-        # Real values require treaty-by-treaty verification.
-        "US": Decimal("0.15"),
-        "DE": Decimal("0.15"),
-        "IE": Decimal("0.15"),
-        "GB": Decimal("0.15"),
+        "US": Decimal("0.15"),  # 32/1994 Sb.
+        "DE": Decimal("0.15"),  # 18/1984 Sb.
+        "IE": Decimal("0.15"),  # 163/1996 Sb.
+        "GB": Decimal("0.15"),  # 89/1992 Sb. (UK withholds 0 % domestically)
+        "CH": Decimal("0.15"),  # 281/1996 Sb.
+        "CA": Decimal("0.15"),  # 83/2002 Sb.m.s.
+        "JP": Decimal("0.15"),  # 46/1979 Sb.
+        "AU": Decimal("0.15"),  # 5/1996 Sb.
+        # NOTE: NL withholds 15 % domestically but the treaty cap is 10 % —
+        # only 10 % is creditable; the excess must be reclaimed in NL.
+        "NL": Decimal("0.10"),  # 138/1974 Sb.
+        "FR": Decimal("0.10"),  # 79/2005 Sb.m.s.
+        "AT": Decimal("0.10"),  # 31/2007 Sb.m.s.
+        "LU": Decimal("0.10"),  # 51/2014 Sb.
     })
 
     # --- CNB cache path ---

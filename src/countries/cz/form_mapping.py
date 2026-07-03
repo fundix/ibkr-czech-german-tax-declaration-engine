@@ -225,7 +225,7 @@ def build_form_mapping(
             note="Pouze podklad; nezahrnuto v DZD",
         ))
 
-    sec10.notes.append("PLACEHOLDER: expense deduction rules (§10/4 ZDP) not applied")
+    sec10.notes.append("§10/4 expenses: acquisition costs and trade commissions are already reflected in cost basis / net proceeds per item; additional external expenses directly attributable to the sale (if any) must be added manually")
     result.sections.append(sec10)
 
     # =====================================================================

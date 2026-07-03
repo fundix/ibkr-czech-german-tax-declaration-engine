@@ -387,3 +387,31 @@ class TestAggregatorIntegration:
         assert "ftc_summary" in cr
         assert isinstance(cr["ftc_summary"], CzForeignTaxCreditSummary)
         assert cr["ftc_summary"].item_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# Verified default treaty caps (2026-07-03, see cz/config.py citations)
+# ---------------------------------------------------------------------------
+
+class TestVerifiedDefaultTreatyCaps:
+    """The shipped country_credit_caps were verified treaty-by-treaty for
+    portfolio dividends. The NL case is the important one: NL withholds
+    15 % domestically but the treaty cap (138/1974 Sb.) is only 10 % —
+    the excess 5 % is NOT creditable (reclaim in NL instead)."""
+
+    def test_nl_dividend_credit_capped_at_treaty_10_percent(self):
+        cfg = CzTaxConfig()
+        items = [_div(Decimal("1000"), wht_czk=Decimal("150"), source_country="NL")]
+        summary = evaluate_foreign_tax_credit(items, cfg, has_fx=True)
+        assert summary.foreign_tax_paid_total_czk == Decimal("150")
+        assert summary.foreign_tax_creditable_total_czk == Decimal("100")
+        assert summary.per_country["NL"].non_creditable_czk == Decimal("50")
+
+    def test_default_caps_match_verified_treaty_rates(self):
+        cfg = CzTaxConfig()
+        assert cfg.country_credit_caps["US"] == Decimal("0.15")
+        assert cfg.country_credit_caps["DE"] == Decimal("0.15")
+        assert cfg.country_credit_caps["CH"] == Decimal("0.15")
+        assert cfg.country_credit_caps["CA"] == Decimal("0.15")
+        for low_cap_country in ("NL", "FR", "AT", "LU"):
+            assert cfg.country_credit_caps[low_cap_country] == Decimal("0.10")

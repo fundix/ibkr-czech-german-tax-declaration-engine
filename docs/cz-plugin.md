@@ -94,10 +94,10 @@ DAP-oriented output with stable internal line codes (e.g. `CZ_DAP_8_DIVIDENDS`, 
 
 | Area | Status | Detail |
 |------|--------|--------|
-| Treaty verification | Placeholder | `country_credit_caps` are example values, not verified per-treaty |
+| Treaty verification | Verified (2026-07) | `country_credit_caps` ship 12 verified portfolio-dividend caps with Sb. citations (NL/FR/AT/LU are 10 %, not 15 %). One cap per country applies to all WHT — interest caps differ (often 0 %); review interest WHT rows manually |
 | Jednotný kurz (uniform rate) | Implemented (2026-07) | `--cz-fx-mode uniform` uses the GFŘ uniform rates (`uniform_rates.py`, pokyny D-49/D-66/D-75 transcribed); `--cz-fx-mode compare` computes both modes and reports the cheaper one. §10 disposal legs convert via the EUR-enriched amounts (approximation until per-leg original-currency data exists — M17/M18) |
-| Pre-2014 acquisition rule | Not implemented | 6-month rule for pre-2014 securities |
-| Expense deduction (§10/4) | Not implemented | `cost_basis_czk` available on items but rule not applied |
+| Pre-2014 acquisition rule | Implemented (2026-07) | Securities acquired before 2014-01-01 use the 6-month test (čl. II bod 5, 344/2013 Sb.); assumes direct issuer share ≤ 5 % (noted on items) |
+| Expense deduction (§10/4) | Documented | Acquisition costs and commissions are already in cost basis / net proceeds; external sale-related expenses must be added manually (see §10 section note) |
 | Loss carryforward | Not implemented | Negative §10 net floored at zero |
 | Multi-source taxpayer | Limitation | Elevated-rate threshold applies to IBKR income only; adjust if other income exists |
 | EUR intermediate on RGL | Known | Disposal amounts go EUR→CZK (core converts to EUR first) |
