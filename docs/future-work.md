@@ -1,7 +1,6 @@
 # Future Work
 
-Last updated: 2026-07-04 — added section 5 (feature-parity gaps vs.
-taxomat.cz) and implemented 5a's pairing-method axis (FIFO / LIFO /
+Last updated: 2026-07-04 — added section 5 and implemented 5a's pairing-method axis (FIFO / LIFO /
 weighted-average / optimal solver + FX×method compare matrix). Previously
 2026-07-02, after the 2026-07 calculation audit
 (35 of 39 findings fixed, see `AUDIT_REPORT_2026-07.md`) and the first
@@ -48,7 +47,7 @@ recommended execution order.
       `src/countries/cz/uniform_rates.py` ships the official GFŘ tables
       (2020 partial per D-49; 2024 per D-66; 2025 per D-75) with a
       per-leg-year policy for multi-year holdings; `--cz-fx-mode
-      daily|uniform|compare` computes either mode or both and reports which
+    daily|uniform|compare` computes either mode or both and reports which
       is cheaper (exports suffixed `.daily`/`.uniform`). Covered by
       `tests/test_cz_uniform_fx.py` (hand-computed golden run: uniform
       3,822 vs daily 3,604 CZK). LIMITATION: §10 disposal legs convert via
@@ -153,15 +152,15 @@ recommended execution order.
       (vendored Chart.js, SQLite snapshots), sale simulator with FIFO
       preview, time-test split, annual-limit interplay and wait-hint.
       Phase 5 DONE (2026-07-03): MCP server (`uv run --extra mcp python -m
-      src.mcp_server`, stdio) — nine tools over the shared service layer;
+    src.mcp_server`, stdio) — nine tools over the shared service layer;
       registered via `claude mcp add ibkr-tax -- uv --directory <repo> run
-      --extra mcp python -m src.mcp_server`. Remaining from the roadmap:
+    --extra mcp python -m src.mcp_server`. Remaining from the roadmap:
       classification UI (Phase 2) — becomes relevant with the first
       non-stock asset (fund/bond).
 
-## 5. Feature-parity gaps vs. taxomat.cz (competitive scan, 2026-07-04)
+## 5. Feature-parity gaps (competitive scan, 2026-07-04)
 
-Comparison against the taxomat.cz Portfolio Tracker feature list. The
+Comparison against the taxcalc Portfolio Tracker feature list. The
 multi-broker / multi-platform gap is **deliberately out of scope** — we
 are IBKR-only by design. What remains, ordered by value-for-effort:
 
@@ -169,7 +168,7 @@ are IBKR-only by design. What remains, ordered by value-for-effort:
 
 - [x] **Multiple pairing methods (FIFO / LIFO / weighted-average /
       optimal) with cheaper-of selection.** DONE (2026-07-04): a private
-      §10 investor may pick any method (GFŘ výklad; taxomat article
+      §10 investor may pick any method (GFŘ výklad; article
       confirms). `src/engine/pairing.py` adds a `PairingMethod` enum and
       pluggable lot ordering/costing in `FifoLedger`
       (`src/engine/fifo_manager.py`): FIFO (default, unchanged), LIFO,
@@ -181,20 +180,20 @@ are IBKR-only by design. What remains, ordered by value-for-effort:
       (`compare` = full FX-mode × method matrix, cheapest by final tax via
       `src/countries/cz/pairing_compare.py`); web GUI selector + MCP
       `run_pipeline(pairing_method=…)`. Covered by
-      `tests/test_cz_pairing_methods.py` (taxomat worked example
+      `tests/test_cz_pairing_methods.py` (worked example
       FIFO=130 / LIFO=30 / WA=72.5, solver optima, E2E). LIMITATIONS: the
       `optimal` solver covers long securities only (options/shorts/assets
       with mid-year corp actions or capital repayments stay FIFO); it is
       exact for base+rates, near-optimal at the 100k cliff (mitigated by
       scoring every method with the real aggregator — never worse than
       FIFO).
-- [ ] **Dividend separate tax base (samostatný základ daně).** taxomat
+- [ ] **Dividend separate tax base (samostatný základ daně).**
       computes dividends under both the general base and the separate
       15 % base and picks the better one. We only run the general
       15 %/23 % base (`src/countries/cz/tax_liability.py`). Small logic,
       real tax impact for higher-income filers — good second step.
 - [ ] **Sale-impact / max-gain-loss optimiser surfacing.** We already
-      have per-sale simulation (`simulate_sale`); taxomat additionally
+      have per-sale simulation (`simulate_sale`); additionally
       highlights which lots to sell to hit a target gain/loss (e.g. use
       up the 100k exemption, realise offsetting losses). Layer on top of
       the existing simulator + time-test + annual-limit logic.
@@ -215,7 +214,7 @@ are IBKR-only by design. What remains, ordered by value-for-effort:
 ### 5c. Portfolio-tracking / UX gaps
 
 - [ ] **Cumulative time-test exemption timeline.** We show a per-lot
-      countdown (`time_test_deadline()`); taxomat adds a cumulative "how
+      countdown (`time_test_deadline()`); adds a cumulative "how
       much becomes tax-free and when" timeline graph. Low effort over
       data we already hold.
 - [ ] **Closed-positions / year-by-year performance view.** We have a

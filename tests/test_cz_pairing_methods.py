@@ -1,7 +1,7 @@
 """Tests for §10 pairing methods (FIFO / LIFO / weighted average / optimal).
 
-Anchored on the taxomat.cz worked example
-<https://taxomat.cz/jak-na-dane/fifo-lifo-metody-parovani-akcii>:
+
+
 buy 1 unit each at 750, 730, 900, 850, then sell 1 unit at 880.
 """
 import uuid
@@ -22,7 +22,8 @@ from tests.support.mock_providers import MockECBExchangeRateProvider
 
 
 def _ledger(pairing_method, asset_category=AssetCategory.STOCK):
-    provider = MockECBExchangeRateProvider(foreign_to_eur_init_value=Decimal("1.0"))
+    provider = MockECBExchangeRateProvider(
+        foreign_to_eur_init_value=Decimal("1.0"))
     converter = CurrencyConverter(rate_provider=provider)
     return FifoLedger(
         asset_internal_id=uuid.uuid4(),
@@ -64,7 +65,7 @@ def _sell(ledger, when, qty, proceeds, tx_id):
     return ledger.consume_long_lots_for_sale(ev)
 
 
-def _taxomat_book(ledger):
+def _tax_book(ledger):
     _buy(ledger, "2023-01-10", "750", "1")
     _buy(ledger, "2023-02-10", "730", "2")
     _buy(ledger, "2023-04-10", "900", "3")
@@ -78,12 +79,13 @@ def _taxomat_book(ledger):
     [
         (PairingMethod.FIFO, Decimal("130"), "2023-01-10"),   # oldest (750)
         (PairingMethod.LIFO, Decimal("30"), "2023-06-10"),    # newest (850)
-        (PairingMethod.WEIGHTED_AVERAGE, Decimal("72.5"), "2023-01-10"),  # avg 807.5
+        (PairingMethod.WEIGHTED_AVERAGE, Decimal(
+            "72.5"), "2023-01-10"),  # avg 807.5
     ],
 )
 def test_pairing_method_gain(method, expected_gain, expected_acq):
     ledger = _ledger(method)
-    _taxomat_book(ledger)
+    _tax_book(ledger)
     rgls = _sell(ledger, "2023-07-10", "-1", "880", "5")
     assert len(rgls) == 1
     assert rgls[0].gross_gain_loss_eur == expected_gain
@@ -95,17 +97,19 @@ def test_weighted_average_moving_pool_is_consistent():
     """After a WA sale, surviving lots are re-priced so the next average is
     computed on a consistent (moving-average) inventory value."""
     ledger = _ledger(PairingMethod.WEIGHTED_AVERAGE)
-    _taxomat_book(ledger)  # avg 807.5 across 4 units
+    _tax_book(ledger)  # avg 807.5 across 4 units
     _sell(ledger, "2023-07-10", "-1", "880", "5")
     # 3 units remain, each re-priced to 807.5 (not their original costs).
-    assert all(lot.unit_cost_basis_eur == Decimal("807.5") for lot in ledger.lots)
+    assert all(lot.unit_cost_basis_eur == Decimal("807.5")
+               for lot in ledger.lots)
     # A second sale therefore also costs at 807.5.
     rgls2 = _sell(ledger, "2023-08-10", "-1", "820", "6")
     assert rgls2[0].gross_gain_loss_eur == Decimal("12.5")  # 820 - 807.5
 
 
 def test_fifo_default_unchanged_when_method_omitted():
-    provider = MockECBExchangeRateProvider(foreign_to_eur_init_value=Decimal("1.0"))
+    provider = MockECBExchangeRateProvider(
+        foreign_to_eur_init_value=Decimal("1.0"))
     converter = CurrencyConverter(rate_provider=provider)
     ledger = FifoLedger(
         asset_internal_id=uuid.uuid4(), asset_category=AssetCategory.STOCK,
@@ -115,7 +119,7 @@ def test_fifo_default_unchanged_when_method_omitted():
         decimal_rounding_mode=global_config.DECIMAL_ROUNDING_MODE,
     )
     assert ledger.pairing_method == PairingMethod.FIFO
-    _taxomat_book(ledger)
+    _tax_book(ledger)
     rgls = _sell(ledger, "2023-07-10", "-1", "880", "5")
     assert rgls[0].gross_gain_loss_eur == Decimal("130")
 
@@ -123,7 +127,8 @@ def test_fifo_default_unchanged_when_method_omitted():
 def test_consumption_order_indices():
     assert consumption_order_indices(3, PairingMethod.FIFO) == [0, 1, 2]
     assert consumption_order_indices(3, PairingMethod.LIFO) == [2, 1, 0]
-    assert consumption_order_indices(3, PairingMethod.WEIGHTED_AVERAGE) == [0, 1, 2]
+    assert consumption_order_indices(
+        3, PairingMethod.WEIGHTED_AVERAGE) == [0, 1, 2]
     assert consumption_order_indices(3, PairingMethod.OPTIMAL) == [0, 1, 2]
 
 
@@ -135,14 +140,15 @@ def _never_exempt(lot, sale):
 
 def test_solver_minimises_taxable_gain_via_high_cost_lot():
     """With no exemptions, the optimum matches the sale to the highest-cost
-    lot (max loss / min gain) — the taxomat 'MaxLose' pick."""
+    lot (max loss / min gain) — the 'MaxLose' pick."""
     supplies = [
         SupplyLot(date(2023, 1, 10), Decimal("1"), Decimal("750"), "a"),
         SupplyLot(date(2023, 2, 10), Decimal("1"), Decimal("730"), "b"),
         SupplyLot(date(2023, 4, 10), Decimal("1"), Decimal("900"), "c"),
         SupplyLot(date(2023, 6, 10), Decimal("1"), Decimal("850"), "d"),
     ]
-    demands = [SaleDemand(date(2023, 7, 10), Decimal("1"), Decimal("880"), "S1")]
+    demands = [SaleDemand(date(2023, 7, 10), Decimal("1"),
+                          Decimal("880"), "S1")]
     asg = solve_optimal_matching(supplies, demands, _never_exempt)
     assert asg is not None
     # highest cost is 900 (index 2): gain = 880 - 900 = -20 (a loss).
@@ -154,10 +160,13 @@ def test_solver_routes_gain_to_exempt_lot():
     """A gain routed to a time-test-exempt lot drops out of the base entirely,
     which beats merely minimising the nominal gain."""
     supplies = [
-        SupplyLot(date(2020, 1, 1), Decimal("1"), Decimal("100"), "old"),   # exempt
-        SupplyLot(date(2024, 1, 1), Decimal("1"), Decimal("140"), "new"),   # taxable
+        SupplyLot(date(2020, 1, 1), Decimal("1"),
+                  Decimal("100"), "old"),   # exempt
+        SupplyLot(date(2024, 1, 1), Decimal("1"),
+                  Decimal("140"), "new"),   # taxable
     ]
-    demands = [SaleDemand(date(2024, 6, 1), Decimal("1"), Decimal("150"), "S1")]
+    demands = [SaleDemand(date(2024, 6, 1), Decimal("1"),
+                          Decimal("150"), "S1")]
 
     def exempt(lot, sale):
         return (sale.sale_date - lot.acq_date).days > 365 * 3 and not lot.estimated
@@ -171,10 +180,12 @@ def test_solver_routes_gain_to_exempt_lot():
 
 def test_solver_estimated_lot_never_exempt():
     supplies = [
-        SupplyLot(date(2020, 1, 1), Decimal("1"), Decimal("100"), "SOY_FALLBACK", estimated=True),
+        SupplyLot(date(2020, 1, 1), Decimal("1"), Decimal(
+            "100"), "SOY_FALLBACK", estimated=True),
         SupplyLot(date(2024, 1, 1), Decimal("1"), Decimal("140"), "new"),
     ]
-    demands = [SaleDemand(date(2024, 6, 1), Decimal("1"), Decimal("150"), "S1")]
+    demands = [SaleDemand(date(2024, 6, 1), Decimal("1"),
+                          Decimal("150"), "S1")]
 
     def exempt(lot, sale):
         if lot.estimated:
@@ -188,9 +199,11 @@ def test_solver_estimated_lot_never_exempt():
 
 
 def test_solver_infeasible_returns_none():
-    supplies = [SupplyLot(date(2024, 8, 1), Decimal("1"), Decimal("100"), "late")]
+    supplies = [SupplyLot(date(2024, 8, 1), Decimal("1"),
+                          Decimal("100"), "late")]
     # sale precedes the only lot's acquisition — cannot match.
-    demands = [SaleDemand(date(2024, 6, 1), Decimal("1"), Decimal("150"), "S1")]
+    demands = [SaleDemand(date(2024, 6, 1), Decimal("1"),
+                          Decimal("150"), "S1")]
     assert solve_optimal_matching(supplies, demands, _never_exempt) is None
 
 
@@ -203,7 +216,8 @@ def test_pairing_comparison_picks_cheapest_cell():
     def _result(final_tax):
         return SimpleNamespace(sections={
             "cz_tax_liability": SimpleNamespace(
-                line_items={"final_czech_tax_after_credit_czk": Decimal(final_tax)}
+                line_items={
+                    "final_czech_tax_after_credit_czk": Decimal(final_tax)}
             )
         })
 
@@ -216,7 +230,8 @@ def test_pairing_comparison_picks_cheapest_cell():
         ("uniform", "lifo"): _result("3400"),
         ("uniform", "optimal"): _result("2900"),
     }
-    cmp = CzPairingComparison(grid=grid, fx_modes=["daily", "uniform"], pairing_methods=methods)
+    cmp = CzPairingComparison(
+        grid=grid, fx_modes=["daily", "uniform"], pairing_methods=methods)
     assert cmp.best_cell == ("daily", "optimal")
     assert cmp.final_tax_for("daily", PairingMethod.OPTIMAL) == Decimal("2800")
     text = "\n".join(cmp.render_lines())
@@ -253,7 +268,8 @@ class TestOptimalPairingE2E(FifoTestCaseBase):
             positions_end_data=_TWO_LOT_EOY,
             cash_transactions_data=[],
             corporate_actions_data=None,
-            custom_rate_provider=MockECBExchangeRateProvider(foreign_to_eur_init_value=Decimal("1.0")),
+            custom_rate_provider=MockECBExchangeRateProvider(
+                foreign_to_eur_init_value=Decimal("1.0")),
             tax_year=2024,
             country_code="cz",
             pairing_method=pairing_method,

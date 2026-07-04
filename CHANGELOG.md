@@ -34,7 +34,7 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the engine validates FIFO against current holdings and results carry a
   "běžící rok — průběžný odhad" badge.
 - **MCP server for Claude (Phase 5)** — `uv run --extra mcp python -m
-  src.mcp_server` (stdio, official `mcp` SDK / FastMCP; `mcp` optional
+src.mcp_server` (stdio, official `mcp` SDK / FastMCP; `mcp` optional
   dependency group). Nine tools wrap the same `RunService` layer the web
   GUI uses (`list_datasets`, `run_pipeline`, `get_tax_summary`,
   `get_form_mapping`, `get_pending_review_items`, `get_positions`,
@@ -46,59 +46,59 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uses the same summary. Tested through the SDK's in-memory client
   (tool registry, golden figures, JSON-safety, error paths) plus a real
   stdio handshake.
-- **Mini-taxomat (Phase 4)** — live valuation, sale simulator, charts:
-  - **live quotes** without new dependencies (Yahoo chart endpoint via
-    `requests`; no yfinance/pandas): 15-min TTL cache incl. failures,
-    IBKR→Yahoo symbol heuristics (venue-marker stripping, currency
-    exchange suffixes, HKD zero-padding) + user overrides in
-    `data/webapp/symbol_map.json`; graceful fallback to the EOY mark
-    price with a "31.12." tag;
-  - **unrealized P/L in CZK** per position (today's ČNB daily rate; EUR
-    cost basis converted the same way — labelled as approximate), totals,
-    allocation doughnut (vendored Chart.js);
-  - **sale simulator** (`/results/<run>/simulate`): FIFO lot consumption
-    preview, per-lot exempt/taxable split using the persisted §4/1/w
-    deadlines, 100k annual-limit interplay with the year's already
-    realized proceeds, 15% tax estimate, and a "co kdybyste počkal(a) do
-    <datum>" hint; losses annotated with §10 bucket-offsetting rules;
-  - **portfolio value history**: SQLite snapshots (`data/webapp/
-    portfolio.db`, stdlib sqlite3) — at most one automatic snapshot per
-    day plus a manual save button; value-over-time line chart;
-  - `JobRunner.run_sync` executes short interactive work (valuation,
-    simulation) on the engine worker thread — serialized with runs,
-    correct decimal context.
-- **Portfolio view (Phase 3)** — the web GUI gains per-run *Portfolio* and
-  *Dividendy* pages:
-  - the calculation engine now returns its final FIFO ledgers
-    (`run_main_calculations` 5-tuple → `ProcessingOutput.fifo_ledgers_by_asset_id`),
-    so end-of-year open lots (with acquisition dates and EUR cost basis)
-    are available to consumers; every web run persists a `portfolio.json`
-    snapshot;
-  - per-lot **§4/1/w time-test countdown** ("osvobozeno od …", days
-    remaining, 90-day warning) driven by a new pure helper
-    `time_test_deadline()` extracted from `evaluate_time_test` (single
-    source of the 3-year / pre-2014 6-month / §33 clamping arithmetic);
-    SOY-fallback lots with synthetic acquisition dates are flagged
-    "odhad"; derivatives are marked not applicable;
-  - EOY valuation from the positions file's MarkPrice (own currency; CZK
-    conversion arrives with live quotes in a later phase);
-  - dividend overview per asset and per month with WHT totals.
+- **Mini-tax (Phase 4)** — live valuation, sale simulator, charts:
+    - **live quotes** without new dependencies (Yahoo chart endpoint via
+      `requests`; no yfinance/pandas): 15-min TTL cache incl. failures,
+      IBKR→Yahoo symbol heuristics (venue-marker stripping, currency
+      exchange suffixes, HKD zero-padding) + user overrides in
+      `data/webapp/symbol_map.json`; graceful fallback to the EOY mark
+      price with a "31.12." tag;
+    - **unrealized P/L in CZK** per position (today's ČNB daily rate; EUR
+      cost basis converted the same way — labelled as approximate), totals,
+      allocation doughnut (vendored Chart.js);
+    - **sale simulator** (`/results/<run>/simulate`): FIFO lot consumption
+      preview, per-lot exempt/taxable split using the persisted §4/1/w
+      deadlines, 100k annual-limit interplay with the year's already
+      realized proceeds, 15% tax estimate, and a "co kdybyste počkal(a) do
+      <datum>" hint; losses annotated with §10 bucket-offsetting rules;
+    - **portfolio value history**: SQLite snapshots (`data/webapp/
+portfolio.db`, stdlib sqlite3) — at most one automatic snapshot per
+      day plus a manual save button; value-over-time line chart;
+    - `JobRunner.run_sync` executes short interactive work (valuation,
+      simulation) on the engine worker thread — serialized with runs,
+      correct decimal context.
+- **Portfolio view (Phase 3)** — the web GUI gains per-run _Portfolio_ and
+  _Dividendy_ pages:
+    - the calculation engine now returns its final FIFO ledgers
+      (`run_main_calculations` 5-tuple → `ProcessingOutput.fifo_ledgers_by_asset_id`),
+      so end-of-year open lots (with acquisition dates and EUR cost basis)
+      are available to consumers; every web run persists a `portfolio.json`
+      snapshot;
+    - per-lot **§4/1/w time-test countdown** ("osvobozeno od …", days
+      remaining, 90-day warning) driven by a new pure helper
+      `time_test_deadline()` extracted from `evaluate_time_test` (single
+      source of the 3-year / pre-2014 6-month / §33 clamping arithmetic);
+      SOY-fallback lots with synthetic acquisition dates are flagged
+      "odhad"; derivatives are marked not applicable;
+    - EOY valuation from the positions file's MarkPrice (own currency; CZK
+      conversion arrives with live quotes in a later phase);
+    - dividend overview per asset and per month with WHT totals.
 - **Local web GUI (Phase 1)** — `uv run --extra web python -m src.webapp`
   starts a localhost FastAPI + Jinja2 + HTMX app (Czech UI, optional `web`
   dependency group; no Node/build step, htmx vendored):
-  - per-year input datasets (`data/webapp/<year>/`, gitignored) with upload
-    page; trades/corporate actions merged across years for FIFO history,
-    start-of-year positions derived from the previous year's end;
-  - runs execute on the Phase 0 `JobRunner` with live HTMX progress
-    (captured engine log), each run persists its exact merged inputs +
-    JSON/XLSX exports + DAP form mapping under `out/webapp_runs/<run_id>/`;
-  - result pages: summary with daily/uniform comparison, filterable
-    per-item table, verified DAP form line references, and a
-    **manual-review checklist page** (PENDING items + section REVIEW notes
-    with a nav badge — the future-work "checklist as first-class output"
-    item, resolved at the GUI level), JSON/XLSX downloads;
-  - service layer (`src/webapp/services.py`) is framework-free and will be
-    shared with the planned MCP server.
+    - per-year input datasets (`data/webapp/<year>/`, gitignored) with upload
+      page; trades/corporate actions merged across years for FIFO history,
+      start-of-year positions derived from the previous year's end;
+    - runs execute on the Phase 0 `JobRunner` with live HTMX progress
+      (captured engine log), each run persists its exact merged inputs +
+      JSON/XLSX exports + DAP form mapping under `out/webapp_runs/<run_id>/`;
+    - result pages: summary with daily/uniform comparison, filterable
+      per-item table, verified DAP form line references, and a
+      **manual-review checklist page** (PENDING items + section REVIEW notes
+      with a nav badge — the future-work "checklist as first-class output"
+      item, resolved at the GUI level), JSON/XLSX downloads;
+    - service layer (`src/webapp/services.py`) is framework-free and will be
+      shared with the planned MCP server.
 - `src/countries/cz/aggregation_service.py` — reusable
   `run_cz_aggregation`/`run_cz_compare` extracted from the CLI (`main.py`
   delegates; supports FX provider injection for offline tests).
@@ -137,11 +137,13 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 **Multi-country architecture**
+
 - Plugin system with `TaxPlugin` / `TaxClassifier` / `TaxAggregator` / `OutputRenderer` Protocols
 - Country registry with `--country de|cz` CLI flag
 - FX provider factory supporting ECB and ČNB providers
 
 **Czech Republic plugin (`countries/cz/`)**
+
 - Per-event CZK conversion via ČNB daily rates with full audit trail
 - §8 ZDP bucket classification (dividends, interest)
 - §10 ZDP bucket classification (securities, options)
@@ -157,12 +159,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Unlinked WHT preserved as standalone audit items
 
 **Core refactoring**
+
 - German tax classification extracted from `fifo_manager.py` into `GermanTaxClassifier`
 - `RealizedGainLoss.__post_init__` cleaned — no more auto-calculated Teilfreistellung
 - Calculation engine accepts injectable `tax_classifier` callback
 - `ExchangeRateProvider` base class satisfies `FxProvider` Protocol
 
 **Documentation**
+
 - `README.md` rewritten for multi-country use
 - `docs/architecture.md` — layer diagram, separation of concerns
 - `docs/cz-plugin.md` — CZ features, limitations, policy assumptions
@@ -170,12 +174,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `CONTRIBUTING.md` — setup, coding style, PR checklist
 
 ### Changed
+
 - Project name: `ibkr-german-tax-declaration-engine` → `ibkr-tax-declaration-engine`
 - Version jump from 3.3.1 to 4.0.0 (breaking: multi-country architecture)
 - `pipeline_runner.py` now accepts `country_code` parameter
 - German plugin is the default (`--country de`)
 
 ### Known Limitations
+
 - CZ: Treaty credit caps are placeholder values — verify per-treaty
 - CZ: Jednotný kurz (uniform/annual rate) not implemented
 - CZ: Pre-2014 acquisition rule (6-month test) not implemented
