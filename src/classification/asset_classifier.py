@@ -17,7 +17,19 @@ class AssetClassifier:
             self.cache_file_path = cache_file_path
 
         self.classifications_cache: Dict[str, Tuple[str, str, str]] = {}
-        self._dialog_options: List[Tuple[str, AssetCategory, InvestmentFundType]] = [
+        self._dialog_options = self.classification_options()
+        self.load_classifications()
+
+    @classmethod
+    def classification_options(cls) -> List[Tuple[str, AssetCategory, InvestmentFundType]]:
+        """Ordered (label, category, fund_type) choices for asset classification.
+
+        Single source of truth shared by the interactive CLI dialog and the
+        web classification form — keep the (category, fund_type) pairs and
+        their order stable so cached classifications stay comparable across
+        both entry points.
+        """
+        return [
             ("Aktienfonds (KAP-INV)", AssetCategory.INVESTMENT_FUND, InvestmentFundType.AKTIENFONDS),
             ("Mischfonds (KAP-INV)", AssetCategory.INVESTMENT_FUND, InvestmentFundType.MISCHFONDS),
             ("Immobilienfonds (KAP-INV)", AssetCategory.INVESTMENT_FUND, InvestmentFundType.IMMOBILIENFONDS),
@@ -32,7 +44,6 @@ class AssetClassifier:
             ("Devisenhandelspaar (z.B. EUR.USD) - wird als UNKNOWN klassifiziert", AssetCategory.UNKNOWN, InvestmentFundType.NONE), # Added for clarity if interactive
             ("Sonstiges (Standard Anlage KAP)", AssetCategory.STOCK, InvestmentFundType.NONE), # Default for other unknowns
         ]
-        self.load_classifications()
 
     def load_classifications(self):
         if os.path.exists(self.cache_file_path):

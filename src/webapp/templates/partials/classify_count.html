@@ -1,0 +1,9 @@
+{% if scan.pending or scan.review %}
+<p class="classify-hint">
+  {% if scan.pending %}<span class="badge warn">{{ scan.pending | length }} aktiv čeká na zařazení</span>{% endif %}
+  {% if scan.review %}<span class="badge">{{ scan.review | length }} k revizi</span>{% endif %}
+  <a href="/classify?year={{ year }}">Zařadit aktiva →</a>
+</p>
+{% else %}
+<p class="classify-hint"><span class="badge ok">✓ aktiva zařazena</span></p>
+{% endif %}
