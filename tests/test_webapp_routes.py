@@ -36,15 +36,24 @@ def client(tmp_path_factory):
 
 
 class TestPages:
-    def test_index_lists_dataset_and_run(self, client):
+    def test_index_dashboard_surfaces_latest_run(self, client):
+        # The home page is now a dashboard: it links to the latest run and
+        # offers the "run calculation" call-to-action (the form lives on /runs).
         r = client.get("/")
+        assert r.status_code == 200
+        assert "Přehled" in r.text
+        assert "2024-test" in r.text          # links to /results/2024-test
+        assert "Spustit výpočet" in r.text    # CTA to /runs
+
+    def test_runs_page_lists_dataset_and_run(self, client):
+        r = client.get("/runs")
         assert r.status_code == 200
         assert "2024" in r.text
         assert "2024-test" in r.text
         assert "Spustit výpočet" in r.text
 
-    def test_index_shows_pairing_method_selector(self, client):
-        r = client.get("/")
+    def test_runs_page_shows_pairing_method_selector(self, client):
+        r = client.get("/runs")
         assert r.status_code == 200
         assert 'name="pairing_method"' in r.text
         assert 'value="optimal"' in r.text

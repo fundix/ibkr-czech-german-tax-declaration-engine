@@ -3,6 +3,7 @@
 import logging
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import APIRouter, Form, Request
@@ -17,6 +18,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 PENDING_STATUS = "PENDING_MANUAL_REVIEW"
+_FAVICON_ICO = Path(__file__).resolve().parent / "static" / "favicon" / "favicon.ico"
+
+
+@router.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    """Serve the icon at the root path browsers hard-code (the /static mount
+    doesn't cover it)."""
+    return FileResponse(_FAVICON_ICO)
 
 
 def _tpl(request: Request, name: str, **ctx) -> HTMLResponse:
@@ -35,11 +44,48 @@ def _svc(request: Request):
 
 @router.get("/", response_class=HTMLResponse)
 def index(request: Request):
+    """Dashboard: net worth (live, lazy) + latest tax result per year + status."""
     svc = _svc(request)
     current_year = date.today().year
     flex = svc.get_flex_config()
     return _tpl(
         request, "index.html",
+        overview=svc.dashboard_overview(),
+        current_year=current_year,
+        flex_configured=flex.configured,
+        dataset_age=svc.dataset_age_hours(current_year),
+    )
+
+
+@router.get("/dashboard/valuation", response_class=HTMLResponse)
+def dashboard_valuation(request: Request):
+    """Lazy-loaded net-worth card — live quotes for the latest run in CZK."""
+    svc = _svc(request)
+    try:
+        data = svc.get_dashboard_valuation()
+    except Exception as exc:  # noqa: BLE001 — surface a friendly card, not a 500
+        logger.exception("Dashboard valuation failed")
+        return _tpl(request, "partials/job_error.html", error=f"Ocenění selhalo: {exc}")
+    if data is None:
+        return HTMLResponse("")
+    live = data["live"]
+    allocation = [
+        {"label": p["symbol"], "value": str(p["value_czk"])}
+        for p in live["positions"] if p.get("value_czk")
+    ][:12]
+    return _tpl(request, "partials/dashboard_valuation.html",
+                run_id=data["run_id"], meta=data["meta"], live=live,
+                allocation=allocation, snapshots=svc.list_snapshots())
+
+
+@router.get("/runs", response_class=HTMLResponse)
+def runs_page(request: Request):
+    """Control panel: run a calculation, dataset readiness, recent runs."""
+    svc = _svc(request)
+    current_year = date.today().year
+    flex = svc.get_flex_config()
+    return _tpl(
+        request, "runs.html",
         datasets=svc.list_years(),
         runs=svc.list_runs(),
         current_year=current_year,
@@ -66,12 +112,15 @@ def start_run(
     tax_year: int = Form(...),
     fx_mode: str = Form("compare"),
     pairing_method: str = Form("fifo"),
+    force: bool = Form(False),
 ):
     svc = _svc(request)
     try:
-        job_id, run_id = svc.start_run(tax_year, fx_mode, pairing_method)
+        job_id, run_id = svc.start_run(tax_year, fx_mode, pairing_method, force=force)
     except ValueError as exc:
         return _tpl(request, "partials/job_error.html", error=str(exc))
+    if job_id is None:  # identical inputs — reuse the cached run, skip recompute
+        return Response(status_code=200, headers={"HX-Redirect": f"/results/{run_id}"})
     return _tpl(request, "partials/job_status.html", job_id=job_id, run_id=run_id)
 
 

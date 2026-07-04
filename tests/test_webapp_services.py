@@ -288,6 +288,60 @@ class TestExecuteRun:
         assert Decimal(meta["summary"]["daily"]["final_tax_czk"]) == Decimal("3604.00")
 
 
+class TestComputeCacheAndDashboard:
+    def _run(self, service, run_id, **kw):
+        return service._execute_run(
+            run_id, 2024, "daily",
+            ecb_provider=GoldenEcbProvider(),
+            cz_fx_provider=GoldenCnbProvider(),
+            **kw,
+        )
+
+    def test_run_records_fingerprint_and_accounts(self, service):
+        _seed_synthetic_year(service)
+        meta = self._run(service, "2024-fp")
+        assert meta["account_ids"] == ["U1234567"]        # from the input CSVs
+        assert len(meta["input_fingerprint"]) == 64        # sha256 hex digest
+        # The portfolio snapshot is account-tagged for future filtering.
+        pf = service.load_portfolio("2024-fp")
+        assert pf["account_ids"] == ["U1234567"]
+        assert all(p["account"] == "U1234567" for p in pf["positions"])
+
+    def test_find_cached_run_matches_only_identical_inputs(self, service):
+        _seed_synthetic_year(service)
+        self._run(service, "2024-cache")
+        assert service.find_cached_run(2024, "daily", "fifo") == "2024-cache"
+        # Different params → different fingerprint → no reuse.
+        assert service.find_cached_run(2024, "daily", "optimal") is None
+        assert service.find_cached_run(2024, "uniform", "fifo") is None
+
+    def test_cache_invalidated_when_source_file_changes(self, service):
+        _seed_synthetic_year(service)
+        self._run(service, "2024-inv")
+        assert service.find_cached_run(2024, "daily", "fifo") == "2024-inv"
+        cash = service.data_dir / "2024" / "cash_transactions.csv"
+        cash.write_text(cash.read_text() + "\n")   # touch an input
+        assert service.find_cached_run(2024, "daily", "fifo") is None
+
+    def test_start_run_reuses_cached_run_without_queuing_job(self, service):
+        _seed_synthetic_year(service)
+        self._run(service, "2024-hit")
+        job_id, run_id = service.start_run(2024, "daily", "fifo")
+        assert job_id is None            # cache short-circuit — no job queued
+        assert run_id == "2024-hit"
+
+    def test_dashboard_overview_groups_by_year_with_latest(self, service):
+        assert service.dashboard_overview()["has_runs"] is False
+        _seed_synthetic_year(service)
+        self._run(service, "2024-a")
+        self._run(service, "2024-b")
+        ov = service.dashboard_overview()
+        assert ov["has_runs"] is True
+        assert ov["accounts"] == ["U1234567"]
+        assert [c["tax_year"] for c in ov["year_cards"]] == [2024]  # one card per year
+        assert ov["latest"]["run_id"] in {"2024-a", "2024-b"}
+
+
 # ---------------------------------------------------------------------------
 # Live valuation + sale simulator (stubbed quotes + FX: USD→CZK 20, EUR→CZK 25)
 # ---------------------------------------------------------------------------

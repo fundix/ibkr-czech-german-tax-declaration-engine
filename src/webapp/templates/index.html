@@ -1,110 +1,71 @@
 {% extends "base.html" %}
+{% block title %}Přehled — IBKR Tax Engine{% endblock %}
 {% block content %}
 <h1>Přehled</h1>
 
-{% if flex_configured %}
+{% if not overview.has_runs %}
 <section class="card">
-  <h2>IBKR — aktuální data</h2>
-  <p class="muted">
-    {% if dataset_age is none %}Rok {{ current_year }} zatím nemá stažená data.
-    {% else %}Data roku {{ current_year }} jsou {{ "%.0f"|format(dataset_age) }} h stará.{% endif %}
+  <h2>Zatím žádný výpočet</h2>
+  <p class="muted">Nahrajte výpisy z IBKR a spusťte první výpočet — pak se tu objeví
+    přehled majetku (čisté jmění, alokace) a stav posledních daňových výpočtů.</p>
+  <p>
+    <a href="/runs" class="btn-link">Spustit výpočet →</a>
+    &nbsp;·&nbsp;
+    <a href="/files" class="btn-link">Nahrát výpisy →</a>
   </p>
-  {% if auto_fetch %}
-  <div hx-post="/ibkr/fetch" hx-trigger="load" hx-target="#job-status" hx-swap="innerHTML"></div>
-  <p class="note">Data jsou zastaralá — stahuji čerstvé výpisy z IBKR automaticky…</p>
-  {% else %}
-  <form hx-post="/ibkr/fetch" hx-target="#job-status" hx-swap="innerHTML">
-    <input type="hidden" name="tax_year" value="{{ current_year }}">
-    <button type="submit">Stáhnout z IBKR a přepočítat ({{ current_year }})</button>
-  </form>
-  {% endif %}
+</section>
+{% else %}
+
+{% if overview.accounts %}
+<p class="muted account-line">Účty:
+  {% for acc in overview.accounts %}<span class="badge">{{ acc }}</span>{% endfor %}
+  <span class="note">(agregace přes více účtů přibude s druhým účtem)</span>
+</p>
+{% endif %}
+
+<section class="card" id="net-worth">
+  <h2>Čisté jmění</h2>
+  <div hx-get="/dashboard/valuation" hx-trigger="load" hx-swap="innerHTML">
+    <div class="job running"><span class="spinner"></span> Načítám živé ocenění…</div>
+  </div>
+</section>
+
+<section>
+  <h2>Poslední výpočty</h2>
+  <div class="cards-row">
+    {% for run in overview.year_cards %}
+    <div class="card stat">
+      <h3>Rok {{ run.tax_year }}</h3>
+      <p class="big">{% if run.summary.daily %}{{ run.summary.daily.final_tax_czk | czk }} Kč{% else %}–{% endif %}</p>
+      <p class="muted">daň (denní){% if run.summary.daily and run.summary.daily.combined_base_czk %}
+        · základ {{ run.summary.daily.combined_base_czk | czk }} Kč{% endif %}</p>
+      {% if run.summary.daily and run.summary.daily.pending_review_count %}
+      <p><span class="badge warn">{{ run.summary.daily.pending_review_count }} k revizi</span></p>
+      {% endif %}
+      <p><a href="/results/{{ run.run_id }}">Výsledky →</a></p>
+    </div>
+    {% endfor %}
+  </div>
 </section>
 {% endif %}
 
 <section class="card">
-  <h2>Spustit výpočet</h2>
-  {% set ready = datasets | selectattr("run_ready") | list %}
-  {% if ready %}
-  <form hx-post="/runs" hx-target="#job-status" hx-swap="innerHTML" class="run-form">
-    <label>Daňový rok
-      <select name="tax_year">
-        {% for ds in ready | reverse %}
-        <option value="{{ ds.year }}">{{ ds.year }}</option>
-        {% endfor %}
-      </select>
-    </label>
-    <fieldset>
-      <legend>Kurzový režim (§38/1 ZDP)</legend>
-      <label><input type="radio" name="fx_mode" value="compare" checked> Porovnat oba (doporučeno)</label>
-      <label><input type="radio" name="fx_mode" value="daily"> Denní kurz ČNB</label>
-      <label><input type="radio" name="fx_mode" value="uniform"> Jednotný kurz</label>
-    </fieldset>
-    <label>Párovací metoda (§10 ZDP)
-      <select name="pairing_method">
-        <option value="fifo">FIFO (nejstarší první)</option>
-        <option value="lifo">LIFO (nejnovější první)</option>
-        <option value="weighted_average">Vážený průměr</option>
-        <option value="optimal">Daňově optimální</option>
-      </select>
-    </label>
-    <button type="submit">Spustit výpočet</button>
+  <h2>Data &amp; stav</h2>
+  <p class="muted">
+    {% if dataset_age is none %}Rok {{ current_year }} zatím nemá stažená data.
+    {% else %}Data roku {{ current_year }} jsou {{ "%.0f"|format(dataset_age) }} h stará.{% endif %}
+  </p>
+  {% if flex_configured %}
+  <form hx-post="/ibkr/fetch" hx-target="#job-status" hx-swap="innerHTML">
+    <input type="hidden" name="tax_year" value="{{ current_year }}">
+    <button type="submit">Stáhnout z IBKR a přepočítat ({{ current_year }})</button>
   </form>
-  <div class="classify-badge" hx-get="/classify/count" hx-trigger="load" hx-swap="innerHTML"></div>
   <div id="job-status"></div>
-  {% else %}
-  <p>Zatím nejsou nahraná žádná kompletní data. <a href="/files">Nahrát výpisy →</a></p>
   {% endif %}
-</section>
-
-<section class="card">
-  <h2>Datové sady</h2>
-  {% if datasets %}
-  <table>
-    <thead><tr><th>Rok</th><th>Obchody</th><th>Cash</th><th>Pozice začátek</th><th>Pozice konec</th><th>Korp. akce</th><th>Stav</th></tr></thead>
-    <tbody>
-      {% for ds in datasets | reverse %}
-      <tr>
-        <td><strong>{{ ds.year }}</strong></td>
-        <td>{{ "✓" if ds.files.trades else "–" }}</td>
-        <td>{{ "✓" if ds.files.cash else "–" }}</td>
-        <td>{{ "✓" if ds.files.positions_start else "auto" }}</td>
-        <td>{{ "✓" if ds.files.positions_end else "–" }}</td>
-        <td>{{ "✓" if ds.files.corp_actions else "auto" }}</td>
-        <td>
-          {% if ds.run_ready %}<span class="badge ok">připraveno</span>
-          {% else %}<span class="badge warn">chybí soubory</span>{% endif %}
-          {% for note in ds.notes %}<div class="note">{{ note }}</div>{% endfor %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p>Žádná data. <a href="/files">Nahrát výpisy →</a></p>
-  {% endif %}
-</section>
-
-<section class="card">
-  <h2>Poslední běhy</h2>
-  {% if runs %}
-  <table>
-    <thead><tr><th>Běh</th><th>Rok</th><th>Režim</th><th>Metoda</th><th>Výsledná daň (denní)</th><th>Trvání</th><th></th></tr></thead>
-    <tbody>
-      {% for run in runs %}
-      <tr>
-        <td>{{ run.run_id }}</td>
-        <td>{{ run.tax_year }}</td>
-        <td>{{ run.fx_mode }}</td>
-        <td>{{ run.pairing_method or "fifo" }}</td>
-        <td class="num">{% if run.summary.daily %}{{ run.summary.daily.final_tax_czk | czk }} Kč{% else %}–{% endif %}</td>
-        <td>{{ run.duration_s }} s</td>
-        <td><a href="/results/{{ run.run_id }}">Výsledky →</a></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <p>Zatím žádné běhy.</p>
-  {% endif %}
+  <p style="margin-top:.6rem">
+    <a href="/runs" class="btn-link">Spustit výpočet →</a>
+    &nbsp;·&nbsp;
+    <a href="/files" class="btn-link">Nahrát výpisy →</a>
+  </p>
 </section>
 {% endblock %}

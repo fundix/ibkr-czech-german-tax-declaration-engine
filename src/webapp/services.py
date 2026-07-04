@@ -23,6 +23,7 @@ header-only file.
 from __future__ import annotations
 
 import csv
+import hashlib
 import logging
 import shutil
 import time
@@ -32,6 +33,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import src.config as config
 from src.countries.cz.aggregation_service import run_cz_aggregation, run_cz_compare
 from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.time_test import time_test_deadline
@@ -57,6 +59,16 @@ FX_MODES = ("daily", "uniform", "compare")
 # Single-method pairing choices offered in the web GUI (the full FX×method
 # matrix / 'compare' lives on the CLI — `--cz-pairing-method compare`).
 PAIRING_METHODS = ("fifo", "lifo", "weighted_average", "optimal")
+
+# Placeholder account label until real multi-account support lands. Runs are
+# tagged with the IBKR account id(s) found in their inputs; a run with no
+# account column falls back to this so the dashboard can always group by one.
+DEFAULT_ACCOUNT = "default"
+# IBKR statements name the account column differently per report; trades/cash/
+# corp actions use ClientAccountID, positions use AccountId in some exports.
+_ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
+# Bump when the fingerprint recipe changes so old runs never match a new one.
+_FINGERPRINT_VERSION = "v1"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —
@@ -324,14 +336,113 @@ class RunService:
         }
 
     # ------------------------------------------------------------------
+    # Compute cache (input fingerprint → reuse an identical past run)
+    # ------------------------------------------------------------------
+
+    def _dataset_source_files(self, tax_year: int) -> List[Path]:
+        """Every source file that can feed a run for ``tax_year``.
+
+        Conservative on purpose: hashes all dataset files of years <= tax_year
+        (trades/corp actions are merged across history). Touching an unrelated
+        earlier-year file only forces a harmless recompute — it can never make
+        a stale result be reused.
+        """
+        paths: List[Path] = []
+        for ds in self.list_years():
+            if ds.year > tax_year:
+                continue
+            for p in ds.files.values():
+                if p is not None:
+                    paths.append(p)
+        return sorted(set(paths))
+
+    def _input_fingerprint(self, tax_year: int, fx_mode: str, pairing_method: str) -> str:
+        """SHA-256 over the inputs + params that determine a run's output.
+
+        Includes the effective fx_mode (running-year compare→daily), pairing
+        method, all source CSVs, and the classification cache (which reshapes
+        results). ECB rates are deliberately excluded: for a closed year they
+        are stable, and a running year changes its data (→ new hash) anyway.
+        """
+        eff_mode, _ = _effective_fx_mode(fx_mode, tax_year, datetime.now().year)
+        h = hashlib.sha256()
+        h.update(
+            f"{_FINGERPRINT_VERSION}|year={tax_year}|fx={eff_mode}"
+            f"|pairing={pairing_method}".encode()
+        )
+        for p in self._dataset_source_files(tax_year):
+            try:
+                data = p.read_bytes()
+            except OSError:
+                continue
+            h.update(str(p).encode())
+            h.update(str(len(data)).encode())
+            h.update(data)
+        try:
+            cache_path = Path(config.CLASSIFICATION_CACHE_FILE_PATH)
+            if cache_path.is_file():
+                h.update(b"classify:")
+                h.update(cache_path.read_bytes())
+        except Exception:  # noqa: BLE001 — a missing/unreadable cache just omits it
+            pass
+        return h.hexdigest()
+
+    def find_cached_run(
+        self, tax_year: int, fx_mode: str, pairing_method: str
+    ) -> Optional[str]:
+        """Return the run_id of an existing run with identical inputs, if any."""
+        fp = self._input_fingerprint(tax_year, fx_mode, pairing_method)
+        for meta in self.list_runs(limit=100):
+            if meta.get("input_fingerprint") != fp:
+                continue
+            run_id = meta.get("run_id")
+            modes = meta.get("modes") or []
+            if not run_id or not modes:
+                continue
+            # The reused result must still be on disk (runs can be pruned).
+            if (self.runs_dir / run_id / f"result.{modes[0]}.json").is_file():
+                return run_id
+        return None
+
+    def _extract_account_ids(self, inputs: Dict[str, Path]) -> List[str]:
+        """Distinct IBKR account id(s) present in a run's input files."""
+        accounts: set = set()
+        for key in ("positions_end", "trades", "cash"):
+            p = inputs.get(key)
+            if not p or not Path(p).is_file():
+                continue
+            try:
+                with open(p, encoding="utf-8-sig", newline="") as fh:
+                    reader = csv.DictReader(fh)
+                    fields = reader.fieldnames or []
+                    col = next((c for c in _ACCOUNT_COLUMNS if c in fields), None)
+                    if not col:
+                        continue
+                    for row in reader:
+                        val = (row.get(col) or "").strip()
+                        if val:
+                            accounts.add(val)
+            except Exception:  # noqa: BLE001 — never let account tagging fail a run
+                continue
+        return sorted(accounts) or [DEFAULT_ACCOUNT]
+
+    # ------------------------------------------------------------------
     # Runs
     # ------------------------------------------------------------------
 
-    def start_run(self, tax_year: int, fx_mode: str, pairing_method: str = "fifo") -> Tuple[str, str]:
+    def start_run(
+        self,
+        tax_year: int,
+        fx_mode: str,
+        pairing_method: str = "fifo",
+        force: bool = False,
+    ) -> Tuple[Optional[str], str]:
         """Submit a run to the single-worker executor; returns (job_id, run_id).
 
         Dataset readiness is validated HERE, before submitting — the user gets
-        the error immediately instead of a job that fails a poll later.
+        the error immediately instead of a job that fails a poll later. When an
+        identical run already exists and ``force`` is False, no job is queued:
+        returns ``(None, cached_run_id)`` so the caller can jump straight to it.
         """
         if fx_mode not in FX_MODES:
             raise ValueError(f"Neznámý kurzový režim: {fx_mode}")
@@ -343,6 +454,13 @@ class RunService:
         if not ds.run_ready:
             missing = ", ".join(settings.SLOT_LABELS[s] for s in ds.missing_required)
             raise ValueError(f"Pro rok {tax_year} chybí: {missing}")
+        if not force:
+            cached = self.find_cached_run(tax_year, fx_mode, pairing_method)
+            if cached:
+                logger.info(
+                    f"Cache hit for {tax_year}/{fx_mode}/{pairing_method} → {cached}"
+                )
+                return None, cached
         run_id = f"{tax_year}-{datetime.now():%Y%m%d-%H%M%S}"
         job_id = self.runner.submit(
             f"Výpočet {tax_year} ({fx_mode}/{pairing_method})",
@@ -366,6 +484,7 @@ class RunService:
         the provider overrides exist for offline tests.
         """
         started = time.monotonic()
+        requested_fx_mode = fx_mode  # before compare→daily downgrade, for the fingerprint
         run_dir = self.runs_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -374,6 +493,10 @@ class RunService:
             run_notes.extend(extra_notes)
 
         inputs = self._prepare_inputs(run_dir, tax_year, notes=run_notes)
+        account_ids = self._extract_account_ids(inputs)
+        input_fingerprint = self._input_fingerprint(
+            tax_year, requested_fx_mode, pairing_method
+        )
 
         pairing = coerce_pairing_method(pairing_method)
         with engine_file_lock():
@@ -425,7 +548,7 @@ class RunService:
             }
 
         dump_json(
-            self._build_portfolio(processing, tax_year),
+            self._build_portfolio(processing, tax_year, account_ids=account_ids),
             run_dir / "portfolio.json",
         )
 
@@ -441,6 +564,8 @@ class RunService:
             "summary": summary,
             "compare_lines": compare_lines,
             "notes": run_notes,
+            "account_ids": account_ids,
+            "input_fingerprint": input_fingerprint,
         }
         dump_json(meta, run_dir / "meta.json")
         logger.info(f"Run {run_id} finished in {meta['duration_s']} s.")
@@ -602,13 +727,20 @@ class RunService:
     # §4/1/w applies to securities; derivatives never pass the time test.
     _TIME_TEST_CATEGORIES = {"STOCK", "BOND", "INVESTMENT_FUND"}
 
-    def _build_portfolio(self, processing, tax_year: int) -> Dict[str, Any]:
+    def _build_portfolio(
+        self, processing, tax_year: int, account_ids: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
         """Distill open FIFO lots into a JSON-safe portfolio snapshot.
 
         Valuation stays in the position's own currency (EOY mark price from
         the positions file); cost basis is EUR (engine-internal base). CZK
         conversion arrives with live quotes in a later phase.
+
+        ``account_ids`` tags the snapshot for future multi-account filtering; a
+        single-account run stamps every position with that account.
         """
+        account_ids = account_ids or [DEFAULT_ACCOUNT]
+        single_account = account_ids[0] if len(account_ids) == 1 else None
         cz_cfg = CzTaxConfig()
         positions = []
         for asset_id, ledger in (processing.fifo_ledgers_by_asset_id or {}).items():
@@ -652,6 +784,7 @@ class RunService:
                 "isin": getattr(asset, "ibkr_isin", None),
                 "description": asset.description,
                 "category": category,
+                "account": single_account,
                 "time_test_applicable": time_test_applies,
                 "quantity_long": sum((l.quantity for l in lots), Decimal(0)),
                 "quantity_short": sum((s.quantity_shorted for s in short_lots), Decimal(0)),
@@ -668,6 +801,7 @@ class RunService:
         return {
             "tax_year": tax_year,
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "account_ids": account_ids,
             "positions": positions,
         }
 
@@ -1174,14 +1308,63 @@ class RunService:
                 return meta.get("run_id")
         return None
 
+    def dashboard_overview(self) -> Dict[str, Any]:
+        """Home-page summary: latest run overall + newest run per year.
+
+        Grouped by account so a second IBKR/other account later is a data
+        change, not a UI rewrite; today there is a single account group.
+        """
+        runs = self.list_runs(limit=100)  # newest first
+        per_year: Dict[int, Dict[str, Any]] = {}
+        accounts: set = set()
+        for meta in runs:
+            year = meta.get("tax_year")
+            if year is not None and year not in per_year:
+                per_year[year] = meta
+            for acc in (meta.get("account_ids") or []):
+                accounts.add(acc)
+        return {
+            "has_runs": bool(runs),
+            "latest": runs[0] if runs else None,
+            "year_cards": [per_year[y] for y in sorted(per_year, reverse=True)],
+            "accounts": sorted(accounts),
+        }
+
+    def get_dashboard_valuation(self) -> Optional[Dict[str, Any]]:
+        """Live CZK valuation of the latest run for the net-worth card.
+
+        Returns None when there is no run yet or quoting/valuation yields
+        nothing. Later this will aggregate the latest run per account.
+        """
+        overview = self.dashboard_overview()
+        latest = overview.get("latest")
+        if not latest:
+            return None
+        run_id = latest.get("run_id")
+        live = self.get_live_portfolio(run_id)
+        if live is None:
+            return None
+        return {"run_id": run_id, "meta": latest, "live": live}
+
     def run_pipeline_sync(
-        self, tax_year: int, fx_mode: str = "compare", pairing_method: str = "fifo"
+        self, tax_year: int, fx_mode: str = "compare", pairing_method: str = "fifo",
+        force: bool = False,
     ) -> Dict[str, Any]:
-        """Run the full pipeline synchronously (MCP tools wait for the result)."""
+        """Run the full pipeline synchronously (MCP tools wait for the result).
+
+        Reuses an identical past run when ``force`` is False — unchanged data
+        returns instantly instead of recomputing.
+        """
         if fx_mode not in FX_MODES:
             raise ValueError(f"Neznámý kurzový režim: {fx_mode}")
         if pairing_method not in PAIRING_METHODS:
             raise ValueError(f"Neznámá párovací metoda: {pairing_method}")
+        if not force:
+            cached = self.find_cached_run(tax_year, fx_mode, pairing_method)
+            if cached:
+                meta = self.get_run(cached)
+                if meta is not None:
+                    return meta
         run_id = f"{tax_year}-{datetime.now():%Y%m%d-%H%M%S}"
         return self.runner.run_sync(
             self._execute_run, run_id, tax_year, fx_mode, None, None, None, pairing_method,

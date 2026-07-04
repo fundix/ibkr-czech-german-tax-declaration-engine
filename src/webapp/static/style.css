@@ -460,3 +460,30 @@ table.classify-table tr.attention td {
 .inline-form input[type="text"] {
     min-width: 12rem;
 }
+
+/* Dashboard extras */
+.btn-link {
+    display: inline-block;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+}
+.btn-link:hover {
+    text-decoration: underline;
+}
+label.inline {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+}
+label.inline input {
+    width: auto;
+}
+.account-line {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin: 0 0 1rem;
+}
