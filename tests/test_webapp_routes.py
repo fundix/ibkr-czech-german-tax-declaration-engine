@@ -57,6 +57,16 @@ class TestPages:
         assert "3 604,00" in r.text  # 3 604,00 Kč, Czech formatting
         assert "§8 ZDP" in r.text
 
+    def test_results_header_labels_are_self_explanatory(self, client):
+        r = client.get("/results/2024-test")
+        assert r.status_code == 200
+        # The big number is labelled as the tax, and the FX/pairing basis is
+        # spelled out (not the raw 'daily' / 'fifo' tokens).
+        assert "Výsledná daň z příjmů" in r.text
+        assert "denní kurz ČNB" in r.text
+        assert "Metoda párování §10" in r.text
+        assert "Režim: daily" not in r.text
+
     def test_items_page_renders_and_filters(self, client):
         r = client.get("/results/2024-test/items")
         assert r.status_code == 200

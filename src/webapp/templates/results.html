@@ -14,9 +14,13 @@
 <section class="cards-row">
   {% for m, s in meta.summary.items() %}
   <div class="card stat {{ 'highlight' if m == mode }}">
-    <h3>{{ "Denní kurz" if m == "daily" else "Jednotný kurz" }}</h3>
+    <h3>Výsledná daň z příjmů
+      <span class="badge muted" title="Kurzový režim použitý pro přepočet cizích měn na CZK">
+        {{ "přepočet: denní kurz ČNB" if m == "daily" else "přepočet: jednotný (roční) kurz GFŘ" }}
+      </span>
+    </h3>
     <p class="big">{{ s.final_tax_czk | czk }} Kč</p>
-    <p class="muted">výsledná daň · základ {{ s.combined_base_czk | czk }} Kč</p>
+    <p class="muted">základ daně {{ s.combined_base_czk | czk }} Kč{% if meta.summary | length > 1 %} · {{ "denní kurz ČNB" if m == "daily" else "jednotný (roční) kurz" }}{% endif %}</p>
   </div>
   {% endfor %}
 </section>

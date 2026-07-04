@@ -1,6 +1,8 @@
+{% set fx_labels = {"daily": "denní kurz ČNB", "uniform": "jednotný (roční) kurz GFŘ", "compare": "porovnání kurzů"} %}
+{% set pairing_labels = {"fifo": "FIFO", "lifo": "LIFO", "weighted_average": "vážený průměr", "optimal": "daňově optimální"} %}
 <div class="run-header">
   <h1>Výpočet {{ meta.tax_year }} <span class="muted">({{ meta.run_id }})</span></h1>
-  <p class="muted">Režim: {{ meta.fx_mode }} · {{ meta.created_at[:19] | replace("T", " ") }} · {{ meta.duration_s }} s
+  <p class="muted">Kurz: {{ fx_labels.get(meta.fx_mode, meta.fx_mode) }} · Metoda párování §10: {{ pairing_labels.get(meta.get("pairing_method", "fifo"), "FIFO") }} · {{ meta.created_at[:19] | replace("T", " ") }} · {{ meta.duration_s }} s
     {% if meta.eoy_mismatch_error_count %} · <span class="badge warn">{{ meta.eoy_mismatch_error_count }} neshod EOY pozic!</span>{% endif %}
     {% if meta.tax_year >= today_year() %} · <span class="badge warn" title="Rok ještě není uzavřen — obchody a pozice jsou k datu posledního stažení, daňová čísla jsou průběžný odhad.">běžící rok — průběžný odhad</span>{% endif %}
   </p>
