@@ -1,10 +1,13 @@
 # Future Work
 
-Last updated: 2026-07-02 — after the 2026-07 calculation audit (35 of 39
-findings fixed, see `AUDIT_REPORT_2026-07.md`) and the first end-to-end
-synthetic validation run (local `data/synthetic_2024/`: engine output matched
-an independently hand-computed expectation on all 13 tracked figures,
-including the §38f/8 per-state FTC cap edge).
+Last updated: 2026-07-04 — added section 5 (feature-parity gaps vs.
+taxomat.cz) and implemented 5a's pairing-method axis (FIFO / LIFO /
+weighted-average / optimal solver + FX×method compare matrix). Previously
+2026-07-02, after the 2026-07 calculation audit
+(35 of 39 findings fixed, see `AUDIT_REPORT_2026-07.md`) and the first
+end-to-end synthetic validation run (local `data/synthetic_2024/`: engine
+output matched an independently hand-computed expectation on all 13 tracked
+figures, including the §38f/8 per-state FTC cap edge).
 
 Ordered by value-for-effort. Within each theme, items are roughly in
 recommended execution order.
@@ -156,7 +159,82 @@ recommended execution order.
       classification UI (Phase 2) — becomes relevant with the first
       non-stock asset (fund/bond).
 
-## 5. Documentation
+## 5. Feature-parity gaps vs. taxomat.cz (competitive scan, 2026-07-04)
+
+Comparison against the taxomat.cz Portfolio Tracker feature list. The
+multi-broker / multi-platform gap is **deliberately out of scope** — we
+are IBKR-only by design. What remains, ordered by value-for-effort:
+
+### 5a. Tax-optimisation gaps (change the resulting tax — highest value)
+
+- [x] **Multiple pairing methods (FIFO / LIFO / weighted-average /
+      optimal) with cheaper-of selection.** DONE (2026-07-04): a private
+      §10 investor may pick any method (GFŘ výklad; taxomat article
+      confirms). `src/engine/pairing.py` adds a `PairingMethod` enum and
+      pluggable lot ordering/costing in `FifoLedger`
+      (`src/engine/fifo_manager.py`): FIFO (default, unchanged), LIFO,
+      weighted average (blended pool cost, FIFO lot identity for the time
+      test). `optimal` is a global tax-minimising min-cost-flow solver
+      (`src/engine/pairing_solver.py` + `src/countries/cz/optimal_pairing.py`)
+      that routes gains onto time-test-exempt lots and losses onto taxable
+      ones. `--cz-pairing-method fifo|lifo|weighted_average|optimal|compare`
+      (`compare` = full FX-mode × method matrix, cheapest by final tax via
+      `src/countries/cz/pairing_compare.py`); web GUI selector + MCP
+      `run_pipeline(pairing_method=…)`. Covered by
+      `tests/test_cz_pairing_methods.py` (taxomat worked example
+      FIFO=130 / LIFO=30 / WA=72.5, solver optima, E2E). LIMITATIONS: the
+      `optimal` solver covers long securities only (options/shorts/assets
+      with mid-year corp actions or capital repayments stay FIFO); it is
+      exact for base+rates, near-optimal at the 100k cliff (mitigated by
+      scoring every method with the real aggregator — never worse than
+      FIFO).
+- [ ] **Dividend separate tax base (samostatný základ daně).** taxomat
+      computes dividends under both the general base and the separate
+      15 % base and picks the better one. We only run the general
+      15 %/23 % base (`src/countries/cz/tax_liability.py`). Small logic,
+      real tax impact for higher-income filers — good second step.
+- [ ] **Sale-impact / max-gain-loss optimiser surfacing.** We already
+      have per-sale simulation (`simulate_sale`); taxomat additionally
+      highlights which lots to sell to hit a target gain/loss (e.g. use
+      up the 100k exemption, realise offsetting losses). Layer on top of
+      the existing simulator + time-test + annual-limit logic.
+
+### 5b. Asset-class gaps
+
+- [ ] **Futures as a first-class category.** IBKR trades futures and the
+      Flex data carries them, but we only model `CFD`/`OPTION`
+      (`AssetCategory` in `src/domain/enums.py`). Real gap in incoming
+      data, not just a product-scope choice.
+- [ ] **Native crypto with §4 time test.** Today crypto only enters as
+      crypto-ETP/ETC mapped to `PRIVATE_SALE_ASSET`. Direct crypto (if
+      ever sourced) would need its own category + time-test handling.
+      Lower priority — IBKR spot-crypto coverage is narrow.
+- [ ] **Real estate / rental income.** Out of IBKR scope entirely; noted
+      only for completeness. Not planned.
+
+### 5c. Portfolio-tracking / UX gaps
+
+- [ ] **Cumulative time-test exemption timeline.** We show a per-lot
+      countdown (`time_test_deadline()`); taxomat adds a cumulative "how
+      much becomes tax-free and when" timeline graph. Low effort over
+      data we already hold.
+- [ ] **Closed-positions / year-by-year performance view.** We have a
+      value-history chart; missing is realised-performance history broken
+      down by year / asset type / security.
+- [ ] **Target vs. actual allocation (rebalancing).** We render current
+      allocation only — no target weights / drift.
+- [ ] **Heat map** of position sizes. Pure UX, lowest priority.
+- [ ] **Option expiry / assignment monitoring & alerts.** Lifecycle is
+      handled for tax; a monitoring/alerts surface in the GUI is missing.
+- [ ] **Mobile app (iOS/Android).** Out of scope — we are a local
+      web/CLI tool. Noted only for completeness.
+
+Already at parity (for reference, not gaps): current valuation +
+realised/unrealised P/L, live quotes, per-lot time-test countdown,
+dividend overview, ČNB-vs-GFŘ uniform-rate comparison, sale simulation,
+audit-friendly PDF/JSON/XLSX exports.
+
+## 6. Documentation
 
 - [ ] DE plugin documentation
 - [ ] API reference

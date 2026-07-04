@@ -21,6 +21,7 @@ from src.utils.sorting_utils import get_event_sort_key
 from src.utils.type_utils import parse_ibkr_date
 
 from .fifo_manager import FifoLedger
+from .pairing import PairingMethod, coerce as coerce_pairing_method
 from src.utils.currency_converter import CurrencyConverter
 from src.utils.exchange_rate_provider import ECBExchangeRateProvider
 import src.config as config
@@ -189,6 +190,7 @@ def run_main_calculations(
     internal_calculation_precision: int, # Renamed from internal_working_precision
     decimal_rounding_mode: str,
     tax_classifier: Optional[Any] = None,
+    pairing_method: PairingMethod = PairingMethod.FIFO,
 ) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger]]:
     """
     Runs the main calculation logic:
@@ -203,7 +205,8 @@ def run_main_calculations(
     5. Calculates Vorabpauschale (currently placeholder).
     6. Returns calculated results (Realized G/L, Vorabpauschale), processed events, and EOY mismatch count.
     """
-    logger.info(f"Starting main calculation engine for tax year {tax_year} with {len(financial_events)} events.")
+    pairing_method = coerce_pairing_method(pairing_method)
+    logger.info(f"Starting main calculation engine for tax year {tax_year} with {len(financial_events)} events (pairing: {pairing_method.value}).")
     ctx = Context(prec=internal_calculation_precision, rounding=decimal_rounding_mode) # Renamed internal_working_precision
 
     realized_gains_losses: List[RealizedGainLoss] = []
@@ -277,6 +280,14 @@ def run_main_calculations(
             elif isinstance(asset_obj, InvestmentFund):
                 asset_fund_type = asset_obj.fund_type
 
+            # Options stay FIFO regardless of the chosen pairing method: the
+            # §10 pairing choice applies to fungible securities, and the option
+            # lifecycle linker relies on FIFO consumption of contract lots.
+            ledger_pairing_method = (
+                PairingMethod.FIFO
+                if asset_obj.asset_category == AssetCategory.OPTION
+                else pairing_method
+            )
             ledger = FifoLedger(
                 asset_internal_id=asset_id, asset_category=asset_obj.asset_category,
                 asset_multiplier_from_asset=asset_multiplier_val,
@@ -285,6 +296,7 @@ def run_main_calculations(
                 decimal_rounding_mode=decimal_rounding_mode,
                 fund_type=asset_fund_type,
                 tax_classifier=tax_classifier,
+                pairing_method=ledger_pairing_method,
             )
 
             asset_historical_events_for_soy_init = []

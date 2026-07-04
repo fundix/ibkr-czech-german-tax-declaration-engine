@@ -42,8 +42,17 @@ def main_application():
 
     logger.info(f"Starting IBKR Tax Declaration Engine (country={args.country})...")
 
-    try:
-        processing_results: ProcessingOutput = run_core_processing_pipeline(
+    from src.engine.pairing import PairingMethod
+    cz_pairing_method = getattr(args, "cz_pairing_method", "fifo")
+    # For a single chosen method, run the core with it up front; 'compare'
+    # re-runs the core per method later via the matrix driver, so start on FIFO.
+    _initial_pairing = (
+        PairingMethod.FIFO if cz_pairing_method == "compare"
+        else PairingMethod(cz_pairing_method)
+    )
+
+    def _run_pipeline_for(method: PairingMethod) -> ProcessingOutput:
+        return run_core_processing_pipeline(
             trades_file_path=args.trades,
             cash_transactions_file_path=args.cash,
             positions_start_file_path=args.pos_start,
@@ -52,7 +61,11 @@ def main_application():
             interactive_classification_mode=args.interactive,
             tax_year_to_process=args.tax_year,
             country_code=args.country,
+            pairing_method=method,
         )
+
+    try:
+        processing_results: ProcessingOutput = _run_pipeline_for(_initial_pairing)
     except Exception as e:
         logger.critical(f"Core processing pipeline failed: {e}. Exiting.", exc_info=True)
         sys.exit(1)
@@ -148,27 +161,50 @@ def main_application():
             tax_year=tax_year
         )
 
-    # --- CZ aggregation: JSON/XLSX exports and/or FX-mode comparison ---
+    # --- CZ aggregation: JSON/XLSX exports and/or FX/pairing comparison ---
     cz_fx_mode = getattr(args, "cz_fx_mode", "daily")
-    if args.output_json or args.output_xlsx or args.output_pdf or cz_fx_mode == "compare":
+    wants_export = bool(args.output_json or args.output_xlsx or args.output_pdf)
+    if wants_export or cz_fx_mode == "compare" or cz_pairing_method == "compare":
         if args.country == "cz":
             from src.countries.cz.aggregation_service import (
                 run_cz_aggregation,
                 run_cz_compare,
+                run_cz_pairing_matrix,
             )
+            from src.engine.pairing import ALL_METHODS
 
-            if cz_fx_mode == "compare":
+            if cz_pairing_method == "compare":
+                # Full FX-mode × pairing-method matrix; export the cheapest cell.
+                fx_modes = ["daily", "uniform"] if cz_fx_mode == "compare" else [cz_fx_mode]
+                matrix = run_cz_pairing_matrix(
+                    _run_pipeline_for, args.tax_year, fx_modes, ALL_METHODS
+                )
+                for line in matrix.render_lines():
+                    print(line)
+                cz_exports = []
+                if matrix.best_cell is not None and matrix.best_result is not None:
+                    fx, method_value = matrix.best_cell
+                    cz_exports = [(f"{fx}.{method_value}", matrix.best_result)]
+                force_suffix = True
+            elif cz_fx_mode == "compare":
                 comparison = run_cz_compare(processing_results, args.tax_year)
                 for line in comparison.render_lines():
                     print(line)
                 cz_exports = [("daily", comparison.daily), ("uniform", comparison.uniform)]
+                force_suffix = True
             else:
-                cz_exports = [(cz_fx_mode, run_cz_aggregation(processing_results, args.tax_year, cz_fx_mode))]
+                result = run_cz_aggregation(processing_results, args.tax_year, cz_fx_mode)
+                if cz_pairing_method != "fifo":
+                    cz_exports = [(f"{cz_fx_mode}.{cz_pairing_method}", result)]
+                    force_suffix = True
+                else:
+                    cz_exports = [(cz_fx_mode, result)]
+                    force_suffix = False
 
             def _mode_suffixed(path: str, mode: str) -> str:
-                # In compare mode both results are exported side by side:
-                # out.json -> out.daily.json / out.uniform.json
-                if cz_fx_mode != "compare":
+                # In compare modes each result is exported side by side:
+                # out.json -> out.daily.json / out.daily.optimal.json
+                if not force_suffix:
                     return path
                 root, dot, ext = path.rpartition(".")
                 return f"{root}.{mode}.{ext}" if dot else f"{path}.{mode}"

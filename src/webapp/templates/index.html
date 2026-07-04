@@ -39,6 +39,14 @@
       <label><input type="radio" name="fx_mode" value="daily"> Denní kurz ČNB</label>
       <label><input type="radio" name="fx_mode" value="uniform"> Jednotný kurz</label>
     </fieldset>
+    <label>Párovací metoda (§10 ZDP)
+      <select name="pairing_method">
+        <option value="fifo">FIFO (nejstarší první)</option>
+        <option value="lifo">LIFO (nejnovější první)</option>
+        <option value="weighted_average">Vážený průměr</option>
+        <option value="optimal">Daňově optimální</option>
+      </select>
+    </label>
     <button type="submit">Spustit výpočet</button>
   </form>
   <div id="job-status"></div>
@@ -79,13 +87,14 @@
   <h2>Poslední běhy</h2>
   {% if runs %}
   <table>
-    <thead><tr><th>Běh</th><th>Rok</th><th>Režim</th><th>Výsledná daň (denní)</th><th>Trvání</th><th></th></tr></thead>
+    <thead><tr><th>Běh</th><th>Rok</th><th>Režim</th><th>Metoda</th><th>Výsledná daň (denní)</th><th>Trvání</th><th></th></tr></thead>
     <tbody>
       {% for run in runs %}
       <tr>
         <td>{{ run.run_id }}</td>
         <td>{{ run.tax_year }}</td>
         <td>{{ run.fx_mode }}</td>
+        <td>{{ run.pairing_method or "fifo" }}</td>
         <td class="num">{% if run.summary.daily %}{{ run.summary.daily.final_tax_czk | czk }} Kč{% else %}–{% endif %}</td>
         <td>{{ run.duration_s }} s</td>
         <td><a href="/results/{{ run.run_id }}">Výsledky →</a></td>

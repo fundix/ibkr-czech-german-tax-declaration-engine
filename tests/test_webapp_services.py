@@ -270,6 +270,23 @@ class TestExecuteRun:
         with pytest.raises(ValueError, match="režim"):
             service.start_run(2024, "bogus")
 
+    def test_start_run_validates_pairing_method(self, service):
+        _seed_synthetic_year(service)
+        with pytest.raises(ValueError, match="párovací"):
+            service.start_run(2024, "daily", "bogus")
+
+    def test_execute_run_threads_pairing_method(self, service):
+        _seed_synthetic_year(service)
+        meta = service._execute_run(
+            "2024-opt", 2024, "daily",
+            ecb_provider=GoldenEcbProvider(),
+            cz_fx_provider=GoldenCnbProvider(),
+            pairing_method="optimal",
+        )
+        assert meta["pairing_method"] == "optimal"
+        # Single-lot synthetic scenario → optimal == FIFO golden figure.
+        assert Decimal(meta["summary"]["daily"]["final_tax_czk"]) == Decimal("3604.00")
+
 
 # ---------------------------------------------------------------------------
 # Live valuation + sale simulator (stubbed quotes + FX: USD→CZK 20, EUR→CZK 25)

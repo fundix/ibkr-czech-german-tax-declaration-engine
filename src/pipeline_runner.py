@@ -18,6 +18,7 @@ from src.processing.enrichment import enrich_financial_events
 from src.utils.currency_converter import CurrencyConverter
 from src.utils.exchange_rate_provider import ECBExchangeRateProvider, ExchangeRateProvider # Added base for custom provider
 from src.engine.calculation_engine import run_main_calculations
+from src.engine.pairing import PairingMethod
 from src.identification.asset_resolver import AssetResolver
 from src.countries.registry import get_tax_plugin
 
@@ -58,6 +59,7 @@ def run_core_processing_pipeline(
     tax_year_to_process: int = config.TAX_YEAR, # Allow override for testing
     custom_rate_provider: Optional[ExchangeRateProvider] = None, # For testing ECB mock
     country_code: str = "de",
+    pairing_method: PairingMethod = PairingMethod.FIFO,
 ) -> ProcessingOutput:
     """
     Runs the core data processing pipeline: parsing, enrichment, and calculations.
@@ -137,6 +139,7 @@ def run_core_processing_pipeline(
             internal_calculation_precision=config.INTERNAL_CALCULATION_PRECISION, # Renamed parameter
             decimal_rounding_mode=config.DECIMAL_ROUNDING_MODE,
             tax_classifier=_tax_classifier.classify,
+            pairing_method=pairing_method,
         )
     except Exception as e:
         logger.critical(f"Calculation engine failed with unexpected error: {e}", exc_info=True)
@@ -146,6 +149,18 @@ def run_core_processing_pipeline(
     if eoy_mismatch_error_count_calc > 0:
          logger.warning(f"Calculation engine reported {eoy_mismatch_error_count_calc} EOY quantity mismatch errors.")
 
+    # Tax-optimal pairing is a CZ §10 feature: the core ran FIFO (OPTIMAL
+    # behaves as FIFO at the ledger level); re-match eligible assets to
+    # minimise the §10 taxable base, then re-classify the new RGLs.
+    if pairing_method == PairingMethod.OPTIMAL and country_code == "cz":
+        from src.countries.cz.optimal_pairing import apply_cz_optimal_pairing
+        realized_gains_losses = apply_cz_optimal_pairing(
+            realized_gains_losses=realized_gains_losses,
+            fifo_ledgers=fifo_ledgers,
+            all_financial_events=financial_events_enriched,
+            tax_year=tax_year_to_process,
+            classifier=_tax_classifier.classify,
+        )
 
     return ProcessingOutput(
         realized_gains_losses=realized_gains_losses,

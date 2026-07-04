@@ -17,6 +17,10 @@ from src.utils.currency_converter import CurrencyConverter
 from src.utils.exchange_rate_provider import ECBExchangeRateProvider
 from src.utils.type_utils import parse_ibkr_date, safe_decimal, numeric_tx_sort_key
 from src.utils.tax_utils import get_teilfreistellung_rate_for_fund_type
+from src.engine.pairing import (
+    PairingMethod, coerce as coerce_pairing_method,
+    consumption_order_indices, uses_pool_average_cost,
+)
 import src.config as global_config
 
 # Type alias for the optional tax classifier callback.
@@ -110,10 +114,16 @@ class FifoLedger:
                  internal_working_precision: int, # Will be renamed internal_calculation_precision where called
                  decimal_rounding_mode: str,
                  fund_type: Optional[InvestmentFundType] = None,
-                 tax_classifier: _TaxClassifierCallable = None):
+                 tax_classifier: _TaxClassifierCallable = None,
+                 pairing_method: PairingMethod = PairingMethod.FIFO):
         self.asset_internal_id: uuid.UUID = asset_internal_id
         self.asset_category: AssetCategory = asset_category
         self.fund_type: Optional[InvestmentFundType] = fund_type
+        # Lot-matching strategy for disposals. FIFO (default) preserves the
+        # existing DE + CZ behaviour; LIFO / weighted-average vary the CZ §10
+        # cost basis / time-test outcome. OPTIMAL behaves as FIFO here (the
+        # global solver produces its RGLs separately).
+        self.pairing_method: PairingMethod = coerce_pairing_method(pairing_method)
         # Trades excluded from FIFO because enrichment left their EUR value
         # None (missing FX rate). Each exclusion silently removes a taxable
         # trade from the results — the engine surfaces the total at the end.
@@ -593,6 +603,17 @@ class FifoLedger:
         lots_to_remove_indices: List[int] = []
         current_available_qty_in_lots = sum(l.quantity for l in self.lots)
 
+        # Weighted-average pairing: every disposed unit is costed at the blended
+        # pool average (Σcost / Σqty) held at sale time, while the deemed-sold
+        # lot identity (dates → time test) stays FIFO. Surviving lots are then
+        # re-priced to the average so the next average stays consistent (moving
+        # average). FIFO/LIFO leave the per-lot cost untouched.
+        pool_avg_unit_cost: Optional[Decimal] = None
+        if uses_pool_average_cost(self.pairing_method) and self.lots:
+            _pool_qty = sum((l.quantity for l in self.lots), Decimal(0))
+            _pool_cost = sum((l.total_cost_basis_eur for l in self.lots), Decimal(0))
+            if _pool_qty > Decimal(0):
+                pool_avg_unit_cost = self.ctx.divide(_pool_cost, _pool_qty)
 
         realization_type_for_rgl: RealizationType
         if self.asset_category == AssetCategory.OPTION:
@@ -600,8 +621,10 @@ class FifoLedger:
         else:
             realization_type_for_rgl = RealizationType.LONG_POSITION_SALE # Renamed
 
-        for i, current_lot in enumerate(self.lots):
+        for i in consumption_order_indices(len(self.lots), self.pairing_method):
             if quantity_remaining_to_realize <= Decimal(0): break
+            current_lot = self.lots[i]
+            effective_unit_cost = pool_avg_unit_cost if pool_avg_unit_cost is not None else current_lot.unit_cost_basis_eur
             quantity_from_this_lot: Decimal
             if current_lot.quantity <= quantity_remaining_to_realize:
                 quantity_from_this_lot = current_lot.quantity
@@ -614,7 +637,7 @@ class FifoLedger:
             quantity_remaining_to_realize = self.ctx.subtract(quantity_remaining_to_realize, quantity_from_this_lot)
 
             if not is_historical_simulation:
-                cost_basis_for_portion = self.ctx.multiply(quantity_from_this_lot, current_lot.unit_cost_basis_eur) # Renamed
+                cost_basis_for_portion = self.ctx.multiply(quantity_from_this_lot, effective_unit_cost)
                 realization_value_for_portion = self.ctx.multiply(quantity_from_this_lot, sale_proceeds_eur_per_unit_for_event)
                 gross_gain_loss = self.ctx.subtract(realization_value_for_portion, cost_basis_for_portion)
 
@@ -630,7 +653,7 @@ class FifoLedger:
                     realization_date=sale_event.event_date,
                     realization_type=realization_type_for_rgl,
                     quantity_realized=quantity_from_this_lot,
-                    unit_cost_basis_eur=current_lot.unit_cost_basis_eur,
+                    unit_cost_basis_eur=effective_unit_cost,
                     unit_realization_value_eur=sale_proceeds_eur_per_unit_for_event,
                     total_cost_basis_eur=cost_basis_for_portion,
                     total_realization_value_eur=realization_value_for_portion,
@@ -643,6 +666,11 @@ class FifoLedger:
                 realized_gains_losses.append(rgl)
 
         for i in sorted(lots_to_remove_indices, reverse=True): del self.lots[i]
+
+        if pool_avg_unit_cost is not None:
+            for lot in self.lots:
+                lot.unit_cost_basis_eur = pool_avg_unit_cost
+                lot.total_cost_basis_eur = self.ctx.multiply(lot.quantity, pool_avg_unit_cost)
 
         small_tolerance_qty = Decimal('1e-10')
         if quantity_remaining_to_realize.copy_abs() > small_tolerance_qty:
@@ -703,6 +731,16 @@ class FifoLedger:
         short_lots_to_remove_indices: List[int] = []
         current_available_qty_in_short_lots = sum(sl.quantity_shorted for sl in self.short_lots)
 
+        # Weighted-average pairing (short side): the opening proceeds of every
+        # covered unit are blended to the pool average; deemed-covered lot
+        # identity (opening dates → time test) stays FIFO. Surviving short lots
+        # are re-priced to the average afterwards.
+        pool_avg_unit_proceeds: Optional[Decimal] = None
+        if uses_pool_average_cost(self.pairing_method) and self.short_lots:
+            _pool_qty = sum((sl.quantity_shorted for sl in self.short_lots), Decimal(0))
+            _pool_proceeds = sum((sl.total_sale_proceeds_eur for sl in self.short_lots), Decimal(0))
+            if _pool_qty > Decimal(0):
+                pool_avg_unit_proceeds = self.ctx.divide(_pool_proceeds, _pool_qty)
 
         realization_type_for_rgl: RealizationType
         if self.asset_category == AssetCategory.OPTION:
@@ -710,8 +748,10 @@ class FifoLedger:
         else:
             realization_type_for_rgl = RealizationType.SHORT_POSITION_COVER # Renamed
 
-        for i, current_short_lot in enumerate(self.short_lots):
+        for i in consumption_order_indices(len(self.short_lots), self.pairing_method):
             if quantity_remaining_to_realize <= Decimal(0): break
+            current_short_lot = self.short_lots[i]
+            effective_unit_proceeds = pool_avg_unit_proceeds if pool_avg_unit_proceeds is not None else current_short_lot.unit_sale_proceeds_eur
             quantity_covered_from_this_lot: Decimal
             if current_short_lot.quantity_shorted <= quantity_remaining_to_realize:
                 quantity_covered_from_this_lot = current_short_lot.quantity_shorted
@@ -725,7 +765,7 @@ class FifoLedger:
 
             if not is_historical_simulation:
                 cost_basis_for_portion = self.ctx.multiply(quantity_covered_from_this_lot, cost_eur_per_unit_for_cover_event)
-                realization_value_for_portion = self.ctx.multiply(quantity_covered_from_this_lot, current_short_lot.unit_sale_proceeds_eur) # Renamed
+                realization_value_for_portion = self.ctx.multiply(quantity_covered_from_this_lot, effective_unit_proceeds)
                 gross_gain_loss = self.ctx.subtract(realization_value_for_portion, cost_basis_for_portion)
 
                 open_date_obj = parse_ibkr_date(current_short_lot.opening_date)
@@ -742,7 +782,7 @@ class FifoLedger:
                     realization_type=realization_type_for_rgl,
                     quantity_realized=quantity_covered_from_this_lot,
                     unit_cost_basis_eur=cost_eur_per_unit_for_cover_event,
-                    unit_realization_value_eur=current_short_lot.unit_sale_proceeds_eur,
+                    unit_realization_value_eur=effective_unit_proceeds,
                     total_cost_basis_eur=cost_basis_for_portion,
                     total_realization_value_eur=realization_value_for_portion,
                     gross_gain_loss_eur=gross_gain_loss, holding_period_days=holding_period_days,
@@ -754,6 +794,11 @@ class FifoLedger:
                 realized_gains_losses.append(rgl)
 
         for i in sorted(short_lots_to_remove_indices, reverse=True): del self.short_lots[i]
+
+        if pool_avg_unit_proceeds is not None:
+            for sl in self.short_lots:
+                sl.unit_sale_proceeds_eur = pool_avg_unit_proceeds
+                sl.total_sale_proceeds_eur = self.ctx.multiply(sl.quantity_shorted, pool_avg_unit_proceeds)
 
         small_tolerance_qty = Decimal('1e-10')
         if quantity_remaining_to_realize.copy_abs() > small_tolerance_qty:
