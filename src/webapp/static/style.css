@@ -424,3 +424,39 @@ button.danger:hover {
     color: var(--muted);
     white-space: nowrap;
 }
+
+/* Asset classification page */
+.classify-badge,
+.classify-hint {
+    margin-top: 0.8rem;
+}
+.classify-hint {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+}
+table.classify-table td {
+    vertical-align: top;
+}
+table.classify-table tr.attention td {
+    background: var(--warn-bg);
+}
+.inline-form {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.4rem;
+}
+.inline-form select,
+.inline-form input {
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 0.9rem;
+    background: #fff;
+}
+.inline-form input[type="text"] {
+    min-width: 12rem;
+}

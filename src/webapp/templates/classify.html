@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Zařazení aktiv{% endblock %}
+{% block content %}
+<h1>Zařazení aktiv</h1>
+
+<p class="muted">Web počítá vždy neinteraktivně nad předvyplněnou pamětí zařazení
+  (<code>cache/user_classifications.json</code>). Tady zkontrolujete a doplníte zařazení
+  <strong>před</strong> výpočtem — jinak by neznámá aktiva engine tiše zařadil jako akcie.
+  Tento náhled paměť <em>nemění</em>, dokud sami neuložíte.</p>
+
+{% if saved %}<p class="badge ok">Zařazení uloženo: <code>{{ saved }}</code></p>{% endif %}
+{% if deleted %}<p class="badge ok">Zařazení smazáno: <code>{{ deleted }}</code></p>{% endif %}
+
+{% if ready_years | length > 1 %}
+<form method="get" action="/classify" class="run-form">
+  <label>Daňový rok
+    <select name="year" onchange="this.form.submit()">
+      {% for y in ready_years | reverse %}
+      <option value="{{ y }}" {{ "selected" if y == year }}>{{ y }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <noscript><button type="submit">Zobrazit</button></noscript>
+</form>
+{% endif %}
+
+{% if error %}
+<section class="card"><p class="badge warn">{{ error }}</p></section>
+{% elif year is none %}
+<section class="card">
+  <p>Zatím nejsou nahraná žádná kompletní data. <a href="/files">Nahrát výpisy →</a></p>
+</section>
+{% else %}
+
+<section class="card">
+  <p>
+    <span class="badge ok">{{ scan.classified_count }} zařazeno</span>
+    {% if scan.pending %}<span class="badge warn">{{ scan.pending | length }} čeká na zařazení</span>{% endif %}
+    {% if scan.pending_attention %}<span class="badge warn">z toho {{ scan.pending_attention }} vyžaduje rozhodnutí</span>{% endif %}
+    {% if scan.review %}<span class="badge">{{ scan.review | length }} k revizi</span>{% endif %}
+  </p>
+</section>
+
+{% macro classify_row(row, current) %}
+<tr class="{{ 'attention' if row.needs_attention }}">
+  <td>
+    <strong>{{ row.symbol or "?" }}</strong>
+    {% if row.needs_attention %}<span class="badge warn" title="Fond, zlato/krypto, měnový pár nebo neznámé — engine by netipoval spolehlivě.">?</span>{% endif %}
+    <div class="note">{{ row.description or "" }}</div>
+    <div class="muted"><code>{{ row.key }}</code>{% if row.ibkr_class %} · IBKR: {{ row.ibkr_class }}{% if row.ibkr_sub %}/{{ row.ibkr_sub }}{% endif %}{% endif %}</div>
+    {% if row.cached_notes %}<div class="note">📝 {{ row.cached_notes }}</div>{% endif %}
+  </td>
+  <td>
+    <form method="post" action="/classify" class="inline-form">
+      <input type="hidden" name="year" value="{{ year }}">
+      <input type="hidden" name="key" value="{{ row.key }}">
+      <select name="choice">
+        {% for c in choices %}
+        <option value="{{ c.value }}" {{ "selected" if c.value == current }}>{{ c.label }}</option>
+        {% endfor %}
+      </select>
+      <input type="text" name="notes" placeholder="poznámka (volitelné)" value="{{ row.cached_notes or '' }}">
+      <button type="submit" class="small">Uložit</button>
+    </form>
+    {% if row.cached_value %}
+    <form method="post" action="/classify/delete" class="inline-form"
+          onsubmit="return confirm('Smazat zařazení {{ row.key }} z paměti? Při dalším výpočtu se určí znovu heuristikou.');">
+      <input type="hidden" name="year" value="{{ year }}">
+      <input type="hidden" name="key" value="{{ row.key }}">
+      <button type="submit" class="small danger">Smazat</button>
+    </form>
+    {% endif %}
+  </td>
+</tr>
+{% endmacro %}
+
+{% if scan.pending %}
+<section class="card">
+  <h2>Čeká na zařazení</h2>
+  <p class="note">Tato aktiva zatím nejsou v paměti. Zvýrazněná (?) engine sám nezařadí spolehlivě —
+    u ostatních je předvyplněný odhad, který obvykle stačí potvrdit.</p>
+  <table class="classify-table">
+    <thead><tr><th>Aktivum</th><th>Zařazení</th></tr></thead>
+    <tbody>
+      {% for row in scan.pending %}{{ classify_row(row, row.suggested_value) }}{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% if scan.review %}
+<section class="card">
+  <h2>K revizi (automaticky doplněno)</h2>
+  <p class="note">Tato aktiva už jsou v paměti, ale byla zařazena automaticky (výchozí heuristika).
+    Zkontrolujte a případně opravte.</p>
+  <table class="classify-table">
+    <thead><tr><th>Aktivum</th><th>Zařazení</th></tr></thead>
+    <tbody>
+      {% for row in scan.review %}{{ classify_row(row, row.cached_value) }}{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% if not scan.pending and not scan.review %}
+<section class="card"><p class="badge ok">✓ Všechna aktiva roku {{ year }} jsou zařazena.</p></section>
+{% endif %}
+
+{% endif %}
+{% endblock %}

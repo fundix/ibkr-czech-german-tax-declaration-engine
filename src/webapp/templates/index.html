@@ -49,6 +49,7 @@
     </label>
     <button type="submit">Spustit výpočet</button>
   </form>
+  <div class="classify-badge" hx-get="/classify/count" hx-trigger="load" hx-swap="innerHTML"></div>
   <div id="job-status"></div>
   {% else %}
   <p>Zatím nejsou nahraná žádná kompletní data. <a href="/files">Nahrát výpisy →</a></p>

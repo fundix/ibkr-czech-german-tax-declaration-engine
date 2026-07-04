@@ -293,6 +293,65 @@ def download(request: Request, run_id: str, mode: str, fmt: str):
 
 
 # ---------------------------------------------------------------------------
+# Asset classification
+# ---------------------------------------------------------------------------
+
+def _default_classify_year(svc, requested: Optional[int]) -> Optional[int]:
+    ready = [d.year for d in svc.list_years() if d.run_ready]
+    if requested in ready:
+        return requested
+    return max(ready) if ready else None
+
+
+@router.get("/classify", response_class=HTMLResponse)
+def classify(request: Request, year: Optional[int] = None, saved: str = "", deleted: str = ""):
+    svc = _svc(request)
+    ready_years = [d.year for d in svc.list_years() if d.run_ready]
+    active = _default_classify_year(svc, year)
+    scan = error = None
+    if active is not None:
+        try:
+            scan = svc.scan_unclassified_assets(active)
+        except ValueError as exc:
+            error = str(exc)
+    return _tpl(request, "classify.html", year=active, ready_years=ready_years,
+                scan=scan, error=error, choices=svc.classification_choices(),
+                saved=saved, deleted=deleted)
+
+
+@router.post("/classify")
+def classify_save(request: Request, year: int = Form(...), key: str = Form(...),
+                  choice: str = Form(...), notes: str = Form("")):
+    svc = _svc(request)
+    try:
+        svc.save_classification(key, choice, notes)
+    except ValueError:
+        return RedirectResponse(f"/classify?year={year}", status_code=303)
+    return RedirectResponse(f"/classify?year={year}&saved={key}", status_code=303)
+
+
+@router.post("/classify/delete")
+def classify_delete(request: Request, year: int = Form(...), key: str = Form(...)):
+    svc = _svc(request)
+    svc.delete_classification(key)
+    return RedirectResponse(f"/classify?year={year}&deleted={key}", status_code=303)
+
+
+@router.get("/classify/count", response_class=HTMLResponse)
+def classify_count(request: Request, year: Optional[int] = None):
+    """Lazy HTMX badge for the dashboard — a scan is too slow for page load."""
+    svc = _svc(request)
+    active = _default_classify_year(svc, year)
+    if active is None:
+        return HTMLResponse("")
+    try:
+        scan = svc.scan_unclassified_assets(active)
+    except ValueError:
+        return HTMLResponse("")
+    return _tpl(request, "partials/classify_count.html", year=active, scan=scan)
+
+
+# ---------------------------------------------------------------------------
 # Files
 # ---------------------------------------------------------------------------
 

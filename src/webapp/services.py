@@ -58,6 +58,26 @@ FX_MODES = ("daily", "uniform", "compare")
 # matrix / 'compare' lives on the CLI — `--cz-pairing-method compare`).
 PAIRING_METHODS = ("fifo", "lifo", "weighted_average", "optimal")
 
+# Czech gloss for the shared AssetClassifier dialog labels (German origin).
+# Keyed on the exact label from AssetClassifier.classification_options() —
+# unmapped labels fall back to the original string.
+CLASSIFY_LABELS_CZ = {
+    "Aktienfonds (KAP-INV)": "Akciový fond",
+    "Mischfonds (KAP-INV)": "Smíšený fond",
+    "Immobilienfonds (KAP-INV)": "Nemovitostní fond",
+    "Auslands-Immobilienfonds (KAP-INV)": "Zahraniční nemovitostní fond",
+    "Sonstige Investmentfonds (KAP-INV)": "Ostatní investiční fond",
+    "§23 EStG / Anlage SO (z.B. Gold-ETC, Krypto-ETP)": "Ostatní majetek §10 (zlato/krypto ETC/ETP)",
+    "Aktie (Anlage KAP)": "Akcie",
+    "Anleihe (Anlage KAP)": "Dluhopis",
+    "Option/Termingeschäft (Anlage KAP)": "Opce / termínový obchod",
+    "CFD (Anlage KAP)": "CFD",
+    "Cash / Währungssaldo (ECHT)": "Hotovost / měnový zůstatek",
+    "Devisenhandelspaar (z.B. EUR.USD) - wird als UNKNOWN klassifiziert":
+        "Měnový pár (např. EUR.USD) — neznámé",
+    "Sonstiges (Standard Anlage KAP)": "Ostatní (výchozí — akcie)",
+}
+
 
 def _effective_fx_mode(fx_mode: str, tax_year: int, current_year: int):
     """Downgrade compare→daily for the RUNNING year.
@@ -956,6 +976,173 @@ class RunService:
             ]
         except Exception:
             return []
+
+    # ------------------------------------------------------------------
+    # Asset classification (non-interactive cache editor)
+    # ------------------------------------------------------------------
+    #
+    # The engine's interactive dialog blocks on input(); the web always runs
+    # non-interactive over a pre-filled cache. These methods let the user
+    # inspect and fill that cache (``cache/user_classifications.json``) BEFORE
+    # a run, without triggering the non-interactive auto-default (UNKNOWN→STOCK
+    # written straight to cache) that a full pipeline would.
+
+    def _new_classifier(self):
+        from src.classification.asset_classifier import AssetClassifier
+        import src.config as app_config
+        return AssetClassifier(cache_file_path=app_config.CLASSIFICATION_CACHE_FILE_PATH)
+
+    def classification_choices(self) -> List[Dict[str, str]]:
+        """Category choices for the web form, deduped by (category, fund_type).
+
+        Values are ``CATEGORY:FUND_TYPE`` (enum names) so the cache written
+        matches exactly what the CLI dialog would write; labels are Czech.
+        """
+        from src.classification.asset_classifier import AssetClassifier
+        seen: set = set()
+        choices: List[Dict[str, str]] = []
+        for label, cat, ft in AssetClassifier.classification_options():
+            value = f"{cat.name}:{ft.name}"
+            if value in seen:
+                continue
+            seen.add(value)
+            choices.append({"value": value, "label": CLASSIFY_LABELS_CZ.get(label, label)})
+        return choices
+
+    def _classification_from_choice(self, choice: str):
+        """Validate a ``CATEGORY:FUND_TYPE`` choice against the shared options."""
+        from src.classification.asset_classifier import AssetClassifier
+        from src.domain.enums import AssetCategory, InvestmentFundType
+        allowed = {f"{c.name}:{f.name}" for _, c, f in AssetClassifier.classification_options()}
+        if choice not in allowed:
+            raise ValueError(f"Neplatná klasifikace: {choice}")
+        cat_name, ft_name = choice.split(":", 1)
+        cat = AssetCategory[cat_name]
+        ft = InvestmentFundType[ft_name] if cat == AssetCategory.INVESTMENT_FUND else InvestmentFundType.NONE
+        return cat, ft
+
+    def scan_unclassified_assets(self, tax_year: int) -> Dict[str, Any]:
+        """Discover a year's assets WITHOUT side effects.
+
+        Runs only the parser/discovery stages (never
+        ``finalize_asset_classifications``), so it neither writes the cache nor
+        auto-defaults UNKNOWN→STOCK. Returns assets the user still has to
+        decide on (``pending``) and previously auto-defaulted ones worth a
+        second look (``review``)."""
+        return self.runner.run_sync(self._scan_unclassified, tax_year, timeout=300)
+
+    def _scan_unclassified(self, tax_year: int) -> Dict[str, Any]:
+        import tempfile
+        from src.classification.asset_classifier import AssetClassifier  # noqa: F401
+        from src.domain.assets import InvestmentFund
+        from src.domain.enums import AssetCategory, InvestmentFundType
+        from src.identification.asset_resolver import AssetResolver
+        from src.parsers.parsing_orchestrator import ParsingOrchestrator
+
+        classifier = self._new_classifier()
+        resolver = AssetResolver(asset_classifier=classifier)
+        orchestrator = ParsingOrchestrator(
+            asset_resolver=resolver,
+            asset_classifier=classifier,
+            interactive_classification=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs = self._prepare_inputs(Path(tmp), tax_year)
+            orchestrator.load_all_raw_data(
+                trades_file=str(inputs["trades"]),
+                cash_transactions_file=str(inputs["cash"]),
+                positions_start_file=str(inputs["positions_start"]),
+                positions_end_file=str(inputs["positions_end"]),
+                corporate_actions_file=str(inputs["corp_actions"]),
+            )
+            # Discovery only — deliberately NOT finalize_asset_classifications()
+            # (that mutates the cache and auto-defaults UNKNOWN→STOCK).
+            orchestrator.process_positions()
+            orchestrator.discover_assets_from_transactions()
+            resolver.link_derivatives()
+
+        cache = classifier.classifications_cache
+        pending: List[Dict[str, Any]] = []
+        review: List[Dict[str, Any]] = []
+        classified = 0
+        for asset in resolver.assets_by_internal_id.values():
+            try:
+                key = asset.get_classification_key()
+            except ValueError:
+                continue  # no stable key — cannot be cached anyway
+            fund_type = (
+                asset.fund_type.name
+                if isinstance(asset, InvestmentFund) and asset.fund_type
+                else InvestmentFundType.NONE.name
+            )
+            row = {
+                "key": key,
+                "symbol": asset.ibkr_symbol,
+                "isin": asset.ibkr_isin,
+                "conid": asset.ibkr_conid,
+                "description": asset.description,
+                "ibkr_class": asset.ibkr_asset_class_raw,
+                "ibkr_sub": asset.ibkr_sub_category_raw,
+                "suggested_category": asset.asset_category.name,
+                "suggested_value": f"{asset.asset_category.name}:{fund_type}",
+                # The cases the interactive dialog would have prompted for.
+                "needs_attention": (
+                    classifier._is_potentially_special(asset)
+                    or asset.asset_category == AssetCategory.UNKNOWN
+                ),
+            }
+            cached = cache.get(key)
+            if cached is None:
+                pending.append(row)
+            else:
+                classified += 1
+                notes = cached[2] or ""
+                row["cached_value"] = f"{cached[0]}:{cached[1]}"
+                row["cached_category"] = cached[0]
+                row["cached_notes"] = notes
+                # Only the genuinely-uncertain fallback (UNKNOWN→STOCK /
+                # →CASH_BALANCE) warrants a second look. Confident heuristic
+                # hits ("Auto-classified based on heuristics", e.g. STK→STOCK)
+                # are trusted and stay out of the review list.
+                if "Auto-defaulted" in notes:
+                    review.append(row)
+
+        # Surface funds / gold / crypto / FX pairs / unknowns first.
+        pending.sort(key=lambda r: (not r["needs_attention"], r["symbol"] or ""))
+        review.sort(key=lambda r: r["symbol"] or "")
+        return {
+            "tax_year": tax_year,
+            "pending": pending,
+            "review": review,
+            "pending_attention": sum(1 for r in pending if r["needs_attention"]),
+            "classified_count": classified,
+        }
+
+    def save_classification(self, key: str, choice: str, notes: str = "") -> None:
+        if not key or not key.strip():
+            raise ValueError("Chybí identifikátor aktiva.")
+        cat, ft = self._classification_from_choice(choice)
+        self.runner.run_sync(
+            self._write_classification, key.strip(), cat.name, ft.name, notes or "",
+            timeout=30,
+        )
+
+    def _write_classification(self, key: str, cat_name: str, ft_name: str, notes: str) -> None:
+        with engine_file_lock():
+            classifier = self._new_classifier()
+            classifier.classifications_cache[key] = (cat_name, ft_name, notes)
+            classifier.save_classifications()
+        logger.info(f"Classification saved: {key} -> {cat_name}/{ft_name}")
+
+    def delete_classification(self, key: str) -> None:
+        self.runner.run_sync(self._delete_classification, key, timeout=30)
+
+    def _delete_classification(self, key: str) -> None:
+        with engine_file_lock():
+            classifier = self._new_classifier()
+            classifier.classifications_cache.pop(key, None)
+            classifier.save_classifications()
+        logger.info(f"Classification deleted: {key}")
 
     # ------------------------------------------------------------------
     # Reading persisted runs
