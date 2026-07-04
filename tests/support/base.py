@@ -56,8 +56,10 @@ class FifoTestCaseBase:
                       cash_transactions_data: Optional[List[List[Any]]] = None,
                       corporate_actions_data: Optional[List[List[Any]]] = None,
                       custom_rate_provider: Optional[ExchangeRateProvider] = None,
-                      tax_year: int = 2023, 
-                      monkeypatch_global_tax_year: bool = True
+                      tax_year: int = 2023,
+                      monkeypatch_global_tax_year: bool = True,
+                      country_code: str = "de",
+                      pairing_method=None,
                       ) -> ProcessingOutput:
         """
         Helper to write CSV data, run the pipeline, and return results.
@@ -124,15 +126,18 @@ class FifoTestCaseBase:
                  print(f"Warning: Could not set IS_INTERACTIVE_CLASSIFICATION on src.config module.")
 
 
+            from src.engine.pairing import PairingMethod
             results: ProcessingOutput = run_core_processing_pipeline(
                 trades_file_path=paths["trades"],
                 cash_transactions_file_path=paths["cash"],
                 positions_start_file_path=paths["pos_start"],
                 positions_end_file_path=paths["pos_end"],
                 corporate_actions_file_path=paths["corp_actions"],
-                interactive_classification_mode=False, 
-                tax_year_to_process=tax_year, 
-                custom_rate_provider=custom_rate_provider
+                interactive_classification_mode=False,
+                tax_year_to_process=tax_year,
+                custom_rate_provider=custom_rate_provider,
+                country_code=country_code,
+                pairing_method=pairing_method or PairingMethod.FIFO,
             )
             mp_interactive.undo() # Manually undo if not tied to fixture lifecycle
             return results

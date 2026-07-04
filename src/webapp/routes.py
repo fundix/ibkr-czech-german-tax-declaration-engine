@@ -61,10 +61,15 @@ def ibkr_fetch(request: Request, tax_year: Optional[int] = Form(None)):
 
 
 @router.post("/runs", response_class=HTMLResponse)
-def start_run(request: Request, tax_year: int = Form(...), fx_mode: str = Form("compare")):
+def start_run(
+    request: Request,
+    tax_year: int = Form(...),
+    fx_mode: str = Form("compare"),
+    pairing_method: str = Form("fifo"),
+):
     svc = _svc(request)
     try:
-        job_id, run_id = svc.start_run(tax_year, fx_mode)
+        job_id, run_id = svc.start_run(tax_year, fx_mode, pairing_method)
     except ValueError as exc:
         return _tpl(request, "partials/job_error.html", error=str(exc))
     return _tpl(request, "partials/job_status.html", job_id=job_id, run_id=run_id)

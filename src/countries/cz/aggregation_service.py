@@ -13,13 +13,15 @@ wires a provider for the chosen mode.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Sequence
 
 from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.fx_mode_compare import CzFxModeComparison
+from src.countries.cz.pairing_compare import CzPairingComparison
 from src.countries.cz.fx_policy import uniform_fx_policy
 from src.countries.cz.uniform_rates import CzUniformRateProvider
 from src.countries.registry import get_tax_plugin
+from src.engine.pairing import PairingMethod, ALL_METHODS
 from src.utils.fx_provider_factory import create_fx_provider
 
 if TYPE_CHECKING:
@@ -64,4 +66,31 @@ def run_cz_compare(
     return CzFxModeComparison(
         daily=run_cz_aggregation(processing_results, tax_year, "daily"),
         uniform=run_cz_aggregation(processing_results, tax_year, "uniform"),
+    )
+
+
+def run_cz_pairing_matrix(
+    run_pipeline_for_method: Callable[[PairingMethod], "ProcessingOutput"],
+    tax_year: int,
+    fx_modes: Sequence[str] = ("daily", "uniform"),
+    pairing_methods: Sequence[PairingMethod] = ALL_METHODS,
+) -> CzPairingComparison:
+    """Score the full FX-mode × pairing-method grid and return the comparison.
+
+    ``run_pipeline_for_method`` re-runs the CORE pipeline for one pairing
+    method (the method changes the RealizedGainLoss set, unlike the FX mode
+    which only affects downstream aggregation). Each resulting output is then
+    aggregated under every requested FX mode. Every cell is a real aggregation
+    run, so the reported figures are exact and the cheapest cell is a safe
+    recommendation.
+    """
+    grid: dict = {}
+    for method in pairing_methods:
+        processing = run_pipeline_for_method(method)
+        for fx in fx_modes:
+            grid[(fx, method.value)] = run_cz_aggregation(processing, tax_year, fx)
+    return CzPairingComparison(
+        grid=grid,
+        fx_modes=list(fx_modes),
+        pairing_methods=list(pairing_methods),
     )

@@ -43,6 +43,14 @@ class TestPages:
         assert "2024-test" in r.text
         assert "Spustit výpočet" in r.text
 
+    def test_index_shows_pairing_method_selector(self, client):
+        r = client.get("/")
+        assert r.status_code == 200
+        assert 'name="pairing_method"' in r.text
+        assert 'value="optimal"' in r.text
+        assert "Daňově optimální" in r.text
+        assert "Vážený průměr" in r.text
+
     def test_results_page_shows_final_tax(self, client):
         r = client.get("/results/2024-test")
         assert r.status_code == 200

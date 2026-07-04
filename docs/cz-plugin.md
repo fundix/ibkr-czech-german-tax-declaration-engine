@@ -63,6 +63,29 @@ Taxable gains and losses are netted separately for:
 
 Only items with `included_in_tax_base=True` participate. Exempt losses do not reduce the tax base. Negative net results are floored at zero (loss carryforward not implemented).
 
+### Pairing Method (§10 lot matching)
+
+A private (non-business) investor may choose which purchase lot is matched to
+each sale of fungible securities — the choice changes both the acquisition cost
+and the time-test result. `--cz-pairing-method` (web GUI selector; MCP
+`run_pipeline(pairing_method=…)`):
+
+- **`fifo`** (default) — oldest lots first; unchanged behaviour.
+- **`lifo`** — newest lots first.
+- **`weighted_average`** — every disposed unit is costed at the blended pool
+  average (vážený aritmetický průměr); the deemed-sold lot identity (dates →
+  time test) stays FIFO, and surviving lots are re-priced to the average so the
+  moving average stays consistent.
+- **`optimal`** — a global tax-minimising min-cost-flow solver
+  (`src/engine/pairing_solver.py`, per asset) that routes gains onto time-test-
+  exempt lots and losses onto taxable lots to minimise the §10 taxable base.
+- **`compare`** (CLI only) — scores the full FX-mode × method matrix by *final*
+  tax (after time test + 100k limit + netting + rates) and reports the cheapest.
+
+The method must be applied consistently for the whole year; the tool only
+*recommends* the cheapest — the filer/advisor chooses. Every method is scored by
+the real aggregator, so `optimal` is never worse than FIFO.
+
 ### Foreign Tax Credit (§38f ZDP)
 
 Per-item preliminary credit:
@@ -96,6 +119,7 @@ DAP-oriented output with stable internal line codes (e.g. `CZ_DAP_8_DIVIDENDS`, 
 |------|--------|--------|
 | Treaty verification | Verified (2026-07) | `country_credit_caps` ship 12 verified portfolio-dividend caps with Sb. citations (NL/FR/AT/LU are 10 %, not 15 %). One cap per country applies to all WHT — interest caps differ (often 0 %); review interest WHT rows manually |
 | Jednotný kurz (uniform rate) | Implemented (2026-07) | `--cz-fx-mode uniform` uses the GFŘ uniform rates (`uniform_rates.py`, pokyny D-49/D-66/D-75 transcribed); `--cz-fx-mode compare` computes both modes and reports the cheaper one. §10 disposal legs convert via the EUR-enriched amounts (approximation until per-leg original-currency data exists — M17/M18) |
+| Pairing method (§10) | Implemented (2026-07) | `--cz-pairing-method fifo/lifo/weighted_average/optimal/compare` (`pairing.py`, `pairing_solver.py`). `optimal` solver covers long securities only — options, shorts, and assets with a mid-year corp action / capital repayment stay FIFO; exact for base+rates, near-optimal at the 100k all-or-nothing cliff (every method is scored by the real aggregator, so never worse than FIFO). Web GUI offers single methods; the full FX×method matrix is CLI-only |
 | Pre-2014 acquisition rule | Implemented (2026-07) | Securities acquired before 2014-01-01 use the 6-month test (čl. II bod 5, 344/2013 Sb.); assumes direct issuer share ≤ 5 % (noted on items) |
 | Expense deduction (§10/4) | Documented | Acquisition costs and commissions are already in cost basis / net proceeds; external sale-related expenses must be added manually (see §10 section note) |
 | Loss carryforward | Not implemented | Negative §10 net floored at zero |

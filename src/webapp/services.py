@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from src.countries.cz.aggregation_service import run_cz_aggregation, run_cz_compare
 from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.time_test import time_test_deadline
+from src.engine.pairing import PairingMethod, coerce as coerce_pairing_method
 from src.pipeline_runner import run_core_processing_pipeline
 from src.utils.type_utils import parse_ibkr_date
 from src.webapp import settings
@@ -53,6 +54,9 @@ from src.webapp.serializers import dump_json, load_json
 logger = logging.getLogger(__name__)
 
 FX_MODES = ("daily", "uniform", "compare")
+# Single-method pairing choices offered in the web GUI (the full FX×method
+# matrix / 'compare' lives on the CLI — `--cz-pairing-method compare`).
+PAIRING_METHODS = ("fifo", "lifo", "weighted_average", "optimal")
 
 
 def _effective_fx_mode(fx_mode: str, tax_year: int, current_year: int):
@@ -303,7 +307,7 @@ class RunService:
     # Runs
     # ------------------------------------------------------------------
 
-    def start_run(self, tax_year: int, fx_mode: str) -> Tuple[str, str]:
+    def start_run(self, tax_year: int, fx_mode: str, pairing_method: str = "fifo") -> Tuple[str, str]:
         """Submit a run to the single-worker executor; returns (job_id, run_id).
 
         Dataset readiness is validated HERE, before submitting — the user gets
@@ -311,6 +315,8 @@ class RunService:
         """
         if fx_mode not in FX_MODES:
             raise ValueError(f"Neznámý kurzový režim: {fx_mode}")
+        if pairing_method not in PAIRING_METHODS:
+            raise ValueError(f"Neznámá párovací metoda: {pairing_method}")
         ds = self.get_year(tax_year)
         if ds is None:
             raise ValueError(f"Pro rok {tax_year} nejsou nahraná žádná data.")
@@ -319,8 +325,8 @@ class RunService:
             raise ValueError(f"Pro rok {tax_year} chybí: {missing}")
         run_id = f"{tax_year}-{datetime.now():%Y%m%d-%H%M%S}"
         job_id = self.runner.submit(
-            f"Výpočet {tax_year} ({fx_mode})",
-            self._execute_run, run_id, tax_year, fx_mode,
+            f"Výpočet {tax_year} ({fx_mode}/{pairing_method})",
+            self._execute_run, run_id, tax_year, fx_mode, None, None, None, pairing_method,
         )
         return job_id, run_id
 
@@ -332,6 +338,7 @@ class RunService:
         ecb_provider=None,
         cz_fx_provider=None,
         extra_notes: Optional[List[str]] = None,
+        pairing_method: str = "fifo",
     ) -> Dict[str, Any]:
         """Runs the full pipeline + CZ aggregation and persists everything.
 
@@ -348,6 +355,7 @@ class RunService:
 
         inputs = self._prepare_inputs(run_dir, tax_year, notes=run_notes)
 
+        pairing = coerce_pairing_method(pairing_method)
         with engine_file_lock():
             processing = run_core_processing_pipeline(
                 trades_file_path=str(inputs["trades"]),
@@ -359,6 +367,7 @@ class RunService:
                 tax_year_to_process=tax_year,
                 custom_rate_provider=ecb_provider,
                 country_code="cz",
+                pairing_method=pairing,
             )
 
             compare_lines: List[str] = []
@@ -404,6 +413,7 @@ class RunService:
             "run_id": run_id,
             "tax_year": tax_year,
             "fx_mode": fx_mode,
+            "pairing_method": pairing.value,
             "modes": [m for m, _ in mode_results],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "duration_s": round(time.monotonic() - started, 1),
@@ -977,13 +987,18 @@ class RunService:
                 return meta.get("run_id")
         return None
 
-    def run_pipeline_sync(self, tax_year: int, fx_mode: str = "compare") -> Dict[str, Any]:
+    def run_pipeline_sync(
+        self, tax_year: int, fx_mode: str = "compare", pairing_method: str = "fifo"
+    ) -> Dict[str, Any]:
         """Run the full pipeline synchronously (MCP tools wait for the result)."""
         if fx_mode not in FX_MODES:
             raise ValueError(f"Neznámý kurzový režim: {fx_mode}")
+        if pairing_method not in PAIRING_METHODS:
+            raise ValueError(f"Neznámá párovací metoda: {pairing_method}")
         run_id = f"{tax_year}-{datetime.now():%Y%m%d-%H%M%S}"
         return self.runner.run_sync(
-            self._execute_run, run_id, tax_year, fx_mode, timeout=600
+            self._execute_run, run_id, tax_year, fx_mode, None, None, None, pairing_method,
+            timeout=600,
         )
 
     def dividend_summary(self, run_id: str, mode: str) -> Optional[Dict[str, Any]]:

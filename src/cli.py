@@ -54,6 +54,15 @@ def parse_arguments():
              "jednotný kurz per §38/1 ZDP (pokyn GFŘ), or 'compare' to compute "
              "both, print which is cheaper, and export both (suffixed .daily/.uniform).",
     )
+    parser.add_argument(
+        "--cz-pairing-method",
+        choices=["fifo", "lifo", "weighted_average", "optimal", "compare"],
+        default="fifo",
+        help="CZ §10 lot-matching method for disposed securities: 'fifo' "
+             "(default), 'lifo', 'weighted_average' (vážený průměr), 'optimal' "
+             "(daňově optimální — globální solver), or 'compare' to score every "
+             "method (× FX mode) by final tax and print the cheapest.",
+    )
 
     args = parser.parse_args()
 
