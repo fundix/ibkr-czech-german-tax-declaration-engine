@@ -1,6 +1,8 @@
 # Future Work
 
-Last updated: 2026-07-04 — added section 5 and implemented 5a's pairing-method axis (FIFO / LIFO /
+Last updated: 2026-07-05 — implemented 5a's dividend separate tax base
+(§16a) comparison. Previously 2026-07-04 — added section 5 and implemented
+5a's pairing-method axis (FIFO / LIFO /
 weighted-average / optimal solver + FX×method compare matrix). Previously
 2026-07-02, after the 2026-07 calculation audit
 (35 of 39 findings fixed, see `AUDIT_REPORT_2026-07.md`) and the first
@@ -187,11 +189,24 @@ are IBKR-only by design. What remains, ordered by value-for-effort:
       exact for base+rates, near-optimal at the 100k cliff (mitigated by
       scoring every method with the real aggregator — never worse than
       FIFO).
-- [ ] **Dividend separate tax base (samostatný základ daně).**
-      computes dividends under both the general base and the separate
-      15 % base and picks the better one. We only run the general
-      15 %/23 % base (`src/countries/cz/tax_liability.py`). Small logic,
-      real tax impact for higher-income filers — good second step.
+- [x] **Dividend separate tax base (samostatný základ daně §16a).** DONE
+      (2026-07-05): `compute_tax_liability` now computes BOTH the general
+      base (dividends inside §16) and the §16a separate 15 % base (foreign
+      dividends pulled out, everything else in the general base) and
+      recommends the cheaper (`CzDividendSeparateBaseComparison`). The §38f
+      credit is split by income category — `foreign_tax_credit.py` tags each
+      record `dividend`/`interest` and keeps per-country splits so the
+      per-state §38f/8 cap applies to each base. Only runs in CZK mode with
+      non-zero dividends; ties fall to the general base (so below-threshold
+      figures, incl. the golden runs, are unchanged). Config flag
+      `dividend_separate_base_enabled` (+ `dividend_separate_base_rate`).
+      Surfaced as a `sep_*` line-item block, a §16a comparison section in the
+      DAP form mapping (web `/form` + PDF), a recommendation note, and a
+      results-page tip banner. Covered by
+      `tests/test_cz_dividend_separate_base.py` (9). LIMITATION: the election
+      itself stays with the taxpayer — the primary DAP layout still files
+      dividends in §8; only the exact §16a form line is left to verify per
+      form vzor.
 - [ ] **Sale-impact / max-gain-loss optimiser surfacing.** We already
       have per-sale simulation (`simulate_sale`); additionally
       highlights which lots to sell to hit a target gain/loss (e.g. use

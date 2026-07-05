@@ -291,6 +291,63 @@ def build_form_mapping(
     result.sections.append(sec_liability)
 
     # =====================================================================
+    # Samostatný základ daně (§16a) — porovnání pro zahraniční dividendy
+    # =====================================================================
+    cmp = liability.dividend_separate_base if liability else None
+    if cmp is not None and cmp.available:
+        sec_sep = CzFormSection(
+            section_id="CZ_FORM_DIVIDEND_SEPARATE_BASE",
+            label="Samostatný základ daně §16a – zahraniční dividendy (porovnání)",
+        )
+        sec_sep.lines.append(CzFormLine(
+            code="CZ_DAP_16A_GENERAL_TOTAL",
+            label="Varianta A – dividendy v obecném základu: celková daň",
+            value=q(cmp.general_base_total_tax),
+            official_line_ref="ř. 58 DAP (dividendy součástí §8, ř. 38)",
+        ))
+        sec_sep.lines.append(CzFormLine(
+            code="CZ_DAP_16A_SEPARATE_BASE",
+            label="Varianta B – samostatný základ daně (dividendy)",
+            value=q(cmp.separate_dividend_base_rounded),
+            official_line_ref="DAP – samostatný základ daně §16a (ověřit řádek dle vzoru)",
+            note=f"Sazba {cmp.separate_dividend_rate * 100:.0f} %",
+        ))
+        sec_sep.lines.append(CzFormLine(
+            code="CZ_DAP_16A_SEPARATE_DIVIDEND_TAX",
+            label="Varianta B – daň ze samostatného základu po zápočtu",
+            value=q(cmp.separate_dividend_net_tax),
+            note=f"Daň {q(cmp.separate_dividend_gross_tax)} − zápočet {q(cmp.separate_dividend_ftc)}",
+        ))
+        sec_sep.lines.append(CzFormLine(
+            code="CZ_DAP_16A_SEPARATE_GENERAL_TAX",
+            label="Varianta B – daň z obecného základu (bez dividend) po zápočtu",
+            value=q(cmp.separate_general_base_net_tax),
+        ))
+        sec_sep.lines.append(CzFormLine(
+            code="CZ_DAP_16A_SEPARATE_TOTAL",
+            label="Varianta B – celková daň (samostatný + obecný základ)",
+            value=q(cmp.separate_base_total_tax),
+        ))
+        sec_sep.lines.append(CzFormLine(
+            code="CZ_DAP_16A_SAVING",
+            label="Úspora varianty B oproti variantě A",
+            value=q(cmp.saving),
+        ))
+        if cmp.recommended_mode == "separate":
+            sec_sep.notes.append(
+                f"DOPORUČENÍ: varianta B (samostatný základ §16a) je levnější o "
+                f"{q(cmp.saving)} {currency}. Volba §16a je na poplatníkovi; při "
+                f"jejím uplatnění dividendy nepatří do ř. 38 (§8), ale do "
+                f"samostatného základu daně."
+            )
+        else:
+            sec_sep.notes.append(
+                "Samostatný základ daně §16a by nepřinesl úsporu (obecný základ "
+                "nedosahuje sazby 23 %) — doporučena varianta A."
+            )
+        result.sections.append(sec_sep)
+
+    # =====================================================================
     # §38f — Zápočet zahraniční daně
     # =====================================================================
     sec_ftc = CzFormSection(
