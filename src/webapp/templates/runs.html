@@ -41,13 +41,14 @@
       <label><input type="radio" name="fx_mode" value="uniform"> Jednotný kurz</label>
     </fieldset>
     <label>Párovací metoda (§10 ZDP)
-      <select name="pairing_method">
-        <option value="fifo">FIFO (nejstarší první)</option>
-        <option value="lifo">LIFO (nejnovější první)</option>
-        <option value="weighted_average">Vážený průměr</option>
-        <option value="optimal">Daňově optimální</option>
+      <select name="pairing_method" id="pairing-method">
+        <option value="fifo" data-desc="Prodej se páruje s nejdříve nakoupenými kusy (zákonný default). Nejdřív „vyčerpá“ staré nákupy, takže dlouho držené pozice snáze splní 3letý časový test (§4/1/w) a jsou osvobozené.">FIFO (nejstarší první)</option>
+        <option value="lifo" data-desc="Prodej se páruje s naposledy nakoupenými kusy. U nedávno rostoucích titulů dává vyšší pořizovací cenu, a tím nižší zisk — čerstvé nákupy ale časový test zpravidla nesplní.">LIFO (nejnovější první)</option>
+        <option value="weighted_average" data-desc="Pořizovací cena = vážený průměr celého drženého poolu. Identita lotů pro časový test se drží podle FIFO, přepisuje se jen cena.">Vážený průměr</option>
+        <option value="optimal" data-desc="Nástroj sám vybere kombinaci párování s nejnižší výslednou daní (nikdy není horší než FIFO). Počítá se pro každý titul zvlášť.">Daňově optimální</option>
       </select>
     </label>
+    <p class="note" id="pairing-method-desc"></p>
     <label class="inline"><input type="checkbox" name="force" value="true"> Vynutit přepočet
       <span class="muted">(jinak se při beze změny dat použije uložený výsledek)</span></label>
     <button type="submit">Spustit výpočet</button>
@@ -111,4 +112,18 @@
   <p>Zatím žádné běhy.</p>
   {% endif %}
 </section>
+
+<script>
+  (function () {
+    var select = document.getElementById("pairing-method");
+    var desc = document.getElementById("pairing-method-desc");
+    if (!select || !desc) return;
+    function update() {
+      var opt = select.options[select.selectedIndex];
+      desc.textContent = opt ? opt.getAttribute("data-desc") || "" : "";
+    }
+    select.addEventListener("change", update);
+    update();
+  })();
+</script>
 {% endblock %}
