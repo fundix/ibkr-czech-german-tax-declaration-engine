@@ -77,12 +77,27 @@ class CzTaxLiabilitySummary:
     # --- Final ---
     final_czech_tax_after_credit: Decimal = ZERO
 
+    # --- §16a separate-base comparison (foreign dividends), advisory ---
+    dividend_separate_base: Optional["CzDividendSeparateBaseComparison"] = None
+
     # --- Audit ---
     limitation_notes: List[str] = field(default_factory=list)
 
+    @property
+    def recommended_final_tax(self) -> Decimal:
+        """Cheaper of the general-base and §16a separate-base total tax.
+
+        Equals ``final_czech_tax_after_credit`` unless the §16a separate base
+        for foreign dividends is strictly cheaper (the taxpayer's election).
+        """
+        cmp = self.dividend_separate_base
+        if cmp is not None and cmp.available and cmp.recommended_mode == "separate":
+            return cmp.separate_base_total_tax
+        return self.final_czech_tax_after_credit
+
     def to_line_items(self, currency: str) -> Dict[str, Decimal]:
         c = currency.lower()
-        return {
+        d = {
             f"taxable_dividends_{c}": self.taxable_dividends.quantize(TWO),
             f"taxable_interest_{c}": self.taxable_interest.quantize(TWO),
             f"taxable_securities_net_{c}": self.taxable_securities_net.quantize(TWO),
@@ -100,6 +115,140 @@ class CzTaxLiabilitySummary:
             f"non_creditable_ftc_{c}": self.non_creditable_ftc.quantize(TWO),
             f"final_czech_tax_after_credit_{c}": self.final_czech_tax_after_credit.quantize(TWO),
         }
+        if self.dividend_separate_base is not None and self.dividend_separate_base.available:
+            d.update(self.dividend_separate_base.to_line_items(currency))
+        return d
+
+
+@dataclass
+class CzDividendSeparateBaseComparison:
+    """§16a ZDP separate-base comparison for foreign dividends.
+
+    Foreign dividends (§8 odst. 4 ZDP) may, at the taxpayer's election, be
+    taxed in a SEPARATE flat 15 % tax base (samostatný základ daně, §16a)
+    instead of the general base. Advantageous once the general base reaches
+    the 23 % bracket. This holds both scenarios' totals so the caller can pick
+    the cheaper; the election itself is the taxpayer's.
+
+    ``general`` scenario = the primary ``CzTaxLiabilitySummary`` (dividends in
+    the general base). ``separate`` scenario = dividends taxed at 15 % in the
+    separate base, everything else (interest + §10 securities/options) in the
+    general base.
+    """
+    available: bool = False
+    dividends: Decimal = ZERO
+
+    # General-base scenario total (dividends inside the general base).
+    general_base_total_tax: Decimal = ZERO
+
+    # Separate scenario — general base part (interest + §10, dividends removed)
+    separate_general_base: Decimal = ZERO
+    separate_general_base_tax: Decimal = ZERO
+    separate_general_base_ftc: Decimal = ZERO
+    separate_general_base_net_tax: Decimal = ZERO
+
+    # Separate scenario — dividend §16a base part
+    separate_dividend_base: Decimal = ZERO
+    separate_dividend_base_rounded: Decimal = ZERO
+    separate_dividend_rate: Decimal = Decimal("0.15")
+    separate_dividend_gross_tax: Decimal = ZERO
+    separate_dividend_ftc: Decimal = ZERO
+    separate_dividend_net_tax: Decimal = ZERO
+
+    # Combined separate-scenario total tax.
+    separate_base_total_tax: Decimal = ZERO
+
+    # Outcome
+    recommended_mode: str = "general"   # "general" | "separate"
+    saving: Decimal = ZERO              # general - separate, floored at 0
+
+    def to_line_items(self, currency: str) -> Dict[str, Decimal]:
+        c = currency.lower()
+        return {
+            "sep_available": Decimal(1),
+            f"sep_dividends_{c}": self.dividends.quantize(TWO),
+            f"sep_general_base_total_tax_{c}": self.general_base_total_tax.quantize(TWO),
+            f"sep_general_base_{c}": self.separate_general_base.quantize(TWO),
+            f"sep_general_base_net_tax_{c}": self.separate_general_base_net_tax.quantize(TWO),
+            f"sep_dividend_base_{c}": self.separate_dividend_base_rounded.quantize(TWO),
+            f"sep_dividend_gross_tax_{c}": self.separate_dividend_gross_tax.quantize(TWO),
+            f"sep_dividend_ftc_{c}": self.separate_dividend_ftc.quantize(TWO),
+            f"sep_dividend_net_tax_{c}": self.separate_dividend_net_tax.quantize(TWO),
+            f"sep_total_tax_{c}": self.separate_base_total_tax.quantize(TWO),
+            f"sep_saving_{c}": self.saving.quantize(TWO),
+            "sep_recommended_separate": Decimal(1 if self.recommended_mode == "separate" else 0),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _round_hundreds_down(value: Decimal) -> Decimal:
+    """§16/2 & §16a/2 ZDP: tax base rounded DOWN to whole hundreds of CZK."""
+    return (value / Decimal("100")).to_integral_value(
+        rounding=ROUND_FLOOR
+    ) * Decimal("100")
+
+
+def _apply_brackets(
+    base: Decimal, threshold: Decimal, base_rate: Decimal, elevated_rate: Decimal
+) -> Decimal:
+    """§16 progressive rate: base_rate up to threshold, elevated_rate above."""
+    if base <= threshold:
+        low, high = base, ZERO
+    else:
+        low, high = threshold, base - threshold
+    return (low * base_rate).quantize(TWO, rounding=ROUND_HALF_UP) + (
+        high * elevated_rate
+    ).quantize(TWO, rounding=ROUND_HALF_UP)
+
+
+def _finalize_ftc(
+    gross_tax: Decimal,
+    base: Decimal,
+    foreign_income: Decimal,
+    preliminary_creditable: Decimal,
+    per_country: List[tuple],
+    notes: List[str],
+    label: str = "",
+) -> tuple[Decimal, Decimal]:
+    """Finalize the §38f simple credit for one tax base.
+
+    Returns ``(czech_tax_on_foreign_income, final_creditable_ftc)``.
+
+    Applies the proportional §38f/1 cap (CZ tax attributable to foreign
+    income) and, when a ``per_country`` breakdown ``[(code, gross, creditable)]``
+    is supplied, the per-state §38f/8 cap; otherwise it falls back to the
+    aggregate ``preliminary_creditable``. ``label`` disambiguates notes when
+    the helper runs for more than one base (e.g. the §16a scenario).
+    """
+    if base > ZERO and foreign_income > ZERO:
+        foreign_ratio = min(foreign_income / base, Decimal("1"))
+        cz_tax_on_foreign = (gross_tax * foreign_ratio).quantize(
+            TWO, rounding=ROUND_HALF_UP
+        )
+    else:
+        cz_tax_on_foreign = ZERO
+
+    if per_country and base > ZERO:
+        per_state_credit = ZERO
+        for country, gross_income, creditable in sorted(per_country):
+            if gross_income <= ZERO or creditable <= ZERO:
+                continue
+            state_ratio = min(gross_income / base, Decimal("1"))
+            state_cap = (gross_tax * state_ratio).quantize(TWO, rounding=ROUND_HALF_UP)
+            state_credit = min(creditable, state_cap)
+            per_state_credit += state_credit
+            if creditable > state_cap:
+                notes.append(
+                    f"FTC {country}{label}: per-state cap (§38f/8) limits credit to "
+                    f"{state_cap} (preliminary {creditable})"
+                )
+        final_creditable = min(per_state_credit, cz_tax_on_foreign)
+    else:
+        final_creditable = min(preliminary_creditable, cz_tax_on_foreign)
+    return cz_tax_on_foreign, final_creditable
 
 
 # ---------------------------------------------------------------------------
@@ -216,48 +365,22 @@ def compute_tax_liability(
     result.foreign_income_total = ftc_summary.foreign_income_total_czk
     result.preliminary_ftc = ftc_summary.foreign_tax_creditable_total_czk
 
-    if result.combined_taxable_base > ZERO and result.foreign_income_total > ZERO:
-        # Proportional: CZ tax attributable to foreign income
-        foreign_ratio = result.foreign_income_total / result.combined_taxable_base
-        # Cap ratio at 1.0 (foreign income cannot exceed total base)
-        foreign_ratio = min(foreign_ratio, Decimal("1"))
-        result.czech_tax_on_foreign_income = (
-            result.gross_czech_tax * foreign_ratio
-        ).quantize(TWO, rounding=ROUND_HALF_UP)
-    else:
-        result.czech_tax_on_foreign_income = ZERO
-
     # §38f odst. 8 ZDP: the simple-credit cap is computed FOR EACH STATE
     # SEPARATELY — a single aggregate cap would let excess credit from a
     # high-WHT state ride on another state's unused headroom. Falls back to
     # the aggregate method when no per-country breakdown is available.
-    if ftc_summary.per_country and result.combined_taxable_base > ZERO:
-        per_state_credit = ZERO
-        for country in sorted(ftc_summary.per_country):
-            agg = ftc_summary.per_country[country]
-            if agg.gross_income_czk <= ZERO or agg.creditable_czk <= ZERO:
-                continue
-            state_ratio = min(
-                agg.gross_income_czk / result.combined_taxable_base, Decimal("1")
-            )
-            state_cap = (result.gross_czech_tax * state_ratio).quantize(
-                TWO, rounding=ROUND_HALF_UP
-            )
-            state_credit = min(agg.creditable_czk, state_cap)
-            per_state_credit += state_credit
-            if agg.creditable_czk > state_cap:
-                notes.append(
-                    f"FTC {country}: per-state cap (§38f/8) limits credit to "
-                    f"{state_cap} (preliminary {agg.creditable_czk})"
-                )
-        result.final_creditable_ftc = min(
-            per_state_credit, result.czech_tax_on_foreign_income
-        )
-    else:
-        result.final_creditable_ftc = min(
-            result.preliminary_ftc,
-            result.czech_tax_on_foreign_income,
-        )
+    all_country_pairs = [
+        (c, a.gross_income_czk, a.creditable_czk)
+        for c, a in ftc_summary.per_country.items()
+    ]
+    result.czech_tax_on_foreign_income, result.final_creditable_ftc = _finalize_ftc(
+        result.gross_czech_tax,
+        result.combined_taxable_base,
+        result.foreign_income_total,
+        result.preliminary_ftc,
+        all_country_pairs,
+        notes,
+    )
     result.non_creditable_ftc = (
         ftc_summary.foreign_tax_paid_total_czk - result.final_creditable_ftc
     )
@@ -282,5 +405,112 @@ def compute_tax_liability(
             )
         )
 
+    # --- 6. §16a separate dividend base comparison (advisory) ---
+    if config.dividend_separate_base_enabled and has_fx and result.taxable_dividends > ZERO:
+        result.dividend_separate_base = _compute_separate_base(
+            result, ftc_summary, config, notes
+        )
+
     result.limitation_notes = notes
     return result
+
+
+def _compute_separate_base(
+    result: CzTaxLiabilitySummary,
+    ftc_summary: CzForeignTaxCreditSummary,
+    config: CzTaxConfig,
+    notes: List[str],
+) -> CzDividendSeparateBaseComparison:
+    """Compute the §16a separate-base scenario and pick the cheaper of the two.
+
+    Only reached in CZK mode with non-zero foreign dividends. The general base
+    then excludes dividends (interest + §10 securities/options only); the
+    dividends form a flat-rate separate base (§16a). The §38f credit is split
+    by income category so each base credits its own foreign tax.
+    """
+    cmp = CzDividendSeparateBaseComparison(
+        available=True,
+        dividends=result.taxable_dividends,
+        general_base_total_tax=result.final_czech_tax_after_credit,
+        separate_dividend_rate=config.dividend_separate_base_rate,
+    )
+
+    # Per-state §38f/8 cap notes from the alternative scenario are internal
+    # detail — keep them out of the main audit trail (which describes the
+    # general base) and let the single recommendation note below summarize.
+    _sep_notes: List[str] = []
+
+    # --- General base without dividends (interest + §10) ---
+    gen_base_raw = max(
+        ZERO,
+        result.taxable_interest
+        + result.taxable_securities_net
+        + result.taxable_options_net,
+    )
+    gen_base = _round_hundreds_down(gen_base_raw)
+    cmp.separate_general_base = gen_base
+    cmp.separate_general_base_tax = _apply_brackets(
+        gen_base, result.threshold, result.base_rate, result.elevated_rate
+    )
+    interest_pairs = [
+        (c, a.interest_gross_income_czk, a.interest_creditable_czk)
+        for c, a in ftc_summary.per_country.items()
+    ]
+    _, cmp.separate_general_base_ftc = _finalize_ftc(
+        cmp.separate_general_base_tax,
+        gen_base,
+        ftc_summary.interest_income_total_czk,
+        ftc_summary.interest_creditable_total_czk,
+        interest_pairs,
+        _sep_notes,
+        label=" (samostatný scénář, obecný základ)",
+    )
+    cmp.separate_general_base_net_tax = max(
+        ZERO, cmp.separate_general_base_tax - cmp.separate_general_base_ftc
+    )
+
+    # --- Separate dividend base (§16a, flat rate) ---
+    div_base = _round_hundreds_down(result.taxable_dividends)
+    cmp.separate_dividend_base = result.taxable_dividends
+    cmp.separate_dividend_base_rounded = div_base
+    cmp.separate_dividend_gross_tax = (
+        div_base * config.dividend_separate_base_rate
+    ).quantize(TWO, rounding=ROUND_HALF_UP)
+    dividend_pairs = [
+        (c, a.dividend_gross_income_czk, a.dividend_creditable_czk)
+        for c, a in ftc_summary.per_country.items()
+    ]
+    _, cmp.separate_dividend_ftc = _finalize_ftc(
+        cmp.separate_dividend_gross_tax,
+        div_base,
+        ftc_summary.dividend_income_total_czk,
+        ftc_summary.dividend_creditable_total_czk,
+        dividend_pairs,
+        _sep_notes,
+        label=" (samostatný základ §16a)",
+    )
+    cmp.separate_dividend_net_tax = max(
+        ZERO, cmp.separate_dividend_gross_tax - cmp.separate_dividend_ftc
+    )
+
+    # --- Combined separate-scenario total (rounded up to whole CZK, §146 DŘ) ---
+    cmp.separate_base_total_tax = (
+        cmp.separate_general_base_net_tax + cmp.separate_dividend_net_tax
+    ).to_integral_value(rounding=ROUND_CEILING)
+
+    cmp.saving = max(ZERO, cmp.general_base_total_tax - cmp.separate_base_total_tax)
+    # Prefer the general base on a tie so the default DAP layout (and existing
+    # golden figures) stay unchanged unless the separate base is strictly better.
+    cmp.recommended_mode = "separate" if cmp.saving > ZERO else "general"
+
+    if cmp.recommended_mode == "separate":
+        notes.append(
+            f"DOPORUČENÍ (§16a): zdanění zahraničních dividend v samostatném "
+            f"základu daně (sazba {config.dividend_separate_base_rate * 100:.0f} %) "
+            f"snižuje celkovou daň z {cmp.general_base_total_tax} na "
+            f"{cmp.separate_base_total_tax} CZK (úspora {cmp.saving} CZK). "
+            f"Dividendy se pak nezahrnují do obecného základu (§8), ale do "
+            f"samostatného základu daně dle §16a. Volba je na poplatníkovi."
+        )
+
+    return cmp

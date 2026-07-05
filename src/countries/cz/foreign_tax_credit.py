@@ -46,6 +46,18 @@ _FTC_ELIGIBLE_TYPES = {
     CzTaxItemType.INTEREST,
 }
 
+# FTC income categories. Only DIVIDEND-category income (§8/4 podíly na zisku)
+# is eligible for the §16a separate tax base; interest stays in the general
+# base. Splitting the credit by category lets the liability layer finalize the
+# §38f cap separately for each base in the separate-base scenario.
+CATEGORY_DIVIDEND = "dividend"
+CATEGORY_INTEREST = "interest"
+_INTEREST_ITEM_TYPES = {CzTaxItemType.INTEREST}
+
+
+def _ftc_category(item_type: "CzTaxItemType") -> str:
+    return CATEGORY_INTEREST if item_type in _INTEREST_ITEM_TYPES else CATEGORY_DIVIDEND
+
 
 # ---------------------------------------------------------------------------
 # Per-item credit record
@@ -66,6 +78,9 @@ class CzForeignTaxCreditRecord:
     actual_creditable_czk: Decimal    # min(paid, max_creditable)
     non_creditable_czk: Decimal       # paid - actual_creditable
 
+    # Income category ("dividend" | "interest"): drives the §16a separate-base
+    # split in the liability layer.
+    category: str = CATEGORY_DIVIDEND
     review_status: str = "RESOLVED"
     review_note: Optional[str] = None
 
@@ -79,6 +94,7 @@ class CzForeignTaxCreditRecord:
             "max_creditable_czk": str(self.max_creditable_czk),
             "actual_creditable_czk": str(self.actual_creditable_czk),
             "non_creditable_czk": str(self.non_creditable_czk),
+            "category": self.category,
             "review_status": self.review_status,
             "review_note": self.review_note,
         }
@@ -97,6 +113,12 @@ class CzCountryCreditAggregate:
     creditable_czk: Decimal = ZERO
     non_creditable_czk: Decimal = ZERO
     item_count: int = 0
+    # Per-category split (dividend vs interest) — used by the §16a
+    # separate-base scenario to apply the §38f/8 per-state cap to each base.
+    dividend_gross_income_czk: Decimal = ZERO
+    dividend_creditable_czk: Decimal = ZERO
+    interest_gross_income_czk: Decimal = ZERO
+    interest_creditable_czk: Decimal = ZERO
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +136,13 @@ class CzForeignTaxCreditSummary:
     pending_review_total_czk: Decimal = ZERO
     pending_review_count: int = 0
     item_count: int = 0
+
+    # Per-category totals (dividend vs interest) — feed the §16a separate-base
+    # scenario in the liability layer.
+    dividend_income_total_czk: Decimal = ZERO
+    dividend_creditable_total_czk: Decimal = ZERO
+    interest_income_total_czk: Decimal = ZERO
+    interest_creditable_total_czk: Decimal = ZERO
 
     per_country: Dict[str, CzCountryCreditAggregate] = field(default_factory=dict)
     records: List[CzForeignTaxCreditRecord] = field(default_factory=list)
@@ -239,6 +268,8 @@ def evaluate_foreign_tax_credit(
                 "(no FX converter) — manual review required"
             )
 
+        category = _ftc_category(it.item_type)
+
         record = CzForeignTaxCreditRecord(
             source_event_id=str(it.source_event_id),
             source_country=source_country,
@@ -248,6 +279,7 @@ def evaluate_foreign_tax_credit(
             max_creditable_czk=max_creditable,
             actual_creditable_czk=actual_creditable,
             non_creditable_czk=non_creditable,
+            category=category,
             review_status=review_status,
             review_note=review_note,
         )
@@ -262,6 +294,14 @@ def evaluate_foreign_tax_credit(
         summary.foreign_tax_creditable_total_czk += actual_creditable
         summary.foreign_tax_non_creditable_total_czk += non_creditable
 
+        # Per-category totals
+        if category == CATEGORY_INTEREST:
+            summary.interest_income_total_czk += gross
+            summary.interest_creditable_total_czk += actual_creditable
+        else:
+            summary.dividend_income_total_czk += gross
+            summary.dividend_creditable_total_czk += actual_creditable
+
         # Per-country aggregate
         country_key = source_country or "UNKNOWN"
         if country_key not in summary.per_country:
@@ -272,5 +312,11 @@ def evaluate_foreign_tax_credit(
         agg.creditable_czk += actual_creditable
         agg.non_creditable_czk += non_creditable
         agg.item_count += 1
+        if category == CATEGORY_INTEREST:
+            agg.interest_gross_income_czk += gross
+            agg.interest_creditable_czk += actual_creditable
+        else:
+            agg.dividend_gross_income_czk += gross
+            agg.dividend_creditable_czk += actual_creditable
 
     return summary

@@ -26,6 +26,18 @@
 </section>
 
 {% if result %}
+{% set _liab = result.sections.get('cz_tax_liability', {}).get('line_items', {}) %}
+{% if _liab.get('sep_recommended_separate') in ['1', 1] %}
+<section class="card highlight">
+  <h2>💡 Tip: samostatný základ daně dividend (§16a)</h2>
+  <p>Zdanění zahraničních dividend v <strong>samostatném základu daně</strong> (15 %) místo
+     obecného základu by snížilo výslednou daň na
+     <strong>{{ _liab.get('sep_total_tax_czk') | czk }} Kč</strong>
+     (úspora <strong>{{ _liab.get('sep_saving_czk') | czk }} Kč</strong>).
+     Uplatnění §16a je volbou poplatníka — detaily viz
+     <a href="/results/{{ meta.run_id }}/form{{ ('?mode=' + mode) if mode else '' }}">DAP řádky</a>.</p>
+</section>
+{% endif %}
 {% for key, sec in result.sections.items() %}
 <section class="card">
   <h2>{{ sec.label }}</h2>

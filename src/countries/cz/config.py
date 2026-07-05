@@ -46,6 +46,18 @@ class CzTaxConfig:
         2025: Decimal("1676052"),   # 36 × 46 557
     })
 
+    # --- Dividend separate tax base (§16a ZDP) ---
+    # Foreign dividends (§8 odst. 4 ZDP — podíly na zisku ze zdrojů
+    # v zahraničí) may, at the taxpayer's ELECTION, be taxed in a SEPARATE
+    # 15 % tax base (samostatný základ daně §16a) instead of the general
+    # base. This is advantageous once the general base reaches the 23 %
+    # bracket, because the separate base is a flat 15 % with no progression.
+    # When enabled, the engine computes BOTH scenarios and reports which is
+    # cheaper (the election itself stays with the taxpayer). The rate is the
+    # statutory §16a odst. 2 rate (15 %), kept independent of base_tax_rate.
+    dividend_separate_base_enabled: bool = True
+    dividend_separate_base_rate: Decimal = Decimal("0.15")
+
     def elevated_rate_threshold_for_year(self, tax_year: Optional[int] = None) -> Decimal:
         """23 % threshold for *tax_year* (explicit override wins).
 
