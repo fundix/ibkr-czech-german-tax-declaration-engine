@@ -20,15 +20,23 @@
         <option value="pending" {{ 'selected' if status == 'pending' }}>k ruční kontrole</option>
       </select>
     </label>
-    <span class="muted">{{ items | length }} položek</span>
   </form>
 
-  <table class="items">
+  <div class="table-toolbar">
+    <span class="table-search">
+      <input type="search" placeholder="Filtr symbolu…" autocomplete="off"
+             data-filter-for="items-table" data-filter-col="1" data-filter-count="items-count"
+             aria-label="Rychlý filtr podle symbolu">
+    </span>
+    <span class="table-count"><strong id="items-count">{{ items | length }}</strong> z {{ items | length }} položek</span>
+  </div>
+
+  <table class="items sortable" id="items-table">
     <thead>
       <tr>
         <th>Typ</th><th>Symbol</th><th>Pořízeno</th><th>Realizováno</th>
         <th class="num">Množství</th><th class="num">Náklady Kč</th>
-        <th class="num">Výnos Kč</th><th class="num">Zisk/ztráta Kč</th><th>Stav</th>
+        <th class="num">Výnos Kč</th><th class="num">Zisk/ztráta Kč</th><th data-no-sort>Stav</th>
       </tr>
     </thead>
     <tbody>

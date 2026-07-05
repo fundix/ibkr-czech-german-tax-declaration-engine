@@ -31,7 +31,7 @@
       {% endif %}
       <div class="grow">
         <h2>Největší pozice</h2>
-        <table class="items">
+        <table class="items sortable">
           <thead>
             <tr>
               <th>Symbol</th>
@@ -56,10 +56,10 @@
             {% endfor %}
           </tbody>
         </table>
-        <p class="note">
-          Přepočet na Kč dnešním denním kurzem ČNB (orientační).
-          <a href="/results/{{ run_id }}/portfolio">Celé portfolio &amp; časový test →</a>
+        <p style="margin:.9rem 0 0">
+          <a class="cta-link" href="/results/{{ run_id }}/portfolio">Celé portfolio &amp; časový test →</a>
         </p>
+        <p class="note" style="margin-top:.5rem">Přepočet na Kč dnešním denním kurzem ČNB (orientační).</p>
       </div>
     </div>
   </section>

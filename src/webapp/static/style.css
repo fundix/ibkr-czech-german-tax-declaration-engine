@@ -25,12 +25,12 @@ body {
     line-height: 1.5;
 }
 main {
-    max-width: 1080px;
+    max-width: 1400px;
     margin: 0 auto;
     padding: 1.2rem 1rem 3rem;
 }
 footer {
-    max-width: 1080px;
+    max-width: 1400px;
     margin: 0 auto;
     padding: 0 1rem 2rem;
     color: var(--muted);
@@ -100,9 +100,10 @@ a {
 .card {
     background: var(--card);
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: 12px;
     padding: 1rem 1.2rem;
     margin-bottom: 1rem;
+    box-shadow: 0 1px 2px rgba(16, 24, 39, 0.04);
 }
 .cards-row {
     display: flex;
@@ -144,13 +145,110 @@ th {
     text-transform: uppercase;
     letter-spacing: 0.03em;
 }
-tr:hover td {
-    background: #fafbfc;
+tbody tr:hover td {
+    background: #f2f6fc;
 }
 table.kv td:first-child {
     color: var(--muted);
     font-family: ui-monospace, monospace;
     font-size: 0.82rem;
+}
+
+/* Sortable + filterable data tables */
+table.sortable thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--card);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+table.sortable thead th[data-no-sort] {
+    cursor: default;
+}
+table.sortable thead th .sort-ind {
+    display: inline-block;
+    width: 0.9em;
+    margin-left: 0.15em;
+    color: var(--border);
+    font-size: 0.85em;
+}
+table.sortable thead th[aria-sort] {
+    color: var(--accent);
+}
+table.sortable thead th[aria-sort] .sort-ind {
+    color: var(--accent);
+}
+table.sortable thead th:hover:not([data-no-sort]) {
+    color: var(--text);
+}
+tbody tr.filtered-out,
+tbody.filtered-out {
+    display: none;
+}
+
+.table-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.7rem;
+}
+.table-search {
+    position: relative;
+    flex: 0 0 auto;
+}
+.table-search input {
+    padding: 0.4rem 0.6rem 0.4rem 1.9rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 0.9rem;
+    background: #fff;
+    min-width: 13rem;
+}
+.table-search input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(15, 98, 254, 0.12);
+}
+.table-search::before {
+    content: "⌕";
+    position: absolute;
+    left: 0.6rem;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--muted);
+    font-size: 1.05rem;
+    pointer-events: none;
+}
+.table-count {
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Prominent inline call-to-action link */
+.cta-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+    padding: 0.4rem 0.9rem;
+    border: 1px solid #c8d8ff;
+    background: #eef4ff;
+    border-radius: 8px;
+    font-size: 0.92rem;
+    transition:
+        background 0.15s,
+        border-color 0.15s;
+}
+.cta-link:hover {
+    background: #e0ebff;
+    border-color: var(--accent);
+    text-decoration: none;
 }
 
 .badge {
@@ -359,18 +457,29 @@ table.lots td {
 /* Live portfolio: allocation chart + layout */
 .split {
     display: flex;
-    gap: 1.5rem;
+    gap: 1.5rem 2rem;
     align-items: flex-start;
-    flex-direction: column;
+    flex-direction: row;
+    flex-wrap: wrap;
 }
 .split .grow {
-    flex: 1;
+    flex: 1 1 460px;
     min-width: 0;
 }
 .chart-box {
-    width: 350px;
+    width: 320px;
     flex-shrink: 0;
     max-width: 100%;
+}
+@media (max-width: 820px) {
+    .split {
+        flex-direction: column;
+    }
+    .chart-box {
+        width: 100%;
+        max-width: 340px;
+        margin: 0 auto;
+    }
 }
 button.small {
     padding: 0.3rem 0.8rem;

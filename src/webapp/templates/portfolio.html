@@ -31,13 +31,21 @@
 
 <section class="card">
   <h2>Pozice (stav k 31. 12. {{ meta.tax_year }}, odpočet k {{ today }})</h2>
-  <table class="items">
+  <div class="table-toolbar">
+    <span class="table-search">
+      <input type="search" placeholder="Filtr symbolu…" autocomplete="off"
+             data-filter-for="positions-table" data-filter-col="1" data-filter-count="positions-count"
+             aria-label="Rychlý filtr podle symbolu">
+    </span>
+    <span class="table-count"><strong id="positions-count">{{ positions | length }}</strong> z {{ positions | length }} pozic</span>
+  </div>
+  <table class="items sortable" id="positions-table">
     <thead>
       <tr>
-        <th></th><th>Symbol</th><th>Kategorie</th>
+        <th data-no-sort></th><th>Symbol</th><th>Kategorie</th>
         <th class="num">Kusů (long)</th><th class="num">Náklady EUR</th>
         <th class="num">Cena 31.12.</th><th class="num">Hodnota 31.12.</th>
-        <th>Časový test</th>
+        <th data-no-sort>Časový test</th>
       </tr>
     </thead>
     {% for pos in positions %}

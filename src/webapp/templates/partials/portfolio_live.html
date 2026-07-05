@@ -34,7 +34,15 @@
       {% endif %}
       <div class="grow">
         <h2>Živé ocenění</h2>
-        <table class="items">
+        <div class="table-toolbar">
+          <span class="table-search">
+            <input type="search" placeholder="Filtr symbolu…" autocomplete="off"
+                   data-filter-for="portfolio-live-table" data-filter-col="0" data-filter-count="portfolio-live-count"
+                   aria-label="Rychlý filtr podle symbolu">
+          </span>
+          <span class="table-count"><strong id="portfolio-live-count">{{ live.positions | length }}</strong> z {{ live.positions | length }} pozic</span>
+        </div>
+        <table class="items sortable" id="portfolio-live-table">
           <thead>
             <tr>
               <th>Symbol</th>
