@@ -73,9 +73,11 @@ def dashboard_valuation(request: Request):
         {"label": p["symbol"], "value": str(p["value_czk"])}
         for p in live["positions"] if p.get("value_czk")
     ][:12]
+    opt = svc.options_overview(data["run_id"])
     return _tpl(request, "partials/dashboard_valuation.html",
                 run_id=data["run_id"], meta=data["meta"], live=live,
-                allocation=allocation, snapshots=svc.list_snapshots())
+                allocation=allocation, options=opt["options"],
+                options_as_of=opt["as_of"], snapshots=svc.list_snapshots())
 
 
 @router.get("/runs", response_class=HTMLResponse)

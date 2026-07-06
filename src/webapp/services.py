@@ -28,7 +28,7 @@ import logging
 import shutil
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -793,6 +793,13 @@ class RunService:
                 "eoy_market_price": asset.eoy_market_price,
                 "eoy_currency": asset.eoy_mark_price_currency,
                 "eoy_position_value": asset.eoy_position_value,
+                # Option contract metadata (None for non-options) — powers the
+                # dashboard expiry overview.
+                "option_type": getattr(asset, "option_type", None),
+                "strike_price": getattr(asset, "strike_price", None),
+                "expiry_date": getattr(asset, "expiry_date", None),
+                "multiplier": getattr(asset, "multiplier", None),
+                "underlying_symbol": getattr(asset, "underlying_ibkr_symbol", None),
                 "lots": lot_rows,
                 "short_lots": short_rows,
             })
@@ -808,6 +815,69 @@ class RunService:
     def load_portfolio(self, run_id: str) -> Optional[Dict[str, Any]]:
         path = self.runs_dir / run_id / "portfolio.json"
         return load_json(path) if path.is_file() else None
+
+    def options_overview(self, run_id: str) -> Dict[str, Any]:
+        """Open option contracts from a run's portfolio, with days-to-expiry.
+
+        Includes both long (bought) and short (written) contracts — writing
+        options is exactly where the expiry matters most — so it reads the raw
+        portfolio rather than the live valuation (which drops short-only rows).
+        Sorted by expiry ascending (soonest first; undated last).
+
+        ``days_to_expiry`` counts from the snapshot's reference date, not today:
+        the FIFO book is a point-in-time snapshot at the tax-year end, so for a
+        closed year an option that was alive on 31 Dec must not read as
+        "expired" just because that date has since passed. Reference =
+        ``min(today, 31 Dec of the tax year)`` — today for the live current
+        year, the year-end for closed years. ``options`` is empty for old runs
+        whose ``portfolio.json`` predates option metadata (re-run to populate).
+        """
+        pf = self.load_portfolio(run_id)
+        if pf is None:
+            return {"as_of": None, "tax_year": None, "options": []}
+        today = date.today()
+        tax_year = pf.get("tax_year")
+        ref = today
+        if tax_year:
+            try:
+                ref = min(today, date(int(tax_year), 12, 31))
+            except (ValueError, TypeError):
+                ref = today
+        rows: List[Dict[str, Any]] = []
+        for pos in pf.get("positions", []):
+            if pos.get("category") != "OPTION":
+                continue
+            long_q = Decimal(str(pos.get("quantity_long") or 0))
+            short_q = Decimal(str(pos.get("quantity_short") or 0))
+            if long_q == 0 and short_q == 0:
+                continue
+            expiry = pos.get("expiry_date")
+            days = None
+            if expiry:
+                try:
+                    days = (date.fromisoformat(expiry) - ref).days
+                except ValueError:
+                    days = None
+            net = long_q - short_q
+            rows.append({
+                "symbol": pos.get("symbol"),
+                "description": pos.get("description"),
+                "underlying": pos.get("underlying_symbol"),
+                "option_type": pos.get("option_type"),
+                "strike_price": pos.get("strike_price"),
+                "multiplier": pos.get("multiplier"),
+                "currency": pos.get("eoy_currency"),
+                "expiry_date": expiry,
+                "days_to_expiry": days,
+                "expired": days is not None and days < 0,
+                "quantity_long": long_q,
+                "quantity_short": short_q,
+                "net_quantity": net,
+                # Contract counts are whole numbers — drop the FIFO tail zeros.
+                "net_display": format(net.normalize(), "f"),
+            })
+        rows.sort(key=lambda r: (r["expiry_date"] is None, r["expiry_date"] or ""))
+        return {"as_of": ref.isoformat(), "tax_year": tax_year, "options": rows}
 
     # ------------------------------------------------------------------
     # Live valuation (quotes + today's CZK), sale simulator, snapshots
@@ -1309,10 +1379,13 @@ class RunService:
         return None
 
     def dashboard_overview(self) -> Dict[str, Any]:
-        """Home-page summary: latest run overall + newest run per year.
+        """Home-page summary: current-year run + newest run per year.
 
-        Grouped by account so a second IBKR/other account later is a data
-        change, not a UI rewrite; today there is a single account group.
+        ``latest`` drives the live net-worth + options card, so it tracks the
+        highest (most current) tax year rather than the most recently executed
+        run — re-running a closed year to tweak a filing must not flip the "net
+        worth today" view back to that year's 31 Dec snapshot. Grouped by
+        account so a second account later is a data change, not a UI rewrite.
         """
         runs = self.list_runs(limit=100)  # newest first
         per_year: Dict[int, Dict[str, Any]] = {}
@@ -1320,12 +1393,15 @@ class RunService:
         for meta in runs:
             year = meta.get("tax_year")
             if year is not None and year not in per_year:
-                per_year[year] = meta
+                per_year[year] = meta  # newest run of that year (runs are newest first)
             for acc in (meta.get("account_ids") or []):
                 accounts.add(acc)
+        # Newest run of the highest tax year; fall back to newest run overall
+        # when a run carries no tax year.
+        latest = per_year[max(per_year)] if per_year else (runs[0] if runs else None)
         return {
             "has_runs": bool(runs),
-            "latest": runs[0] if runs else None,
+            "latest": latest,
             "year_cards": [per_year[y] for y in sorted(per_year, reverse=True)],
             "accounts": sorted(accounts),
         }

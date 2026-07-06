@@ -341,6 +341,19 @@ class TestComputeCacheAndDashboard:
         assert [c["tax_year"] for c in ov["year_cards"]] == [2024]  # one card per year
         assert ov["latest"]["run_id"] in {"2024-a", "2024-b"}
 
+    def test_dashboard_latest_tracks_highest_tax_year(self, service, monkeypatch):
+        # Newest run *by time* is a re-run of a closed year; the live net-worth
+        # card must still track the highest (current) tax year, not regress.
+        runs = [
+            {"run_id": "2025-rerun", "tax_year": 2025, "account_ids": ["U1"]},  # newest
+            {"run_id": "2026-newest", "tax_year": 2026, "account_ids": ["U1"]},
+            {"run_id": "2025-first", "tax_year": 2025, "account_ids": ["U1"]},
+        ]
+        monkeypatch.setattr(service, "list_runs", lambda limit=100: runs)
+        ov = service.dashboard_overview()
+        assert ov["latest"]["run_id"] == "2026-newest"
+        assert [c["tax_year"] for c in ov["year_cards"]] == [2026, 2025]
+
 
 # ---------------------------------------------------------------------------
 # Live valuation + sale simulator (stubbed quotes + FX: USD→CZK 20, EUR→CZK 25)
@@ -480,3 +493,70 @@ class TestLivePortfolio:
         snaps = stub_service.list_snapshots()
         assert len(snaps) == 1
         assert Decimal(snaps[0]["total_value_czk"]) == Decimal("8200")
+
+
+class TestOptionsOverview:
+    def _write_portfolio(self, svc, positions):
+        from src.webapp.serializers import dump_json
+        run_dir = svc.runs_dir / "opt-run"
+        run_dir.mkdir(parents=True)
+        dump_json({"tax_year": 2025, "positions": positions}, run_dir / "portfolio.json")
+
+    def test_options_only_sorted_by_expiry_with_days_and_net(self, service):
+        # A far Call, a near short Put, a non-option stock, and an undated Call.
+        self._write_portfolio(service, [
+            {"symbol": "STOCKX", "category": "STOCK", "quantity_long": "10",
+             "quantity_short": "0"},
+            {"symbol": "FAR", "category": "OPTION", "option_type": "C",
+             "strike_price": "20", "expiry_date": "2099-01-01",
+             "eoy_currency": "USD", "quantity_long": "2.00000000",
+             "quantity_short": "0", "underlying_symbol": "AAA"},
+            {"symbol": "SHORTPUT", "category": "OPTION", "option_type": "P",
+             "strike_price": "6.8", "expiry_date": "2000-01-01",
+             "eoy_currency": "EUR", "quantity_long": "0",
+             "quantity_short": "1.00000000", "underlying_symbol": "BBB"},
+            {"symbol": "NODATE", "category": "OPTION", "option_type": "C",
+             "strike_price": "5", "expiry_date": None,
+             "quantity_long": "1", "quantity_short": "0"},
+        ])
+        overview = service.options_overview("opt-run")
+        # Days count from the tax-year end (2025-12-31), not today — the FIFO
+        # book is a year-end snapshot.
+        assert overview["as_of"] == "2025-12-31"
+        rows = overview["options"]
+
+        # Stock is excluded; options only, sorted by expiry ascending (undated last).
+        assert [r["symbol"] for r in rows] == ["SHORTPUT", "FAR", "NODATE"]
+
+        short = rows[0]
+        assert short["net_quantity"] == Decimal("-1")
+        assert short["net_display"] == "-1"            # FIFO tail zeros trimmed
+        assert short["expired"] is True                # 2000 predates the 2025 year-end
+        assert short["days_to_expiry"] < 0
+        assert short["option_type"] == "P"
+
+        far = rows[1]
+        assert far["net_display"] == "2"
+        assert far["expired"] is False
+        assert far["days_to_expiry"] > 0
+
+        undated = rows[2]
+        assert undated["expiry_date"] is None
+        assert undated["days_to_expiry"] is None
+        assert undated["expired"] is False
+
+    def test_expiry_after_year_end_is_not_flagged_expired(self, service):
+        # A contract open at 31 Dec 2025 that expires in Jan 2026 (like the real
+        # SPYM 16JAN26 put) must read as ~16 days left, NOT expired-vs-today.
+        self._write_portfolio(service, [
+            {"symbol": "SPYM 260116P00078000", "category": "OPTION",
+             "option_type": "P", "strike_price": "78", "expiry_date": "2026-01-16",
+             "eoy_currency": "USD", "quantity_long": "2", "quantity_short": "0"},
+        ])
+        [row] = service.options_overview("opt-run")["options"]
+        assert row["expired"] is False
+        assert row["days_to_expiry"] == 16  # 2025-12-31 -> 2026-01-16
+
+    def test_options_overview_missing_run_is_empty(self, service):
+        assert service.options_overview("does-not-exist") == {
+            "as_of": None, "tax_year": None, "options": []}
