@@ -64,6 +64,63 @@
     </div>
   </section>
 
+  {% if options %}
+  <section class="card" id="dash-options">
+    <h2>Opce — expirace</h2>
+    <div class="table-toolbar">
+      <span class="table-search">
+        <input type="search" placeholder="Filtr kontraktu…" autocomplete="off"
+               data-filter-for="dash-options-table" data-filter-col="0" data-filter-count="dash-options-count"
+               aria-label="Rychlý filtr podle kontraktu">
+      </span>
+      <span class="table-count"><strong id="dash-options-count">{{ options | length }}</strong> z {{ options | length }} opcí</span>
+    </div>
+    <table class="items sortable" id="dash-options-table">
+      <thead>
+        <tr>
+          <th>Kontrakt</th>
+          <th>Podklad</th>
+          <th>Typ</th>
+          <th class="num">Strike</th>
+          <th>Expirace</th>
+          <th class="num">Zbývá</th>
+          <th class="num">Pozice</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in options %}
+        <tr>
+          <td title="{{ o.description or '' }}{% if o.multiplier %} · multiplikátor {{ o.multiplier }}{% endif %}">
+            <strong>{{ o.symbol }}</strong></td>
+          <td>{{ o.underlying or "–" }}</td>
+          <td>
+            {% if o.option_type == "C" %}Call
+            {% elif o.option_type == "P" %}Put
+            {% else %}–{% endif %}
+          </td>
+          <td class="num">{{ o.strike_price | czk if o.strike_price else "–" }} {{ o.currency or "" }}</td>
+          <td>{{ o.expiry_date or "–" }}</td>
+          <td class="num">
+            {% if o.days_to_expiry is none %}–
+            {% elif o.expired %}<span class="badge warn"
+              title="Kontrakt je po datu expirace — zřejmě nebyl uzavřen (ověřte ručně)">{{ o.days_to_expiry }} dní</span>
+            {% elif o.days_to_expiry <= 30 %}<span class="badge warn">{{ o.days_to_expiry }} dní</span>
+            {% else %}{{ o.days_to_expiry }} dní{% endif %}
+          </td>
+          <td class="num">{{ o.net_display }}{% if o.net_quantity < 0 %}
+            <span class="badge warn" title="Vypsaná (short) opce">short</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="note">Otevřené opční kontrakty ve FIFO knize daňového roku {{ live.tax_year }}, stav
+      k&nbsp;{{ options_as_of }}. Sloupec <em>Zbývá</em> se počítá k&nbsp;tomuto datu.
+      Klikněte na záhlaví pro řazení (např. podle <em>Expirace</em> nebo <em>Kontraktu</em>).
+      {% if options | selectattr("expiry_date", "none") | list %}Některé kontrakty nemají datum expirace —
+      přepočítejte rok pro doplnění.{% endif %}</p>
+  </section>
+  {% endif %}
+
   <script>
     (function () {
       const alloc = {{ allocation | tojson }};
