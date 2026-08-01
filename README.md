@@ -141,11 +141,15 @@ Claude Desktop — add to `claude_desktop_config.json`:
 ```
 
 Then ask things like *"Jaký je stav časového testu u BYDDY?"*, *"Kolik jsem letos
-dostal na dividendách?"* or *"Co by mě stál prodej 100 ks PYPL?"*. Tools:
-`list_datasets`, `run_pipeline`, `get_tax_summary`, `get_form_mapping`,
-`get_pending_review_items`, `get_positions`, `get_time_test_status`,
-`get_dividends`, `simulate_sale` — thin wrappers over the same service layer
-the web GUI uses, reading the latest persisted run.
+dostal na dividendách?"*, *"Proč je PYPL letos ve ztrátě?"* or *"O kolik se liší
+daň mezi FIFO a LIFO?"*. Tools: `list_datasets`, `run_pipeline`,
+`get_tax_summary`, `get_form_mapping`, `get_pending_review_items`,
+`get_positions`, `get_time_test_status`, `get_dividends`, `get_disposals`
+(realizované prodeje po dávkách — které nákupy prodej spotřeboval),
+`compare_runs` (rozdíl dvou běhů po tickerech, např. FIFO vs LIFO),
+`simulate_sale` — thin wrappers over the same service layer the web GUI uses.
+Read tools default to the latest persisted run; pass `run_id` to pin an older
+one (e.g. a run computed with a different pairing method).
 
 ### Prerequisites
 - Python 3.10+
