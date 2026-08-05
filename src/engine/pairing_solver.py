@@ -41,6 +41,16 @@ class SupplyLot:
     # Synthetic SOY-fallback acquisition (31 Dec) — the real date is unknown,
     # so downstream keeps it taxable; the solver must not route gains here.
     estimated: bool = False
+    # When the holding period began. None means "same as acq_date"; differs only
+    # for a holding carried over by a qualified merger, where the period keeps
+    # running from the old share while acq_date still picks the regime.
+    holding_start: Optional[date_obj] = None
+    holding_start_estimated: bool = False
+
+    def __post_init__(self):
+        if self.holding_start is None:
+            self.holding_start = self.acq_date
+            self.holding_start_estimated = self.estimated
 
 
 @dataclass

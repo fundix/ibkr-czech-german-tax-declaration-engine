@@ -43,7 +43,16 @@ class RealizedGainLoss:
     gross_gain_loss_eur: Decimal
 
     _: KW_ONLY
+    # Measured from holding_period_start (below), which is the acquisition date
+    # for everything except a carried-over holding.
     holding_period_days: Optional[int] = None
+    # When the holding period began. Differs from acquisition_date only when a
+    # holding was carried over (a qualified Czech merger, §23b/§23c): the period
+    # keeps running from the old share, while acquisition_date stays the date
+    # THIS security was acquired and is what selects the applicable regime.
+    # None means "same as acquisition_date"; __post_init__ fills it in.
+    holding_period_start: Optional[str] = None
+    holding_period_start_estimated: bool = False
     # True when acquisition_date comes from a synthetic SOY fallback lot
     # (31 Dec of the prior year) — the real purchase date is unknown, so
     # holding-period tests must not treat the date as real.
@@ -61,6 +70,9 @@ class RealizedGainLoss:
     is_stillhalter_income: bool = False
 
     def __post_init__(self):
+        if not self.holding_period_start:
+            self.holding_period_start = self.acquisition_date
+            self.holding_period_start_estimated = self.is_acquisition_estimated
         if not isinstance(self.asset_category_at_realization, AssetCategory):
             raise TypeError(f"RealizedGainLoss.asset_category_at_realization must be an AssetCategory, got {type(self.asset_category_at_realization)}")
         if not isinstance(self.realization_type, RealizationType):

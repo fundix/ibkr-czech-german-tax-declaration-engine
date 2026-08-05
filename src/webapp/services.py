@@ -79,7 +79,10 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 # without a bump the cache happily serves a run computed by the old code.
 # v2: §4 odst. 1 letter corrected (w → u/t) and time-test-exempt proceeds now
 #     count toward the 100k limit sum.
-_FINGERPRINT_VERSION = "v2"
+# v3: the holding period is measured from holding_period_start, so the frozen
+#     time_test_deadline in portfolio.json and the CZK cost basis of a carried
+#     lot both change.
+_FINGERPRINT_VERSION = "v3"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —
@@ -802,18 +805,27 @@ class RunService:
 
             lot_rows = []
             for lot in lots:
-                estimated = str(lot.source_transaction_id).startswith("SOY_FALLBACK")
+                # The lot carries the flag now — sniffing the id prefix would
+                # miss a carried-over lot minted under a corporate-action id.
+                estimated = bool(lot.acquisition_date_estimated)
+                holding_estimated = bool(lot.holding_period_start_estimated)
                 acq = parse_ibkr_date(lot.acquisition_date)
+                hps = parse_ibkr_date(lot.holding_period_start or lot.acquisition_date)
                 deadline = (
-                    time_test_deadline(acq, cz_cfg)
-                    if (time_test_applies and acq and not estimated) else None
+                    # Regime from the acquisition, period from the holding start.
+                    time_test_deadline(
+                        acquisition_date=acq, holding_period_start=hps, config=cz_cfg)
+                    if (time_test_applies and acq and hps
+                        and not estimated and not holding_estimated) else None
                 )
                 lot_rows.append({
                     "acquisition_date": lot.acquisition_date,
+                    "holding_period_start": lot.holding_period_start or lot.acquisition_date,
                     "quantity": lot.quantity,
                     "unit_cost_eur": lot.unit_cost_basis_eur,
                     "total_cost_eur": lot.total_cost_basis_eur,
                     "acquisition_estimated": estimated,
+                    "holding_period_start_estimated": holding_estimated,
                     # exempt when disposed of strictly AFTER the deadline
                     "time_test_deadline": deadline,
                 })

@@ -75,19 +75,55 @@ _PRE_2014_CUTOFF = datetime.date(2014, 1, 1)
 
 
 def time_test_deadline(
+    *,
     acquisition_date: datetime.date,
+    holding_period_start: datetime.date,
     config: CzTaxConfig,
 ) -> datetime.date:
-    """Last day of the §4/1/u holding period for a security acquired on
-    *acquisition_date* — a disposal strictly AFTER this date is exempt.
+    """Last day of the §4/1/u holding period — a disposal strictly AFTER it is
+    exempt.
+
+    Two dates, because they answer different questions:
+
+    * *acquisition_date* — when THIS security was acquired. Selects the REGIME:
+      a share issued before 2014-01-01 keeps the transitional six-month test,
+      a later one gets three calendar years. The transitional regime does not
+      transfer to a share issued after the cutoff (NSS 3 Afs 249/2024-45), so
+      this must be the date of the share being sold, never a carried one.
+    * *holding_period_start* — when the holding began, which the period is
+      MEASURED from. Equal to the acquisition date except where a holding was
+      carried over (a qualified merger under §23b/§23c ZDP).
+
+    Both are required and keyword-only on purpose: a default would let a caller
+    silently measure from the wrong date, and the whole distinction is invisible
+    in the common case where the two coincide.
 
     Single source of the deadline arithmetic (3-year test, pre-2014 6-month
     test, §33 daňového řádu month-end clamping), shared by the in-place
-    evaluator below and by portfolio/countdown views.
+    evaluator below, ``optimal_pairing`` and the portfolio/countdown views.
     """
     if config.pre_2014_rule_enabled and acquisition_date < _PRE_2014_CUTOFF:
-        return _add_months(acquisition_date, config.pre_2014_holding_test_months)
-    return _add_years(acquisition_date, config.holding_test_years)
+        return _add_months(holding_period_start, config.pre_2014_holding_test_months)
+    return _add_years(holding_period_start, config.holding_test_years)
+
+
+def time_test_exempt(
+    *,
+    acquisition_date: datetime.date,
+    holding_period_start: datetime.date,
+    sale_date: datetime.date,
+    config: CzTaxConfig,
+) -> bool:
+    """Would a disposal on *sale_date* be exempt under the holding-period test?
+
+    The single predicate, so ``optimal_pairing`` scores lots with the same rule
+    the evaluator applies instead of mirroring the arithmetic.
+    """
+    return sale_date > time_test_deadline(
+        acquisition_date=acquisition_date,
+        holding_period_start=holding_period_start,
+        config=config,
+    )
 
 # Item types subject to the holding-period time test
 _TIME_TEST_ITEM_TYPES = {
@@ -203,14 +239,18 @@ def evaluate_time_test(
         # year): the real purchase date is unknown, so the time test cannot
         # be evaluated reliably — keep taxable and flag for manual review
         # (the position may actually be exempt if held > 3 years).
-        if item.acquisition_date_estimated:
+        if item.acquisition_date_estimated or item.holding_period_start_estimated:
+            which = (
+                "Acquisition date" if item.acquisition_date_estimated
+                else "Holding-period start"
+            )
             item.is_taxable = True
             item.is_exempt = False
             item.exemption_reason = None
             item.included_in_tax_base = True
             item.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
             item.tax_review_note = (
-                "Acquisition date is a synthetic SOY fallback (31 Dec) — the "
+                f"{which} is a synthetic SOY fallback (31 Dec) — the "
                 "real purchase date is unknown; time test not evaluated. Item "
                 "kept taxable as conservative default; review manually."
             )
@@ -232,9 +272,12 @@ def evaluate_time_test(
         holding_days = item.holding_period_days
         if holding_days is None:
             acq = parse_ibkr_date(item.acquisition_date)
+            # The period runs from where the holding began, not from when this
+            # security was acquired — they differ for a carried-over holding.
+            hps = parse_ibkr_date(item.holding_period_start or item.acquisition_date)
             evt = parse_ibkr_date(item.event_date)
-            if acq is not None and evt is not None and evt >= acq:
-                holding_days = (evt - acq).days
+            if acq is not None and hps is not None and evt is not None and evt >= hps:
+                holding_days = (evt - hps).days
                 item.holding_period_days = holding_days
             else:
                 item.is_taxable = True
@@ -260,16 +303,24 @@ def evaluate_time_test(
         # a 6-MONTH test (přechodné ustanovení čl. II bod 5 zák. opatření
         # č. 344/2013 Sb.), under the ≤5% direct-share assumption documented
         # in the config.
+        # acq_d selects the REGIME (which test applies to this share);
+        # hps_d is what the period is MEASURED from. Identical unless the
+        # holding was carried over by a qualified merger.
         acq_d = parse_ibkr_date(item.acquisition_date)
+        hps_d = parse_ibkr_date(item.holding_period_start or item.acquisition_date)
         evt_d = parse_ibkr_date(item.event_date)
         pre_2014 = (
             config.pre_2014_rule_enabled
             and acq_d is not None
             and acq_d < _PRE_2014_CUTOFF
         )
-        if acq_d is not None and evt_d is not None:
-            threshold_date = time_test_deadline(acq_d, config)
-            is_exempt = evt_d > threshold_date
+        if acq_d is not None and hps_d is not None and evt_d is not None:
+            is_exempt = time_test_exempt(
+                acquisition_date=acq_d,
+                holding_period_start=hps_d,
+                sale_date=evt_d,
+                config=config,
+            )
         else:
             is_exempt = holding_days > config.holding_test_days
 
@@ -285,6 +336,17 @@ def evaluate_time_test(
                 f"{config.holding_test_years} calendar years ({time_test_ref})"
             )
 
+        # When the holding was carried over, say so: "held 4200 days" against a
+        # 2025 acquisition date otherwise reads as a contradiction.
+        carried = (
+            item.holding_period_start
+            and item.holding_period_start != item.acquisition_date
+        )
+        carried_note = (
+            f" (držba pokračuje od {item.holding_period_start}, "
+            f"nabytí {item.acquisition_date})" if carried else ""
+        )
+
         if is_exempt:
             item.is_taxable = False
             item.is_exempt = True
@@ -292,7 +354,7 @@ def evaluate_time_test(
             item.included_in_tax_base = False
             item.tax_review_status = CzTaxReviewStatus.RESOLVED
             item.tax_review_note = (
-                f"Exempt: held {holding_days} days > {rule_desc}"
+                f"Exempt: held {holding_days} days > {rule_desc}{carried_note}"
             )
         else:
             item.is_taxable = True
@@ -301,5 +363,5 @@ def evaluate_time_test(
             item.included_in_tax_base = True
             item.tax_review_status = CzTaxReviewStatus.RESOLVED
             item.tax_review_note = (
-                f"Taxable: held {holding_days} days ≤ {rule_desc}"
+                f"Taxable: held {holding_days} days ≤ {rule_desc}{carried_note}"
             )

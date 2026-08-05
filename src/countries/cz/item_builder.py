@@ -557,7 +557,16 @@ def _build_disposal_items(
             cost_date = rgl.realization_date
             proceeds_date = rgl.acquisition_date or rgl.realization_date
         else:
-            cost_date = rgl.acquisition_date or rgl.realization_date
+            # Per-leg FX (NSS 2 Afs 4/2019-35): the cost leg converts at the rate
+            # of the day the cost was actually paid. For a holding carried over by
+            # a qualified merger (§23b/§23c) no cash moved at the merger — the
+            # cost was paid when the OLD share was bought, which is exactly
+            # holding_period_start. Byte-identical for every non-carried lot.
+            # If a future cash-boot merger breaks that coincidence, give FifoLot a
+            # dedicated cost_basis_date rather than overloading this field.
+            cost_date = (
+                rgl.holding_period_start or rgl.acquisition_date or rgl.realization_date
+            )
             proceeds_date = rgl.realization_date
         cost_czk, fx_cost = _convert_eur(rgl.total_cost_basis_eur, cost_date, fx, fx_records)
         proceeds_czk, fx_proceeds = _convert_eur(rgl.total_realization_value_eur, proceeds_date, fx, fx_records)
@@ -576,6 +585,9 @@ def _build_disposal_items(
             source_event_id=rgl.originating_event_id,
             event_date=rgl.realization_date,
             acquisition_date=rgl.acquisition_date,
+            holding_period_start=rgl.holding_period_start,
+            holding_period_start_estimated=getattr(
+                rgl, "holding_period_start_estimated", False),
             holding_period_days=rgl.holding_period_days,
             original_amount=rgl.gross_gain_loss_eur,
             original_currency="EUR",
