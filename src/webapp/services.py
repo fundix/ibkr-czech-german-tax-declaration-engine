@@ -235,6 +235,12 @@ class RunService:
         FIFO reconstruction. Rows are never dropped on the ID alone —
         distinct rows may legitimately share an ActionID (multi-leg
         corporate actions). Files without an ID column are kept verbatim.
+
+        Header rows repeated mid-file are dropped: IBKR inserts them between
+        export sections (multi-account) and hand-concatenated uploads carry
+        one per source file. Parsed as data they would reach the parsers —
+        and corporate-action rows validate even with non-numeric decimals
+        (safe_decimal -> 0), creating a phantom asset named "Symbol".
         """
         sources = []
         for ds in self.list_years():
@@ -247,6 +253,7 @@ class RunService:
         id_index: Optional[int] = None
         seen: set = set()
         dropped = 0
+        repeated_headers = 0
         with open(target, "w", encoding="utf-8", newline="") as out:
             for year, src in sources:
                 with open(src, encoding="utf-8-sig", newline="") as fh:
@@ -271,6 +278,9 @@ class RunService:
                 for line in lines[1:]:
                     if not line.strip():
                         continue
+                    if line.strip() == header:
+                        repeated_headers += 1
+                        continue
                     if id_index is not None:
                         row = next(csv.reader([line]), [])
                         row_id = row[id_index] if id_index < len(row) else ""
@@ -282,6 +292,12 @@ class RunService:
                             seen.add(key)
                     out.write(line if line.endswith("\n") else line + "\n")
 
+        if repeated_headers:
+            logger.info(
+                "Sloučení souborů (%s): odstraněno %d opakovaných hlaviček "
+                "uvnitř souborů (IBKR je vkládá mezi sekce exportu).",
+                settings.SLOT_LABELS[slot], repeated_headers,
+            )
         if dropped:
             note = (
                 f"Sloučení souborů ({settings.SLOT_LABELS[slot]}): odstraněno "
@@ -291,6 +307,25 @@ class RunService:
             logger.warning(note)
             if notes is not None:
                 notes.append(note)
+        return target
+
+    @staticmethod
+    def _copy_csv(src: Path, target: Path) -> Path:
+        """Copy a slot file into the run's inputs, dropping header rows
+        repeated mid-file (same rationale as in _merge_years). Everything
+        else is kept byte-verbatim; the stored dataset file is not touched.
+        """
+        with open(src, encoding="utf-8-sig", newline="") as fh:
+            lines = fh.readlines()
+        with open(target, "w", encoding="utf-8", newline="") as out:
+            if not lines:
+                return target
+            header = lines[0].strip()
+            out.write(lines[0] if lines[0].endswith("\n") else lines[0] + "\n")
+            for line in lines[1:]:
+                if line.strip() == header:
+                    continue
+                out.write(line)
         return target
 
     def _prepare_inputs(
@@ -313,18 +348,18 @@ class RunService:
                                    notes=notes)
 
         cash = inputs_dir / "cash_transactions.csv"
-        shutil.copyfile(ds.files["cash"], cash)
+        self._copy_csv(ds.files["cash"], cash)
 
         pos_end = inputs_dir / "positions_end.csv"
-        shutil.copyfile(ds.files["positions_end"], pos_end)
+        self._copy_csv(ds.files["positions_end"], pos_end)
 
         pos_start = inputs_dir / "positions_start.csv"
         if ds.files["positions_start"]:
-            shutil.copyfile(ds.files["positions_start"], pos_start)
+            self._copy_csv(ds.files["positions_start"], pos_start)
         else:
             prev = self._positions_end_of(tax_year - 1)
             if prev:
-                shutil.copyfile(prev, pos_start)
+                self._copy_csv(prev, pos_start)
             else:
                 pos_start.write_text(settings.POSITIONS_HEADER, encoding="utf-8")
 
