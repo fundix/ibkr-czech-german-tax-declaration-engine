@@ -150,7 +150,7 @@ class TestSecurityExempt:
         assert it.included_in_tax_base is False
         assert it.exemption_reason == CzExemptionReason.TIME_TEST_PASSED
         assert it.tax_review_status == CzTaxReviewStatus.RESOLVED
-        assert "§4/1/w ZDP" in (it.tax_review_note or "")
+        assert "§4 odst. 1 písm. u) ZDP" in (it.tax_review_note or "")
 
     def test_exempt_item_to_dict(self):
         items = [CzTaxItem(

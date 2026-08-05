@@ -766,7 +766,7 @@ class RunService:
     # Portfolio (end-of-year open FIFO lots + time-test deadlines)
     # ------------------------------------------------------------------
 
-    # §4/1/w applies to securities; derivatives never pass the time test.
+    # §4/1/u applies to securities; derivatives never pass the time test.
     _TIME_TEST_CATEGORIES = {"STOCK", "BOND", "INVESTMENT_FUND"}
 
     def _build_portfolio(
@@ -1530,7 +1530,7 @@ class RunService:
         }
 
     def time_test_overview(self, run_id: str, symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Per-lot §4/1/w countdown computed from the persisted portfolio."""
+        """Per-lot §4/1/u countdown computed from the persisted portfolio."""
         from datetime import date as _date, timedelta as _timedelta
         pf = self.load_portfolio(run_id)
         if pf is None:
@@ -1842,7 +1842,7 @@ class RunService:
             cost_delta = _delta(rb["cost_basis_czk"], ra["cost_basis_czk"])
             gain_a_q = ra["gain_loss_czk"].quantize(TWO)
             gain_b_q = gain_a_q + gain_delta
-            # The gross figures can be pairing-invariant while the §4/1/w
+            # The gross figures can be pairing-invariant while the §4/1/u
             # exemption flips (a different lot fails the time test) — the
             # taxable split must participate in the changed/unchanged call.
             # From raw sums like the gain, so an all-taxable symbol never

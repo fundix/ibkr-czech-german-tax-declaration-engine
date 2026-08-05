@@ -5,7 +5,7 @@ Golden end-to-end regression test for the CZ plugin (tax year 2024).
 Runs the FULL pipeline (CSV parsing -> enrichment -> FIFO engine -> CZ
 aggregation) on a synthetic dataset with independently HAND-COMPUTED expected
 values. The expected figures were derived on 2026-07-02 from the tax rules
-alone (per-leg FX per NSS 2 Afs 4/2019-35, §4/1/w time test, 100k annual
+alone (per-leg FX per NSS 2 Afs 4/2019-35, §4/1/u time test, 100k annual
 limit, §16/2 base rounding, §38f/8 per-state FTC cap, §146/1 DR tax rounding)
 using real ECB/ČNB rates fetched directly from the providers' public APIs —
 NOT from engine output. The engine matched all figures on first run
@@ -174,8 +174,11 @@ class TestGoldenE2ECz(FifoTestCaseBase):
         assert q2(line["sec_exempt_time_test_czk"]) == Decimal("21810.98")
         assert q2(line["opt_net_taxable_czk"]) == Decimal("4657.74")
         assert q2(line["combined_net_taxable_czk"]) == Decimal("24037.15")
-        # 136,256.86 CZK taxable proceeds > 100k threshold -> limit NOT applied
-        assert q2(line["annual_limit_eligible_proceeds_czk"]) == Decimal("136256.86")
+        # ALL disposal proceeds are tested against the threshold, including
+        # the 45,543.93 CZK the time test exempted (the two titles cannot be
+        # combined) -> 181,800.79 > 100k -> limit NOT applied. The taxable
+        # figures above are unaffected: the total was over the limit either way.
+        assert q2(line["annual_limit_eligible_proceeds_czk"]) == Decimal("181800.79")
         assert Decimal(line["annual_limit_applied"]) == 0
 
     def test_section_8_dividends_and_wht(self):

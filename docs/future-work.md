@@ -147,7 +147,7 @@ recommended execution order.
       CSVs, run daily/uniform/compare, browse summary/items/DAP-lines/review
       checklist, download exports. Phase 3 DONE (2026-07-03): portfolio view
       (EOY open FIFO lots via `ProcessingOutput.fifo_ledgers_by_asset_id`,
-      per-lot §4/1/w time-test countdown via pure `time_test_deadline()`,
+      per-lot §4/1/u time-test countdown via pure `time_test_deadline()`,
       EOY valuation, dividend overview per asset/month). Phase 4 DONE
       (2026-07-03): live quotes (Yahoo via requests, symbol_map.json
       overrides), unrealized P/L in CZK, allocation + value-history charts

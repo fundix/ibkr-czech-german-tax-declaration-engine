@@ -12,7 +12,7 @@ The CZ plugin (`src/countries/cz/`) computes Czech personal income tax figures f
 
 ```
 IBKR data → Core FIFO/enrichment → CzTaxItems
-  → Time test (§4/1/w)
+  → Time test (§4/1/u)
   → Annual exempt limit (100k CZK)
   → §10 loss offsetting
   → Foreign tax credit (§38f)
@@ -40,7 +40,7 @@ IBKR data → Core FIFO/enrichment → CzTaxItems
 - Every conversion produces an `FxConversionRecord` with full audit trail
 - If a ČNB rate cannot be obtained, the CZK amount is left empty and the item is flagged `PENDING_MANUAL_REVIEW` (the un-converted foreign amount is never treated as CZK)
 
-### Time Test (§4/1/w ZDP)
+### Time Test (§4/1/u ZDP)
 
 Securities held longer than 3 years (1095 days) are exempt. Applied to `SECURITY_DISPOSAL` items only — not to dividends, interest, or options.
 

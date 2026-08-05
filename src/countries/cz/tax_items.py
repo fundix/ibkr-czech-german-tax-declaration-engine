@@ -53,7 +53,7 @@ class CzTaxReviewStatus(Enum):
 
 class CzExemptionReason(Enum):
     """Why a CzTaxItem is exempt from Czech income tax."""
-    TIME_TEST_PASSED = auto()      # §4/1/w ZDP — holding period exceeded
+    TIME_TEST_PASSED = auto()      # §4/1/u ZDP — holding period exceeded
     ANNUAL_LIMIT_NOT_EXCEEDED = auto()  # Annual proceeds below CZK threshold
     NOT_APPLICABLE = auto()        # Item type not subject to exemption test
 
@@ -159,7 +159,7 @@ class CzTaxItem:
 
     # --- Short positions ---
     # True when the item realizes a SHORT position (short cover, closing or
-    # expiry of a written option). The §4/1/w holding-period time test can
+    # expiry of a written option). The §4/1/u holding-period time test can
     # never exempt such items: the security is not held between acquisition
     # and transfer (the sale precedes the purchase), and acquisition_date on
     # the item is the short OPENING date, not an ownership start.
