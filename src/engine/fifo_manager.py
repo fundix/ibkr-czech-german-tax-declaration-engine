@@ -30,6 +30,104 @@ _TaxClassifierCallable = Optional[Callable[[RealizedGainLoss], None]]
 
 logger = logging.getLogger(__name__)
 
+
+def split_position_flip_event(event: TradeEvent,
+                             available_long_qty: Decimal,
+                             available_short_qty: Decimal) -> List[TradeEvent]:
+    """Split a "C;O" flip trade into its close and open halves.
+
+    One IBKR trade both closes the existing position and opens the opposite
+    one. ``consume_long_lots_for_sale`` / ``consume_short_lots_for_cover``
+    handle that inline for the tax year, but only there: in historical
+    replay the remainder raises UserWarning, which marks the whole
+    reconstruction inconsistent and discards it. Splitting the event up
+    front against the ledger's current quantities lets replay apply both
+    halves with the real trade date and cost.
+
+    Monetary amounts are split proportionally by quantity; the per-unit
+    price is unchanged. Returns the event unchanged when it is not a flip
+    or when the split cannot be decided.
+
+    Ported from upstream f5228fd (uebber/ibkr-german-tax-declaration-engine).
+    """
+    if not getattr(event, "allows_position_flip", False):
+        return [event]
+    if event.quantity is None or event.quantity == Decimal(0):
+        return [event]
+
+    abs_qty = event.quantity.copy_abs()
+
+    if event.event_type == FinancialEventType.TRADE_SELL_LONG:
+        close_qty = min(abs_qty, available_long_qty)
+        close_type = FinancialEventType.TRADE_SELL_LONG
+        open_type = FinancialEventType.TRADE_SELL_SHORT_OPEN
+    elif event.event_type == FinancialEventType.TRADE_BUY_SHORT_COVER:
+        close_qty = min(abs_qty, available_short_qty)
+        close_type = FinancialEventType.TRADE_BUY_SHORT_COVER
+        open_type = FinancialEventType.TRADE_BUY_LONG
+    else:
+        logger.warning(
+            f"Position flip event {event.event_id} has unexpected type "
+            f"{event.event_type.name}. Processing as-is."
+        )
+        return [event]
+
+    if close_qty < Decimal(0):
+        close_qty = Decimal(0)
+    open_qty = abs_qty - close_qty
+
+    def _scaled(value: Optional[Decimal], ratio: Decimal) -> Optional[Decimal]:
+        return value * ratio if value is not None else None
+
+    def _make_sub_event(sub_type: FinancialEventType,
+                        sub_abs_qty: Decimal) -> TradeEvent:
+        ratio = sub_abs_qty / abs_qty
+        # Sign convention: buys positive, sells negative.
+        if sub_type in (FinancialEventType.TRADE_BUY_LONG,
+                        FinancialEventType.TRADE_BUY_SHORT_COVER):
+            signed_qty = sub_abs_qty
+        else:
+            signed_qty = -sub_abs_qty
+        return TradeEvent(
+            asset_internal_id=event.asset_internal_id,
+            event_date=event.event_date,
+            event_type=sub_type,
+            quantity=signed_qty,
+            price_foreign_currency=event.price_foreign_currency,
+            commission_foreign_currency=_scaled(event.commission_foreign_currency, ratio),
+            commission_currency=event.commission_currency,
+            commission_eur=_scaled(event.commission_eur, ratio),
+            net_proceeds_or_cost_basis_eur=_scaled(event.net_proceeds_or_cost_basis_eur, ratio),
+            related_option_event_id=None,  # a flip never arises from an option exercise
+            local_currency=event.local_currency,
+            gross_amount_foreign_currency=_scaled(event.gross_amount_foreign_currency, ratio),
+            gross_amount_eur=_scaled(event.gross_amount_eur, ratio),
+            ibkr_transaction_id=event.ibkr_transaction_id,
+            ibkr_activity_description=event.ibkr_activity_description,
+            ibkr_notes_codes=event.ibkr_notes_codes,
+        )
+
+    results: List[TradeEvent] = []
+    if close_qty > Decimal(0):
+        results.append(_make_sub_event(close_type, close_qty))
+    if open_qty > Decimal(0):
+        results.append(_make_sub_event(open_type, open_qty))
+
+    if not results:
+        logger.warning(
+            f"Position flip event {event.event_id}: both close and open "
+            f"quantities are zero. Skipping."
+        )
+        return []
+
+    logger.info(
+        f"Split position flip {event.ibkr_transaction_id or event.event_id}: "
+        f"{close_type.name}({close_qty}) + {open_type.name}({open_qty}) "
+        f"from total {abs_qty}."
+    )
+    return results
+
+
 @dataclass
 class FifoLot:
     acquisition_date: str  # YYYY-MM-DD
@@ -185,14 +283,25 @@ class FifoLedger:
 
             try:
                 if isinstance(hist_event, TradeEvent):
-                    if hist_event.event_type == FinancialEventType.TRADE_BUY_LONG:
-                        self.add_long_lot(hist_event)
-                    elif hist_event.event_type == FinancialEventType.TRADE_SELL_LONG:
-                        self.consume_long_lots_for_sale(hist_event, is_historical_simulation=True)
-                    elif hist_event.event_type == FinancialEventType.TRADE_SELL_SHORT_OPEN:
-                        self.add_short_lot(hist_event)
-                    elif hist_event.event_type == FinancialEventType.TRADE_BUY_SHORT_COVER:
-                        self.consume_short_lots_for_cover(hist_event, is_historical_simulation=True)
+                    # A "C;O" flip is split against the ledger's current
+                    # quantities: the inline remainder handling in the consume
+                    # methods is disabled during replay, so without this the
+                    # flip would raise UserWarning and discard the whole
+                    # reconstruction.
+                    sub_events = split_position_flip_event(
+                        hist_event,
+                        sum((lot.quantity for lot in self.lots), Decimal(0)),
+                        sum((lot.quantity_shorted for lot in self.short_lots), Decimal(0)),
+                    )
+                    for sub_event in sub_events:
+                        if sub_event.event_type == FinancialEventType.TRADE_BUY_LONG:
+                            self.add_long_lot(sub_event)
+                        elif sub_event.event_type == FinancialEventType.TRADE_SELL_LONG:
+                            self.consume_long_lots_for_sale(sub_event, is_historical_simulation=True)
+                        elif sub_event.event_type == FinancialEventType.TRADE_SELL_SHORT_OPEN:
+                            self.add_short_lot(sub_event)
+                        elif sub_event.event_type == FinancialEventType.TRADE_BUY_SHORT_COVER:
+                            self.consume_short_lots_for_cover(sub_event, is_historical_simulation=True)
                 elif isinstance(hist_event, CorpActionSplitForward):
                     self.adjust_lots_for_split(hist_event)
                 elif isinstance(hist_event, CorpActionStockDividend):

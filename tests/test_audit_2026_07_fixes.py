@@ -1068,6 +1068,88 @@ class TestM19PositionFlip:
         assert ledger.lots[0].quantity == Decimal("5")
         assert ledger.lots[0].total_cost_basis_eur == Decimal("50")
 
+    def test_flip_survives_historical_replay(self):
+        """A flip inside the replayed history must open the opposite position.
+
+        Reproduces the real NU trade (2025-07-23, BUY 40 against a 20 short):
+        the inline remainder handling is disabled during replay, so before the
+        split the cover raised UserWarning, marked the reconstruction
+        inconsistent and discarded it — losing the real acquisition date.
+        """
+        from src.domain.enums import FinancialEventType
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        stock = _soy_stock(symbol="NU", qty="20", cost="260")
+        aid = stock.internal_asset_id
+
+        short_open = _trade(
+            aid, "2025-07-23", Decimal("-20"), Decimal("240"), "1",
+            event_type=FinancialEventType.TRADE_SELL_SHORT_OPEN,
+        )
+        flip = _trade(
+            aid, "2025-07-23", Decimal("40"), Decimal("520"), "4371904017",
+            event_type=FinancialEventType.TRADE_BUY_SHORT_COVER,
+        )
+        flip.allows_position_flip = True
+
+        ledger.initialize_lots_from_soy(stock, [short_open, flip], tax_year=2026)
+
+        # Reconstruction survived: one long lot of 20, real trade date, and
+        # half the flip's cost (20 of 40 units) — not a 31 Dec fallback lot.
+        assert len(ledger.lots) == 1
+        assert ledger.lots[0].quantity == Decimal("20")
+        assert ledger.lots[0].acquisition_date == "2025-07-23"
+        assert ledger.lots[0].total_cost_basis_eur == Decimal("260")
+        assert not ledger.lots[0].source_transaction_id.startswith("SOY_")
+        assert ledger.short_lots == []
+
+    def test_split_close_only_when_position_fully_absorbs_flip(self):
+        """C;O whose quantity the existing position absorbs is a pure close."""
+        from src.domain.enums import FinancialEventType
+        from src.engine.fifo_manager import split_position_flip_event
+
+        aid = uuid.uuid4()
+        flip = _trade(
+            aid, "2025-07-23", Decimal("40"), Decimal("520"), "9",
+            event_type=FinancialEventType.TRADE_BUY_SHORT_COVER,
+        )
+        flip.allows_position_flip = True
+
+        subs = split_position_flip_event(flip, Decimal("0"), Decimal("60"))
+        assert len(subs) == 1
+        assert subs[0].event_type == FinancialEventType.TRADE_BUY_SHORT_COVER
+        assert subs[0].quantity == Decimal("40")
+
+    def test_split_apportions_amounts_and_keeps_non_flip_untouched(self):
+        from src.domain.enums import FinancialEventType
+        from src.engine.fifo_manager import split_position_flip_event
+
+        aid = uuid.uuid4()
+        plain = _trade(aid, "2025-07-23", Decimal("40"), Decimal("520"), "9",
+                       event_type=FinancialEventType.TRADE_BUY_SHORT_COVER)
+        assert split_position_flip_event(plain, Decimal("0"), Decimal("5")) == [plain]
+
+        flip = _trade(aid, "2025-07-23", Decimal("40"), Decimal("520"), "9",
+                      event_type=FinancialEventType.TRADE_BUY_SHORT_COVER)
+        flip.allows_position_flip = True
+        flip.commission_eur = Decimal("4")
+
+        close, open_ = split_position_flip_event(flip, Decimal("0"), Decimal("10"))
+        assert (close.event_type, close.quantity) == (
+            FinancialEventType.TRADE_BUY_SHORT_COVER, Decimal("10"))
+        assert (open_.event_type, open_.quantity) == (
+            FinancialEventType.TRADE_BUY_LONG, Decimal("30"))
+        # Amounts split proportionally; the per-unit price is unchanged.
+        assert close.net_proceeds_or_cost_basis_eur == Decimal("130")
+        assert open_.net_proceeds_or_cost_basis_eur == Decimal("390")
+        assert close.commission_eur == Decimal("1")
+        assert open_.commission_eur == Decimal("3")
+        assert open_.price_foreign_currency == flip.price_foreign_currency
+        # Sub-events must not re-split, and keep the source trade traceable.
+        assert not getattr(open_, "allows_position_flip", False)
+        assert open_.ibkr_transaction_id == "9"
+
     def test_without_flag_insufficient_lots_still_fail(self):
         import pytest as _pytest
 
