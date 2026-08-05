@@ -811,7 +811,7 @@ class TestDisposalsAndCompare:
         assert any("failed FX" in n for n in data["notes"])
 
     def test_compare_runs_detects_taxable_exempt_flip(self, service):
-        # Same gross gain/proceeds/cost in both runs; only the §4/1/w
+        # Same gross gain/proceeds/cost in both runs; only the §4/1/u
         # exemption flips — the symbol must still surface as changed.
         self._write_run(service, "run-ta", {}, [
             self._sale("FLIPCO", "1000.00", "5000.00", "4000.00",

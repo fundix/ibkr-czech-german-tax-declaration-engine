@@ -7,7 +7,7 @@ for matching sold securities to their purchase lots, provided purchases
 precede sales (GFŘ výklad; only business-asset holders are restricted to
 FIFO / weighted average per účetnictví). The chosen method decides *which*
 lot is matched to each sale, which changes both the acquisition cost **and**
-the time-test result (§4/1/w).
+the time-test result (§4/1/u).
 
 This module defines the method enum and the small, pure helpers the
 ``FifoLedger`` uses to vary its consumption order / costing. The global

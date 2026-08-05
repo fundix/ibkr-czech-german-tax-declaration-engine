@@ -42,7 +42,7 @@
     </fieldset>
     <label>Párovací metoda (§10 ZDP)
       <select name="pairing_method" id="pairing-method">
-        <option value="fifo" data-desc="Prodej se páruje s nejdříve nakoupenými kusy (zákonný default). Nejdřív „vyčerpá“ staré nákupy, takže dlouho držené pozice snáze splní 3letý časový test (§4/1/w) a jsou osvobozené.">FIFO (nejstarší první)</option>
+        <option value="fifo" data-desc="Prodej se páruje s nejdříve nakoupenými kusy (zákonný default). Nejdřív „vyčerpá“ staré nákupy, takže dlouho držené pozice snáze splní 3letý časový test (§4/1/u) a jsou osvobozené.">FIFO (nejstarší první)</option>
         <option value="lifo" data-desc="Prodej se páruje s naposledy nakoupenými kusy. U nedávno rostoucích titulů dává vyšší pořizovací cenu, a tím nižší zisk — čerstvé nákupy ale časový test zpravidla nesplní.">LIFO (nejnovější první)</option>
         <option value="weighted_average" data-desc="Pořizovací cena = vážený průměr celého drženého poolu. Identita lotů pro časový test se drží podle FIFO, přepisuje se jen cena.">Vážený průměr</option>
         <option value="optimal" data-desc="Nástroj sám vybere kombinaci párování s nejnižší výslednou daní (nikdy není horší než FIFO). Počítá se pro každý titul zvlášť.">Daňově optimální</option>

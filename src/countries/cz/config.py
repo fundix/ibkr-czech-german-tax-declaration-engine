@@ -75,7 +75,23 @@ class CzTaxConfig:
         earlier = [y for y in known if y < tax_year]
         return table[earlier[-1]] if earlier else table[known[0]]
 
-    # --- Holding-period time test (§4/1/w ZDP) ---
+    # --- §4 odst. 1 ZDP letter designations ---
+    # The letters are renumbered by amendments, and the citation reaches
+    # user-facing review notes (and from there the PDF/XLSX exports), so it
+    # lives here instead of being hardcoded at every site. Confirmed by a tax
+    # advisor on 2026-08-05 for the wording in force: the holding-period time
+    # test is písm. u), the 100k proceeds limit písm. t) — NOT písm. w), which
+    # this engine cited until then.
+    #
+    # Years before the earliest entry are deliberately absent rather than
+    # assumed: the letters differed and are unverified, so citations for those
+    # years render as "§4 odst. 1 ZDP" without a letter. Add a year to the
+    # table once its designation is confirmed.
+    paragraph_4_letters_by_year: Dict[int, Dict[str, str]] = field(
+        default_factory=lambda: {2025: {"time_test": "u", "annual_limit": "t"}}
+    )
+
+    # --- Holding-period time test (§4 odst. 1 ZDP, see letters above) ---
     # Securities acquired after 2014-01-01: exempt if held > 3 years.
     time_test_enabled: bool = True
     holding_test_years: int = 3
@@ -104,6 +120,27 @@ class CzTaxConfig:
     def holding_test_days(self) -> int:
         """Threshold in days (years * 365). Item must exceed this to be exempt."""
         return self.holding_test_years * 365
+
+    def paragraph_4_citation(self, kind: str, tax_year: Optional[int] = None) -> str:
+        """Cite §4 odst. 1 ZDP with the letter valid for *tax_year*.
+
+        *kind* is ``"time_test"`` or ``"annual_limit"``. Falls back to the
+        paragraph without a letter when the year predates the earliest
+        confirmed designation — an unverified letter would be worse than none,
+        since the citation ends up in the preparer's review notes.
+        """
+        table = self.paragraph_4_letters_by_year
+        known = sorted(y for y in table if kind in table[y])
+        if not known:
+            return "§4 odst. 1 ZDP"
+        if tax_year is None:
+            letter = table[known[-1]][kind]
+        else:
+            earlier = [y for y in known if y <= tax_year]
+            if not earlier:
+                return "§4 odst. 1 ZDP"
+            letter = table[earlier[-1]][kind]
+        return f"§4 odst. 1 písm. {letter}) ZDP"
 
     # --- Foreign tax credit / §38f ZDP (zápočet daně) ---
     foreign_tax_credit_enabled: bool = True

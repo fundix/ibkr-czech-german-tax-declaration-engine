@@ -26,7 +26,7 @@ rate of its own date; short/option-premium legs at the opening date.
 
 Because each scenario runs in isolation, the security disposals in S3–S5
 have annual proceeds UNDER the 100k CZK limit and come out exempt
-(all-or-nothing §4/1/w rule) — deliberately kept that way, so these
+(all-or-nothing §4/1/u rule) — deliberately kept that way, so these
 scenarios also pin the under-limit exemption branch, complementing the
 over-limit branch pinned by ``test_golden_e2e_cz.py`` (and by S1 here,
 whose stock proceeds of 215,753 CZK exceed the limit).

@@ -172,7 +172,8 @@ class TestGoldenUniformMode(_UniformGoldenBase):
         assert q2(div_line["wht_paid_czk"]) == Decimal("349.20")
 
         s10 = cz_result.sections["cz_10_summary"].line_items
-        assert q2(s10["annual_limit_eligible_proceeds_czk"]) == Decimal("136827.89")
+        # Includes time-test-exempt proceeds (see test_golden_e2e_cz).
+        assert q2(s10["annual_limit_eligible_proceeds_czk"]) == Decimal("183135.63")
         assert Decimal(s10["annual_limit_applied"]) == 0
 
         liab = cz_result.sections["cz_tax_liability"].line_items

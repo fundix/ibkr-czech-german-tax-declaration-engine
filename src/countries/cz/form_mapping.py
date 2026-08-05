@@ -231,7 +231,7 @@ def build_form_mapping(
     if netting:
         sec10.lines.append(CzFormLine(
             code="CZ_DAP_10_EXEMPT_TIME_TEST",
-            label="Osvobozeno – časový test (§4/1/w)",
+            label="Osvobozeno – časový test (§4/1/u)",
             value=q(netting.securities.exempt_time_test_total),
             note="Pouze podklad; nezahrnuto v DZD",
         ))

@@ -204,12 +204,18 @@ class TestAnnualLimitExceeded:
 
 
 # =========================================================================
-# Test 3: Time-test exempt item ignored by annual limit
+# Test 3: Time-test exempt proceeds COUNT toward the annual limit
 # =========================================================================
 
-class TestTimeTestExemptIgnoredByAnnualLimit:
-    def test_time_test_exempt_not_counted(self):
-        """Item exempt via time test should NOT be in the annual-limit proceeds sum."""
+class TestTimeTestExemptCountsTowardAnnualLimit:
+    def test_time_test_exempt_proceeds_are_in_the_sum(self):
+        """All transfer proceeds are summed first, then holding is assessed.
+
+        The two exemption titles cannot be combined, so time-test-exempt
+        disposals must not be netted out of the threshold sum. Netting them
+        out under-taxes: here 200k of exempt proceeds would hide the 60k
+        taxable disposal under the 100k limit.
+        """
         cfg = CzTaxConfig(annual_exempt_limit_czk=Decimal("100000"))
         items = [
             # Time-test exempt (1200 days > 1095)
@@ -224,10 +230,25 @@ class TestTimeTestExemptIgnoredByAnnualLimit:
 
         proceeds = evaluate_annual_limit(items, cfg)
 
-        # Only the taxable item's proceeds count: 60k < 100k → exempt by annual limit
-        assert proceeds == Decimal("60000")
-        assert items[0].exempt_due_to_annual_limit is False  # already exempt by time test
+        # Both disposals count: 260k > 100k → the limit grants nothing.
+        assert proceeds == Decimal("260000")
+        assert items[0].exempt_due_to_annual_limit is False  # exempt by time test
+        assert items[1].exempt_due_to_annual_limit is False  # over the limit
+        assert items[1].is_taxable is True
+
+    def test_limit_still_applies_when_everything_is_under_it(self):
+        """The wider sum must not break the ordinary under-the-limit case."""
+        cfg = CzTaxConfig(annual_exempt_limit_czk=Decimal("100000"))
+        items = [
+            _sec_item(proceeds_czk=Decimal("30000"), gain_loss_czk=Decimal("9000"), holding_days=1200),
+            _sec_item(proceeds_czk=Decimal("40000"), gain_loss_czk=Decimal("5000"), holding_days=200),
+        ]
+        evaluate_time_test(items, cfg)
+        proceeds = evaluate_annual_limit(items, cfg)
+
+        assert proceeds == Decimal("70000")          # 30k exempt + 40k taxable
         assert items[1].exempt_due_to_annual_limit is True
+        assert items[1].is_taxable is False
 
 
 # =========================================================================

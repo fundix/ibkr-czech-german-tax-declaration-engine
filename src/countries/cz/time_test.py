@@ -1,6 +1,7 @@
 # src/countries/cz/time_test.py
 """
-Czech holding-period time test evaluator (§4 odst. 1 písm. w ZDP).
+Czech holding-period time test evaluator (§4 odst. 1 ZDP — písm. u) in the
+wording in force; the letter is year-mapped in ``CzTaxConfig``).
 
 Sets taxability fields on ``CzTaxItem`` objects:
 - ``is_taxable`` / ``is_exempt`` / ``exemption_reason``
@@ -15,7 +16,7 @@ Rules applied:
   assuming a direct issuer share ≤ 5 % (noted on the item).
 - **DIVIDEND / INTEREST**: always taxable (time test not applicable).
 - **OPTION_CLOSE / OPTION_EXPIRY_WORTHLESS**: time test NOT applied
-  (options are derivative instruments, not securities under §4/1/w).
+  (options are derivative instruments, not securities under §4/1/u).
 - If ``acquisition_date`` is missing on a disposal → ``PENDING_MANUAL_REVIEW``.
 
 The CZK 100k annual exempt limit lives in ``annual_limit.py`` (run AFTER
@@ -26,7 +27,7 @@ from __future__ import annotations
 import calendar
 import datetime
 import logging
-from typing import List
+from typing import List, Optional
 
 from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.tax_items import (
@@ -77,7 +78,7 @@ def time_test_deadline(
     acquisition_date: datetime.date,
     config: CzTaxConfig,
 ) -> datetime.date:
-    """Last day of the §4/1/w holding period for a security acquired on
+    """Last day of the §4/1/u holding period for a security acquired on
     *acquisition_date* — a disposal strictly AFTER this date is exempt.
 
     Single source of the deadline arithmetic (3-year test, pre-2014 6-month
@@ -108,13 +109,20 @@ _NO_TIME_TEST_ITEM_TYPES = {
 def evaluate_time_test(
     items: List[CzTaxItem],
     config: CzTaxConfig,
+    tax_year: Optional[int] = None,
 ) -> None:
     """
     Evaluate the Czech holding-period time test on *items* **in-place**.
 
     If ``config.time_test_enabled`` is ``False``, all items are marked
     taxable (no exemption applied).
+
+    *tax_year* only selects the §4 odst. 1 letter cited in the review notes
+    (the letter was renumbered); omitting it cites the latest known one.
     """
+    time_test_ref = config.paragraph_4_citation("time_test", tax_year)
+    limit_ref = config.paragraph_4_citation("annual_limit", tax_year)
+
     for item in items:
         if getattr(item, "fx_conversion_failed", False):
             # Foreign→CZK conversion failed for this item. Its CZK amounts are
@@ -154,7 +162,7 @@ def evaluate_time_test(
 
         if item.category_needs_review:
             # PRIVATE_SALE_ASSET / unknown category: may not be a security,
-            # so the §4/1/w exemptions must not be granted silently.
+            # so the §4/1 exemptions must not be granted silently.
             item.is_taxable = True
             item.is_exempt = False
             item.exemption_reason = None
@@ -162,8 +170,9 @@ def evaluate_time_test(
             item.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
             item.tax_review_note = (
                 f"Asset category '{item.asset_category}' may not be a security "
-                "— verify whether the §4/1/w time test and the 100k annual "
-                "limit apply. Item kept taxable as conservative default."
+                f"— verify whether the {time_test_ref} time test and the 100k "
+                f"annual limit ({limit_ref}) apply. Item kept taxable as "
+                "conservative default."
             )
             continue
 
@@ -177,8 +186,8 @@ def evaluate_time_test(
             item.included_in_tax_base = True
             item.tax_review_status = CzTaxReviewStatus.RESOLVED
             item.tax_review_note = (
-                "Short position (sale precedes purchase) — §4/1/w time test "
-                "not applicable; item is taxable."
+                f"Short position (sale precedes purchase) — {time_test_ref} "
+                "time test not applicable; item is taxable."
             )
             continue
 
@@ -240,7 +249,7 @@ def evaluate_time_test(
                 )
                 continue
 
-        # Apply the time test (§4/1/w ZDP): exempt only if the holding period
+        # Apply the time test (§4/1/u ZDP): exempt only if the holding period
         # EXCEEDS the threshold — time counted per §33 daňového řádu (the
         # period ends on the day of the anniversary). A fixed day-count
         # (years × 365) misfires whenever the window contains Feb 29, so the
@@ -272,7 +281,9 @@ def evaluate_time_test(
                 "the sale)"
             )
         else:
-            rule_desc = f"{config.holding_test_years} calendar years (§4/1/w ZDP)"
+            rule_desc = (
+                f"{config.holding_test_years} calendar years ({time_test_ref})"
+            )
 
         if is_exempt:
             item.is_taxable = False

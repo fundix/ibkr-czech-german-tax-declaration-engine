@@ -1,6 +1,6 @@
 # tests/test_time_test_deadline.py
 """
-Pure §4/1/w deadline helper — single source of the holding-period
+Pure §4/1/u deadline helper — single source of the holding-period
 arithmetic shared by the in-place evaluator and the portfolio countdown.
 """
 import datetime

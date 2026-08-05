@@ -166,7 +166,7 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
     @mcp.tool()
     def get_time_test_status(tax_year: int, symbol: Optional[str] = None,
                              run_id: Optional[str] = None) -> dict:
-        """Per-lot §4/1/w time-test countdown: for each open lot the 'exempt_from' date, days remaining, and status (exempt_now / running / not applicable for derivatives). Optionally filter by symbol."""
+        """Per-lot §4/1/u time-test countdown: for each open lot the 'exempt_from' date, days remaining, and status (exempt_now / running / not applicable for derivatives). Optionally filter by symbol."""
         run_id = _require_run(tax_year, run_id)
         overview = svc.time_test_overview(run_id, symbol)
         if overview is None:
@@ -201,14 +201,14 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
     @mcp.tool()
     def compare_runs(run_id_a: str, run_id_b: str,
                      fx_mode: Optional[str] = None) -> dict:
-        """Diff two computed runs (run ids from list_datasets): headline tax-liability lines plus per-symbol deltas — realized gain decomposed into proceeds vs cost-basis legs, plus taxable_gain_delta_czk so a pure §4/1/w exemption flip (same gross gain, different time-test outcome) still surfaces. All deltas are b − a. Use for what-ifs: run run_pipeline twice with different pairing_method (fifo vs lifo) or fx_mode (daily vs uniform), then compare. fx_mode defaults to a mode both runs share."""
+        """Diff two computed runs (run ids from list_datasets): headline tax-liability lines plus per-symbol deltas — realized gain decomposed into proceeds vs cost-basis legs, plus taxable_gain_delta_czk so a pure §4/1/u exemption flip (same gross gain, different time-test outcome) still surfaces. All deltas are b − a. Use for what-ifs: run run_pipeline twice with different pairing_method (fifo vs lifo) or fx_mode (daily vs uniform), then compare. fx_mode defaults to a mode both runs share."""
         return _jsonable(svc.compare_runs(run_id_a, run_id_b, fx_mode))
 
     @mcp.tool()
     def simulate_sale(tax_year: int, symbol: str, quantity: float,
                       price: Optional[float] = None,
                       run_id: Optional[str] = None) -> dict:
-        """Simulate selling N units of an open position: FIFO lots consumed, exempt vs taxable gain (§4/1/w), 100k annual-limit interplay with this year's realized proceeds, 15% tax estimate, and the wait-until date after which remaining lots become exempt. price is optional (live quote / EOY price used); converts at today's ČNB rate — an approximation, not tax advice."""
+        """Simulate selling N units of an open position: FIFO lots consumed, exempt vs taxable gain (§4/1/u), 100k annual-limit interplay with this year's realized proceeds, 15% tax estimate, and the wait-until date after which remaining lots become exempt. price is optional (live quote / EOY price used); converts at today's ČNB rate — an approximation, not tax advice."""
         run_id = _require_run(tax_year, run_id)
         sim = svc.simulate_sale(
             run_id, symbol,

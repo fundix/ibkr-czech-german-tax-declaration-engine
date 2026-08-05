@@ -10,9 +10,13 @@ Key design decisions:
 - **Metric used for the limit test**: ``proceeds_czk`` (gross disposal
   proceeds in CZK), NOT gain/loss.  This matches the legislative text
   which refers to "příjem" (income/proceeds), not "zisk" (profit).
-- **Eligible items**: only ``SECURITY_DISPOSAL`` items that are currently
-  ``is_taxable=True`` and ``included_in_tax_base=True`` after time-test.
-  Items already exempt via time test are excluded from the proceeds sum.
+- **Proceeds sum**: ALL ``SECURITY_DISPOSAL`` items with CZK proceeds,
+  including those the time test already exempted. The threshold is tested
+  on the year's total gross proceeds from transfers and only then is the
+  holding period assessed per item — the two exemption titles cannot be
+  combined, so time-test-exempt disposals must not be netted out of the sum.
+- **Exemptible items**: of those, only the ones still taxable after the
+  time test — an already-exempt item needs no second title.
 - **Options**: NOT eligible (derivative instruments, not securities).
 - **Dividends / Interest**: NOT eligible (§8 income, not §10 disposals).
 - **All-or-nothing**: if total proceeds exceed the threshold, ALL eligible
@@ -24,7 +28,7 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
 
 from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.tax_items import (
@@ -46,11 +50,13 @@ def evaluate_annual_limit(
     items: List[CzTaxItem],
     config: CzTaxConfig,
     has_fx: bool = True,
+    tax_year: Optional[int] = None,
 ) -> Decimal:
     """
     Evaluate the CZK annual exempt limit on *items* **in-place**.
 
-    Returns the total eligible proceeds used for the limit test
+    Returns the total disposal proceeds used for the limit test — all
+    security disposals with CZK proceeds, time-test-exempt ones included
     (for audit / summary purposes).
 
     Precondition: ``evaluate_time_test()`` has already run on *items*.
@@ -65,7 +71,7 @@ def evaluate_annual_limit(
     if not config.annual_exempt_limit_enabled:
         # Mark all eligible items as qualifies but not exempted
         for it in items:
-            if _is_eligible(it):
+            if _can_be_exempted(it):
                 it.qualifies_for_annual_limit = True
         return Decimal(0)
 
@@ -74,7 +80,7 @@ def evaluate_annual_limit(
         # proceeds against a CZK threshold. Mark eligibility for audit but keep
         # items taxable (conservative — no exemption without a valid CZK amount).
         for it in items:
-            if _is_eligible(it):
+            if _can_be_exempted(it):
                 it.qualifies_for_annual_limit = True
         logger.warning(
             "Annual exempt limit NOT applied: no FX converter configured, so "
@@ -86,18 +92,20 @@ def evaluate_annual_limit(
     threshold = config.annual_exempt_limit_czk
     ZERO = Decimal(0)
 
-    # --- Phase 1: identify eligible items and sum proceeds ---
+    # --- Phase 1: sum ALL disposal proceeds, then pick who the limit helps ---
+    # The threshold is tested on the year's total gross proceeds from
+    # security transfers — time-test-exempt disposals included. Only the
+    # still-taxable ones can be flipped by this title.
     eligible: List[CzTaxItem] = []
     total_proceeds = ZERO
 
     for it in items:
-        if not _is_eligible(it):
-            continue
+        if _counts_toward_limit(it):
+            total_proceeds += it.proceeds_czk
 
-        it.qualifies_for_annual_limit = True
-        proceeds = it.proceeds_czk if it.proceeds_czk is not None else ZERO
-        total_proceeds += proceeds
-        eligible.append(it)
+        if _can_be_exempted(it):
+            it.qualifies_for_annual_limit = True
+            eligible.append(it)
 
     # Disposals whose CZK proceeds are missing (failed FX conversion) make
     # the annual total unknowable: their proceeds are absent from the sum,
@@ -106,12 +114,13 @@ def evaluate_annual_limit(
     fx_failed_disposals = [
         it for it in items
         if it.item_type in _ANNUAL_LIMIT_ELIGIBLE_TYPES
-        and not it.is_exempt
         and it.proceeds_czk is None
     ]
 
     if not eligible:
-        return ZERO
+        # Nothing left for this title to exempt (e.g. every disposal already
+        # passed the time test) — but still report the tested total.
+        return total_proceeds
 
     # --- Phase 2: apply the all-or-nothing rule ---
     if total_proceeds <= threshold and fx_failed_disposals:
@@ -143,7 +152,8 @@ def evaluate_annual_limit(
             it.included_in_tax_base = False
             it.tax_review_status = CzTaxReviewStatus.RESOLVED
             it.tax_review_note = (
-                f"Exempt: annual disposal proceeds {total_proceeds} CZK "
+                f"Exempt ({config.paragraph_4_citation('annual_limit', tax_year)}): "
+                f"annual disposal proceeds {total_proceeds} CZK "
                 f"≤ {threshold} CZK threshold"
             )
         logger.info(
@@ -218,13 +228,28 @@ def evaluate_exempt_income_cap(
     return total_exempt_proceeds
 
 
-def _is_eligible(it: CzTaxItem) -> bool:
-    """Is this item eligible for the annual exempt limit test?
+def _counts_toward_limit(it: CzTaxItem) -> bool:
+    """Do this item's proceeds count toward the annual threshold?
 
-    Eligible = SECURITY_DISPOSAL + currently taxable + included in tax base
-    + has non-None proceeds_czk (items without CZK conversion cannot
-    participate in a CZK-denominated limit test).
-    Items already exempt (e.g. time test) are NOT eligible.
+    EVERY security disposal does — including ones the time test already
+    exempted. The threshold is tested on the year's total gross proceeds
+    from transfers; only then is the holding period assessed per item, and
+    the two exemption titles cannot be combined. Excluding time-test-exempt
+    disposals from the sum would understate the total and wrongly exempt a
+    year that is actually over the limit.
+    """
+    return (
+        it.item_type in _ANNUAL_LIMIT_ELIGIBLE_TYPES
+        and it.proceeds_czk is not None
+    )
+
+
+def _can_be_exempted(it: CzTaxItem) -> bool:
+    """Can the limit still change this item's outcome?
+
+    Only disposals that are currently taxable: an item already exempt via
+    the time test needs no second title, and one without CZK proceeds
+    cannot participate in a CZK-denominated test.
     """
     return (
         it.item_type in _ANNUAL_LIMIT_ELIGIBLE_TYPES

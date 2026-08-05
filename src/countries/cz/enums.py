@@ -54,7 +54,7 @@ def category_requires_manual_review(asset_category_name: str) -> bool:
     """Categories whose CZ treatment must not be assumed silently.
 
     PRIVATE_SALE_ASSET (Gold-ETC, crypto-ETP, …) and unknown categories may
-    not be securities at all — the §4/1/w time test and the 100k annual
+    not be securities at all — the §4/1/u time test and the 100k annual
     limit apply only to securities, so such items must go through manual
     review instead of receiving the exemptions by a silent default.
     """

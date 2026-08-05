@@ -41,12 +41,17 @@ Definitive reference for Czech tax rules as implemented in this project. Each ru
 |------|--------|
 | Stocks, bonds, ETFs → CZ_10_SECURITIES | **IMPLEMENTED** |
 | Options, CFDs → CZ_10_OPTIONS | **IMPLEMENTED** |
-| Options are derivative instruments, NOT securities under §4/1/w | **IMPLEMENTED** — no time test for options |
+| Options are derivative instruments, NOT securities under §4/1/u | **IMPLEMENTED** — no time test for options |
 | PrivateSaleAsset → CZ_10_SECURITIES | **IMPLEMENTED** |
 
 ---
 
-## Time Test (§4/1/w ZDP)
+## Time Test (§4 odst. 1 písm. u ZDP)
+
+The letter is year-mapped in `CzTaxConfig.paragraph_4_letters_by_year` — it was
+renumbered, and this engine cited písm. w) until a tax advisor corrected it on
+2026-08-05 (time test = u, the 100k limit = t). Years before the earliest
+confirmed entry cite the paragraph without a letter rather than guessing.
 
 | Rule | Status |
 |------|--------|
@@ -61,7 +66,7 @@ Definitive reference for Czech tax rules as implemented in this project. Each ru
 
 ---
 
-## Annual Exempt Limit (2025+ Amendment)
+## Annual Exempt Limit (§4 odst. 1 písm. t ZDP, 2025+ Amendment)
 
 | Rule | Status |
 |------|--------|
@@ -70,7 +75,8 @@ Definitive reference for Czech tax rules as implemented in this project. Each ru
 | Applies only to SECURITY_DISPOSAL items | **IMPLEMENTED** |
 | Options NOT eligible | **IMPLEMENTED** |
 | Dividends/interest NOT eligible | **IMPLEMENTED** |
-| Time-test-exempt items excluded from proceeds sum | **IMPLEMENTED** |
+| ALL disposal proceeds counted in the sum, time-test-exempt included | **IMPLEMENTED** — the two exemption titles cannot be combined; netting exempt sales out of the sum under-taxed the year (per advisor 2026-08-05) |
+| Only still-taxable disposals can be flipped by this title | **IMPLEMENTED** |
 | All-or-nothing: if total exceeds threshold, ALL eligible items taxable | **IMPLEMENTED** |
 | Items without `proceeds_czk` (no FX converter) excluded from test | **IMPLEMENTED** |
 | Configurable (enable/disable, custom threshold) | **IMPLEMENTED** |

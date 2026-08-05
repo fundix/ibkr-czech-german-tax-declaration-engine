@@ -134,11 +134,13 @@ class CzechTaxAggregator:
         )
 
         # --- Phase 2: Apply time test (sets taxability fields in-place) ---
-        evaluate_time_test(items, self.config)
+        evaluate_time_test(items, self.config, tax_year)
 
         # --- Phase 3: Apply annual exempt limit (after time test) ---
         has_fx = self._fx is not None
-        annual_limit_proceeds = evaluate_annual_limit(items, self.config, has_fx)
+        annual_limit_proceeds = evaluate_annual_limit(
+            items, self.config, has_fx, tax_year
+        )
 
         # --- Phase 3b: §4/3 ZDP cap on time-test-exempt income (2025+) ---
         evaluate_exempt_income_cap(items, self.config, tax_year, has_fx)

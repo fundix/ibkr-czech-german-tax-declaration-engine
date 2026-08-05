@@ -115,7 +115,7 @@ Flex umí max. **365 dní na jeden běh**, proto historie po letech:
 
 | Query | Období | Proč |
 |---|---|---|
-| Trades | každý rok od založení účtu do 31. 12. daňového roku | historie je nutná pro rekonstrukci SOY pozic a časový test (§4/1/w — nákupy před >3 lety!) |
+| Trades | každý rok od založení účtu do 31. 12. daňového roku | historie je nutná pro rekonstrukci SOY pozic a časový test (§4/1/u — nákupy před >3 lety!) |
 | CorpActions | stejné roky jako Trades | splity z dřívějších let ovlivňují SOY rekonstrukci |
 | Cash | 1. 1. – 31. 12. daňového roku | starší dividendy nejsou potřeba |
 | Positions | jednodenní rozsah 31. 12. roku PŘED daňovým rokem (SOY) a znovu 31. 12. daňového roku (EOY) | dva běhy téže query |
