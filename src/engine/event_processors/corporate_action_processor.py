@@ -10,6 +10,7 @@ from src.domain.results import RealizedGainLoss
 from src.engine.fifo_manager import FifoLedger
 from .base_processor import EventProcessor
 from src.domain.enums import FinancialEventType # Added for checking event type
+from src.engine.merger_policy import MergerMechanics, merger_event_key
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +102,48 @@ class MergerStockProcessor(EventProcessor):
             logger.error(f"MergerStockProcessor received event with type {event.event_type} but expected CORP_MERGER_STOCK. ID: {event.event_id}")
             return []
 
-        logger.warning(f"Processing {event.event_type.name} for asset {ledger.asset_internal_id} on {event.event_date} (ID: {event.event_id}) - FIFO Lot Adjustment LOGIC NOT IMPLEMENTED YET as per PRD.")
-        return []
+        # A stock-for-stock merger is either a deferral (§23b/§23c: cost and
+        # holding period carry over) or a taxable disposal at the fair value of
+        # the consideration. Which one cannot be read off the statement — it
+        # follows from the tax residence and legal form of the companies — so
+        # the regime is recorded per event and looked up here.
+        #
+        # Returning [] as this used to would leave the old asset's lots in place
+        # and the new asset with none: wrong positions, and a realised gain or a
+        # taxed deferral either silently missing or silently invented. Refusing
+        # is the only safe answer while the mechanics are unimplemented.
+        asset_resolver = context.get('asset_resolver')
+        old_asset = asset_resolver.get_asset_by_id(event.asset_internal_id) if asset_resolver else None
+        new_asset = asset_resolver.get_asset_by_id(event.new_asset_internal_id) if asset_resolver else None
+
+        key = merger_event_key(
+            action_id=getattr(event, 'ca_action_id_ibkr', None) or event.ibkr_transaction_id,
+            event_date=event.event_date,
+            old_symbol=getattr(old_asset, 'ibkr_symbol', None),
+            new_symbol=getattr(new_asset, 'ibkr_symbol', None),
+        )
+        policy = context.get('merger_policy')
+        if policy is None:
+            raise ValueError(
+                f"Stock-for-stock merger '{key}' cannot be processed: no merger "
+                f"policy is configured for this run, so there is nothing to say "
+                f"whether the lots carry over or are realised."
+            )
+
+        decision = policy.decide(key)
+        if not decision.is_decided:
+            # The policy writes this text — it is the one that knows the law.
+            raise ValueError(decision.reason)
+
+        # The mechanics are chosen; neither is built yet. Naming the decision
+        # makes clear it was read rather than lost.
+        raise ValueError(
+            f"Stock-for-stock merger '{key}' resolves to "
+            f"{decision.mechanics.name}"
+            f"{f' [{decision.label}]' if decision.label else ''}, but applying "
+            f"it is not implemented yet — refusing rather than reporting "
+            f"figures that ignore the merger."
+        )
 
 class ExpireDividendRightsProcessor(EventProcessor):
     def process(self, event: FinancialEvent, ledger: FifoLedger, context: Dict[str, Any]) -> List[RealizedGainLoss]:

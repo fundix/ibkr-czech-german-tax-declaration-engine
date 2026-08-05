@@ -190,6 +190,7 @@ def run_main_calculations(
     internal_calculation_precision: int, # Renamed from internal_working_precision
     decimal_rounding_mode: str,
     tax_classifier: Optional[Any] = None,
+    merger_policy: Optional[Any] = None,
     pairing_method: PairingMethod = PairingMethod.FIFO,
 ) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger]]:
     """
@@ -386,6 +387,7 @@ def run_main_calculations(
                     'pending_option_adjustments': pending_option_adjustments,
                     'currency_converter': currency_converter,
                     'tax_classifier': tax_classifier,
+                    'merger_policy': merger_policy,
                 }
                 logger.debug(f"Dispatching event {event.event_id} ({event.event_type.name}) to {type(processor).__name__}")
 
