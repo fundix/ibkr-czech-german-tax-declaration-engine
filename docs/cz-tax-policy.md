@@ -83,6 +83,44 @@ confirmed entry cite the paragraph without a letter rather than guessing.
 
 ---
 
+## Mergers — stock-for-stock exchange (§23b / §23c ZDP)
+
+Per a tax advisor's answer of 2026-08-05 (question in
+`docs/otazky-danovy-poradce-fuze.md`) these transactions split in two, with
+opposite consequences, and **the statement cannot tell them apart** — what
+decides is the tax residence and legal form of the companies involved, not the
+venue, ticker or ISIN.
+
+| Rule | Status |
+|------|--------|
+| Regime recorded per event in `cache/merger_treatments.json` (hand-edited, like the classification cache) | **IMPLEMENTED** |
+| Unclassified merger → run refuses, naming the key, the choices and the evidence needed | **IMPLEMENTED** |
+| Regime → ledger mechanics (§23b/§23c → carry-over; otherwise → taxable disposal) | **IMPLEMENTED** |
+| Applying carry-over (lot transfer, cost and holding period preserved) | **NOT IMPLEMENTED** |
+| Applying a taxable disposal (RGL at the consideration's fair value) | **NOT IMPLEMENTED** — needs `HistoricalPriceProvider` (PR #36) |
+| `holding_period_start` separate from `acquisition_date` | **NOT IMPLEMENTED** — required, see below |
+| Cash doplatek / `cash in lieu` for fractional shares | **NOT IMPLEMENTED** |
+| §23d odst. 1 notice to the tax office before the transaction | **NOT IMPLEMENTED** — compliance flag only |
+| Merger replayed during SOY reconstruction | **NOT IMPLEMENTED** — `initialize_lots_from_soy` handles splits and stock dividends, not mergers |
+
+### Why the holding period needs its own field
+
+For a qualified transaction the advisor confirmed two things that pull in
+opposite directions:
+
+- the previous holding period **counts** toward the 3-year test, and
+- the pre-2014 six-month grandfathering **does not** carry to a share issued
+  after 2014 (NSS 3 Afs 249/2024-45).
+
+`time_test.py` picks the regime from `acquisition_date < 2014-01-01` and
+measures the period from the same field. Carrying an old date over would keep
+the holding period correctly but also wrongly hand the new share the pre-2014
+six-month test. The two decisions need two dates: the acquisition (merger date,
+selecting the current regime) and the holding-period start (the original
+purchase).
+
+---
+
 ## Loss Offsetting (§10)
 
 | Rule | Status |

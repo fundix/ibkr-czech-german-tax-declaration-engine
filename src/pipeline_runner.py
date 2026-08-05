@@ -139,6 +139,7 @@ def run_core_processing_pipeline(
             internal_calculation_precision=config.INTERNAL_CALCULATION_PRECISION, # Renamed parameter
             decimal_rounding_mode=config.DECIMAL_ROUNDING_MODE,
             tax_classifier=_tax_classifier.classify,
+            merger_policy=getattr(_tax_plugin, "get_merger_policy", lambda: None)(),
             pairing_method=pairing_method,
         )
     except Exception as e:

@@ -359,6 +359,18 @@ class GermanTaxPlugin:
     def country_code(self) -> str:
         return "de"
 
+    def get_merger_policy(self) -> None:
+        """No German merger rule is on file in this fork.
+
+        Upstream treats a stock-for-stock merger as tax-neutral (§20 Abs 4a
+        EStG) and transfers the lots. That rule is deliberately NOT asserted
+        here: it was never ported, and inventing it would put an unverified
+        treatment into someone's return. Returning None makes the engine refuse
+        such an event, which is the honest state — see
+        ``src/engine/merger_policy.py``.
+        """
+        return None
+
     def get_tax_classifier(self) -> GermanTaxClassifier:
         return GermanTaxClassifier()
 

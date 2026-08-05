@@ -199,3 +199,12 @@ class TaxPlugin(Protocol):
 
     def get_output_renderer(self) -> OutputRenderer:
         ...
+
+    def get_merger_policy(self) -> Optional["MergerPolicy"]:
+        """How this jurisdiction treats a stock-for-stock merger in the ledger.
+
+        ``None`` means the country module has no rule on file, and the engine
+        will refuse such an event rather than pick a treatment. See
+        ``src/engine/merger_policy.py``.
+        """
+        ...

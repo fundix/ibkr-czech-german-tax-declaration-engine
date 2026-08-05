@@ -39,6 +39,7 @@ from src.countries.cz.loss_offsetting import CzLossOffsettingResult, compute_los
 from src.countries.cz.form_mapping import CzFormMappingResult, build_form_mapping
 from src.countries.cz.tax_liability import CzTaxLiabilitySummary, compute_tax_liability
 from src.countries.cz.tax_items import CzTaxItem, CzTaxItemType, CzTaxReviewStatus, CzWhtRecord
+from src.countries.cz.merger_treatment import CzMergerPolicy
 from src.countries.cz.time_test import evaluate_time_test
 from src.domain.assets import Asset
 from src.domain.enums import AssetCategory, FinancialEventType
@@ -450,6 +451,10 @@ class CzechTaxPlugin:
 
     def get_tax_classifier(self) -> CzechTaxClassifier:
         return CzechTaxClassifier(config=self._config)
+
+    def get_merger_policy(self) -> CzMergerPolicy:
+        """Czech §23b/§23c regimes, as recorded per merger event."""
+        return CzMergerPolicy()
 
     def get_tax_aggregator(self) -> CzechTaxAggregator:
         fx_converter: Optional[CzCurrencyConverter] = None
