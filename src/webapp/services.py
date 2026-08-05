@@ -25,6 +25,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import logging
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -59,6 +60,12 @@ FX_MODES = ("daily", "uniform", "compare")
 # Single-method pairing choices offered in the web GUI (the full FX×method
 # matrix / 'compare' lives on the CLI — `--cz-pairing-method compare`).
 PAIRING_METHODS = ("fifo", "lifo", "weighted_average", "optimal")
+
+# Result items that represent a realized §10 disposal (carry gain/loss legs).
+DISPOSAL_ITEM_TYPES = ("SECURITY_DISPOSAL", "OPTION_CLOSE", "OPTION_EXPIRY_WORTHLESS")
+
+# OCC option keys end with yymmdd + C/P + 8-digit strike ("SOFI  260417P00020000").
+_OCC_KEY_TAIL = re.compile(r"\d{6}[CP]\d{8}$")
 
 # Placeholder account label until real multi-account support lands. Runs are
 # tagged with the IBKR account id(s) found in their inputs; a run with no
@@ -1527,6 +1534,345 @@ class RunService:
             })
         return {"as_of": today.isoformat(), "tax_year": pf.get("tax_year"),
                 "positions": positions}
+
+    def disposal_summary(
+        self, run_id: str, mode: str, symbol: Optional[str] = None,
+        include_lots: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """Realized §10 disposals from a persisted run.
+
+        Per-symbol aggregation always; per-lot pairing rows (which acquisition
+        each sale consumed) when ``symbol`` is given or ``include_lots`` is
+        True — kept opt-in so a busy year doesn't flood the MCP client.
+
+        Single source for the MCP tool. ``symbol`` matches the exact asset
+        symbol, and heuristically the options on that underlying: both option
+        key styles (OCC ``PYPL  260731C00061000`` and marker-first
+        ``C TUI  20260619 9 M``), plus a description-prefix fallback for
+        listings whose stock ticker differs from the option key's underlying
+        token (stock ``TUI1`` vs option ``C TUI …`` — IBKR's option
+        description starts with the stock ticker, "TUI1 19DEC25 6.4 C").
+        The per-lot rows always show exact symbols.
+        """
+        result = self.load_result(run_id, mode)
+        if result is None:
+            return None
+        TWO = Decimal("0.01")
+        want = (symbol or "").strip().upper()
+
+        def _matches(sym: str, category: Optional[str],
+                     description: Optional[str]) -> bool:
+            if not want:
+                return True
+            up = sym.upper()
+            if up == want:
+                return True
+            if category != "OPTION":
+                return False
+            if _OCC_KEY_TAIL.search(up):           # OCC: underlying first
+                return up.startswith(want + " ")
+            if (up[:2] in ("C ", "P ")             # marker-first key style
+                    and up[2:].lstrip().startswith(want + " ")):
+                return True
+            return (description or "").upper().startswith(want + " ")
+
+        by_symbol: Dict[str, Dict[str, Any]] = {}
+        lots: List[Dict[str, Any]] = []
+        totals = {
+            "count": 0, "proceeds_czk": Decimal(0), "cost_basis_czk": Decimal(0),
+            "gain_loss_czk": Decimal(0), "taxable_gain_loss_czk": Decimal(0),
+            "exempt_gain_loss_czk": Decimal(0), "fx_failed_count": 0,
+        }
+
+        def _q2(value) -> Optional[Decimal]:
+            return None if value is None else Decimal(value).quantize(TWO)
+
+        for it in result.get("items", []):
+            if it.get("item_type") not in DISPOSAL_ITEM_TYPES:
+                continue
+            sym = it.get("asset_symbol") or "?"
+            if not _matches(sym, it.get("asset_category"),
+                            it.get("asset_description")):
+                continue
+            gain = Decimal(it.get("gain_loss_czk") or 0)
+            proceeds = Decimal(it.get("proceeds_czk") or 0)
+            cost = Decimal(it.get("cost_basis_czk") or 0)
+            # A null CZK leg means the FX conversion FAILED (item_builder
+            # contract) — the money is unknown, not zero. Sums below coerce
+            # nulls to 0, so flag every affected item loudly.
+            fx_failed = bool(it.get("fx_conversion_failed")) or any(
+                it.get(k) is None for k in
+                ("proceeds_czk", "cost_basis_czk", "gain_loss_czk"))
+            a = by_symbol.setdefault(sym, {
+                "symbol": sym, "description": it.get("asset_description"),
+                "category": it.get("asset_category"), "count": 0,
+                "quantity_sold": Decimal(0), "proceeds_czk": Decimal(0),
+                "cost_basis_czk": Decimal(0), "gain_loss_czk": Decimal(0),
+                "taxable_gain_loss_czk": Decimal(0),
+                "exempt_gain_loss_czk": Decimal(0), "fx_failed_count": 0,
+                "first_sale": it.get("event_date"),
+                "last_sale": it.get("event_date"),
+            })
+            if fx_failed:
+                a["fx_failed_count"] += 1
+                totals["fx_failed_count"] += 1
+            a["count"] += 1
+            a["quantity_sold"] += Decimal(it.get("quantity") or 0)
+            a["proceeds_czk"] += proceeds
+            a["cost_basis_czk"] += cost
+            a["gain_loss_czk"] += gain
+            totals["count"] += 1
+            totals["proceeds_czk"] += proceeds
+            totals["cost_basis_czk"] += cost
+            totals["gain_loss_czk"] += gain
+            if it.get("is_exempt"):
+                a["exempt_gain_loss_czk"] += gain
+                totals["exempt_gain_loss_czk"] += gain
+            elif it.get("is_taxable"):
+                a["taxable_gain_loss_czk"] += gain
+                totals["taxable_gain_loss_czk"] += gain
+            d = it.get("event_date")
+            if d:
+                a["first_sale"] = min(a["first_sale"] or d, d)
+                a["last_sale"] = max(a["last_sale"] or d, d)
+            if want or include_lots:
+                lots.append({
+                    "symbol": sym, "item_type": it.get("item_type"),
+                    "sale_date": it.get("event_date"),
+                    "acquisition_date": it.get("acquisition_date"),
+                    "holding_period_days": it.get("holding_period_days"),
+                    "quantity": it.get("quantity"),
+                    "proceeds_czk": _q2(it.get("proceeds_czk")),
+                    "cost_basis_czk": _q2(it.get("cost_basis_czk")),
+                    "gain_loss_czk": _q2(it.get("gain_loss_czk")),
+                    "is_taxable": it.get("is_taxable"),
+                    "is_exempt": it.get("is_exempt"),
+                    "exemption_reason": it.get("exemption_reason"),
+                    "tax_review_status": it.get("tax_review_status"),
+                })
+
+        for a in by_symbol.values():
+            for key in ("proceeds_czk", "cost_basis_czk", "gain_loss_czk",
+                        "taxable_gain_loss_czk", "exempt_gain_loss_czk"):
+                a[key] = a[key].quantize(TWO)
+        for key in ("proceeds_czk", "cost_basis_czk", "gain_loss_czk",
+                    "taxable_gain_loss_czk", "exempt_gain_loss_czk"):
+            totals[key] = totals[key].quantize(TWO)
+
+        out: Dict[str, Any] = {
+            "symbol_filter": symbol, "totals": totals,
+            "by_symbol": sorted(by_symbol.values(),
+                                key=lambda a: abs(a["gain_loss_czk"]),
+                                reverse=True),
+            "lots": sorted(lots, key=lambda l: (l["sale_date"] or "",
+                                                l["symbol"])),
+            "note": ("Gross per-item aggregation; the §10 taxable netting "
+                     "(cross-symbol loss offset, annual limit) is in "
+                     "get_tax_summary → cz_10_summary."),
+        }
+        if not lots and not (want or include_lots):
+            out["lot_detail"] = ("Pass symbol=... or include_lots=true for "
+                                 "per-lot pairing rows.")
+        if totals["fx_failed_count"]:
+            out["fx_warning"] = (
+                f"WARNING: {totals['fx_failed_count']} disposal(s) have a "
+                f"failed FX→CZK conversion — their null money legs count as 0 "
+                f"in these sums, so the affected gains are UNKNOWN, not zero. "
+                f"See per-lot rows / get_pending_review_items."
+            )
+        return out
+
+    # Headline liability lines diffed by compare_runs (order = display order).
+    _COMPARE_LIABILITY_KEYS = (
+        "taxable_dividends_czk", "taxable_interest_czk",
+        "taxable_securities_net_czk", "taxable_options_net_czk",
+        "combined_taxable_base_czk", "gross_czech_tax_czk",
+        "final_creditable_ftc_czk", "final_czech_tax_after_credit_czk",
+    )
+
+    def compare_runs(
+        self, run_id_a: str, run_id_b: str, mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Diff two persisted runs: headline liability lines plus per-symbol
+        realized-gain deltas decomposed into proceeds vs cost-basis legs.
+
+        Built for pairing-method / FX-mode what-ifs (FIFO vs LIFO runs of the
+        same year). All deltas are ``b − a``. Raises ValueError on unknown
+        run ids or when the runs share no FX mode.
+        """
+        meta_a = self.get_run(run_id_a)
+        if meta_a is None:
+            raise ValueError(f"Run '{run_id_a}' not found — list_datasets shows recent run ids.")
+        meta_b = self.get_run(run_id_b)
+        if meta_b is None:
+            raise ValueError(f"Run '{run_id_b}' not found — list_datasets shows recent run ids.")
+        modes_a = meta_a.get("modes") or ["daily"]
+        modes_b = meta_b.get("modes") or ["daily"]
+        if mode is None:
+            shared = [m for m in modes_a if m in modes_b]
+            if not shared:
+                raise ValueError(
+                    f"No shared FX mode: {run_id_a} has {modes_a}, "
+                    f"{run_id_b} has {modes_b}."
+                )
+            mode = "daily" if "daily" in shared else shared[0]
+        elif mode not in modes_a or mode not in modes_b:
+            raise ValueError(
+                f"FX mode '{mode}' not available in both runs: {run_id_a} "
+                f"has {modes_a}, {run_id_b} has {modes_b}. Omit fx_mode to "
+                f"compare on a mode both runs share."
+            )
+        result_a = self.load_result(run_id_a, mode)
+        if result_a is None:
+            raise ValueError(
+                f"Run '{run_id_a}' has no '{mode}' result file (meta lists "
+                f"modes {modes_a}) — re-run run_pipeline."
+            )
+        result_b = self.load_result(run_id_b, mode)
+        if result_b is None:
+            raise ValueError(
+                f"Run '{run_id_b}' has no '{mode}' result file (meta lists "
+                f"modes {modes_b}) — re-run run_pipeline."
+            )
+        TWO = Decimal("0.01")
+
+        def _delta(b: Decimal, a: Decimal) -> Decimal:
+            d = (b - a).quantize(TWO)
+            return d if d else Decimal("0.00")  # normalize -0.00
+
+        def _brief(meta: Dict[str, Any]) -> Dict[str, Any]:
+            return {k: meta.get(k) for k in
+                    ("run_id", "tax_year", "fx_mode", "pairing_method",
+                     "created_at", "summary")}
+
+        def _liability(result: Dict[str, Any]) -> Dict[str, Any]:
+            return ((result.get("sections") or {})
+                    .get("cz_tax_liability", {}).get("line_items", {}))
+
+        li_a, li_b = _liability(result_a), _liability(result_b)
+        liability = []
+        for key in self._COMPARE_LIABILITY_KEYS:
+            va, vb = li_a.get(key), li_b.get(key)
+            if va is None and vb is None:
+                continue
+            da = Decimal(va) if va is not None else Decimal(0)
+            db = Decimal(vb) if vb is not None else Decimal(0)
+            liability.append({"line": key, "a": va, "b": vb,
+                              "delta": _delta(db, da)})
+
+        def _gains(result: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+            agg: Dict[str, Dict[str, Any]] = {}
+            for it in result.get("items", []):
+                if it.get("item_type") not in DISPOSAL_ITEM_TYPES:
+                    continue
+                sym = it.get("asset_symbol") or "?"
+                a = agg.setdefault(sym, {
+                    "count": 0, "proceeds_czk": Decimal(0),
+                    "cost_basis_czk": Decimal(0), "gain_loss_czk": Decimal(0),
+                    "taxable_gain_loss_czk": Decimal(0), "fx_failed": 0,
+                })
+                gain = Decimal(it.get("gain_loss_czk") or 0)
+                a["count"] += 1
+                a["proceeds_czk"] += Decimal(it.get("proceeds_czk") or 0)
+                a["cost_basis_czk"] += Decimal(it.get("cost_basis_czk") or 0)
+                a["gain_loss_czk"] += gain
+                if it.get("is_taxable") and not it.get("is_exempt"):
+                    a["taxable_gain_loss_czk"] += gain
+                if bool(it.get("fx_conversion_failed")) or any(
+                        it.get(k) is None for k in
+                        ("proceeds_czk", "cost_basis_czk", "gain_loss_czk")):
+                    a["fx_failed"] += 1
+            return agg
+
+        gains_a, gains_b = _gains(result_a), _gains(result_b)
+        ZERO_ROW = {"count": 0, "proceeds_czk": Decimal(0),
+                    "cost_basis_czk": Decimal(0), "gain_loss_czk": Decimal(0),
+                    "taxable_gain_loss_czk": Decimal(0), "fx_failed": 0}
+        changed, unchanged = [], []
+        for sym in sorted(set(gains_a) | set(gains_b)):
+            ra = gains_a.get(sym, ZERO_ROW)
+            rb = gains_b.get(sym, ZERO_ROW)
+            # Quantize the endpoints first and derive the delta from them so
+            # gain_b − gain_a always equals gain_delta exactly in the output.
+            # Deltas come from the RAW sums, so the decomposition is exact:
+            # raw gain ≡ raw proceeds − raw cost per item, hence
+            # gain_delta == proceeds_delta − cost_delta after rounding.
+            # The displayed gain_b is then derived from gain_a + the delta
+            # (rather than rounded independently) so the row's other identity,
+            # gain_b − gain_a == gain_delta, holds too. Rounding all three
+            # endpoints independently cannot satisfy both at once, and a
+            # haléř gap in either reads as an arithmetic error.
+            gain_delta = _delta(rb["gain_loss_czk"], ra["gain_loss_czk"])
+            proceeds_delta = _delta(rb["proceeds_czk"], ra["proceeds_czk"])
+            cost_delta = _delta(rb["cost_basis_czk"], ra["cost_basis_czk"])
+            gain_a_q = ra["gain_loss_czk"].quantize(TWO)
+            gain_b_q = gain_a_q + gain_delta
+            # The gross figures can be pairing-invariant while the §4/1/w
+            # exemption flips (a different lot fails the time test) — the
+            # taxable split must participate in the changed/unchanged call.
+            # From raw sums like the gain, so an all-taxable symbol never
+            # shows the two deltas disagreeing by a haléř.
+            taxable_delta = _delta(rb["taxable_gain_loss_czk"],
+                                   ra["taxable_gain_loss_czk"])
+            fx_a, fx_b = ra["fx_failed"], rb["fx_failed"]
+            if (gain_delta == 0 and proceeds_delta == 0 and cost_delta == 0
+                    and taxable_delta == 0 and fx_a == fx_b):
+                unchanged.append(sym)
+                continue
+            row = {
+                "symbol": sym,
+                "gain_a_czk": gain_a_q,
+                "gain_b_czk": gain_b_q,
+                "gain_delta_czk": gain_delta,
+                "taxable_gain_delta_czk": taxable_delta,
+                "proceeds_delta_czk": proceeds_delta,
+                "cost_basis_delta_czk": cost_delta,
+                "count_a": ra["count"], "count_b": rb["count"],
+            }
+            if fx_a or fx_b:
+                row["fx_failed_a"] = fx_a
+                row["fx_failed_b"] = fx_b
+            changed.append(row)
+        changed.sort(key=lambda r: max(abs(r["gain_delta_czk"]),
+                                       abs(r["taxable_gain_delta_czk"])),
+                     reverse=True)
+
+        notes = ["All deltas are b − a."]
+        fx_total = (sum(r["fx_failed"] for r in gains_a.values())
+                    + sum(r["fx_failed"] for r in gains_b.values()))
+        if fx_total:
+            notes.append(
+                "Some items have failed FX→CZK conversions (null money legs "
+                "counted as 0) — deltas on symbols flagged fx_failed_a/b may "
+                "reflect FX-rate coverage, not the settings change."
+            )
+        if meta_a.get("tax_year") != meta_b.get("tax_year"):
+            notes.append(
+                f"Runs cover different tax years ({meta_a.get('tax_year')} vs "
+                f"{meta_b.get('tax_year')}) — per-symbol deltas compare "
+                f"different periods."
+            )
+        # The fingerprint mixes dataset content with the requested fx mode and
+        # pairing method — only when those settings match does a fingerprint
+        # difference imply the *data* changed. Without these guards the note
+        # would fire on every FIFO-vs-LIFO comparison, i.e. the headline use
+        # case. (meta fx_mode is the EFFECTIVE mode, so a compare→daily
+        # downgrade can still leave a false positive — erring loud is fine.)
+        if (meta_a.get("input_fingerprint") and meta_b.get("input_fingerprint")
+                and meta_a.get("tax_year") == meta_b.get("tax_year")
+                and meta_a.get("fx_mode") == meta_b.get("fx_mode")
+                and meta_a.get("pairing_method") == meta_b.get("pairing_method")
+                and meta_a["input_fingerprint"] != meta_b["input_fingerprint"]):
+            notes.append("Input data changed between the runs — deltas may "
+                         "reflect new statements, not settings.")
+        return {
+            "mode": mode,
+            "runs": {"a": _brief(meta_a), "b": _brief(meta_b)},
+            "liability": liability,
+            "by_symbol": changed,
+            "unchanged_symbols": unchanged,
+            "notes": notes,
+        }
 
     def load_result(self, run_id: str, mode: str) -> Optional[Dict[str, Any]]:
         path = self.runs_dir / run_id / f"result.{mode}.json"

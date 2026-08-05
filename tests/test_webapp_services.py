@@ -560,3 +560,325 @@ class TestOptionsOverview:
     def test_options_overview_missing_run_is_empty(self, service):
         assert service.options_overview("does-not-exist") == {
             "as_of": None, "tax_year": None, "options": []}
+
+
+class TestDisposalsAndCompare:
+    """disposal_summary + compare_runs over fabricated persisted runs.
+
+    Fabricated results let us pin the delta arithmetic (proceeds vs cost
+    decomposition) — the synthetic golden year has one lot per symbol, so
+    FIFO ≡ LIFO there and the changed-rows path would go untested.
+    """
+
+    # Marker value per FX mode so tests can detect WHICH result.<mode>.json
+    # a reader actually opened.
+    MODE_MARKER = {"daily": "1.00", "uniform": "2.00", "compare": "3.00"}
+
+    def _write_run(self, svc, run_id, meta_extra, items,
+                   liability=None, modes=("daily",), legacy_meta=False):
+        from src.webapp.serializers import dump_json
+        run_dir = svc.runs_dir / run_id
+        run_dir.mkdir(parents=True)
+        meta = {"run_id": run_id, "tax_year": 2026, "fx_mode": "daily",
+                "pairing_method": "fifo",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                **({} if legacy_meta else {"modes": list(modes)}),
+                **meta_extra}
+        dump_json(meta, run_dir / "meta.json")
+        for mode in modes:
+            result = {
+                "sections": {"cz_tax_liability": {"line_items": {
+                    "taxable_interest_czk": self.MODE_MARKER[mode],
+                    **(liability or {})}}},
+                "items": items,
+            }
+            dump_json(result, run_dir / f"result.{mode}.json")
+
+    @staticmethod
+    def _sale(symbol, gain, proceeds, cost, *, category="STOCK",
+              item_type="SECURITY_DISPOSAL", **extra):
+        return {"item_type": item_type, "asset_symbol": symbol,
+                "asset_description": f"{symbol} DESC",
+                "asset_category": category, "gain_loss_czk": gain,
+                "proceeds_czk": proceeds, "cost_basis_czk": cost,
+                "quantity": "10", "event_date": "2026-03-01",
+                "acquisition_date": "2025-01-01", "holding_period_days": 424,
+                "is_taxable": True, "is_exempt": False, **extra}
+
+    def test_compare_runs_decomposes_gain_delta(self, service):
+        self._write_run(
+            service, "run-a", {"pairing_method": "fifo"},
+            [self._sale("PYPL", "-100.00", "500.00", "600.00"),
+             self._sale("SAME", "50.00", "150.00", "100.00")],
+            liability={"final_czech_tax_after_credit_czk": "1000.00",
+                       "combined_taxable_base_czk": "7000.00"},
+        )
+        self._write_run(
+            service, "run-b", {"pairing_method": "lifo"},
+            [self._sale("PYPL", "200.00", "500.00", "300.00"),
+             self._sale("SAME", "50.00", "150.00", "100.00"),
+             self._sale("NEWCO", "30.00", "80.00", "50.00")],
+            liability={"final_czech_tax_after_credit_czk": "1500.00",
+                       "combined_taxable_base_czk": "9500.00"},
+        )
+
+        data = service.compare_runs("run-a", "run-b")
+
+        assert data["mode"] == "daily"
+        assert data["unchanged_symbols"] == ["SAME"]
+        rows = {r["symbol"]: r for r in data["by_symbol"]}
+        # PYPL: same proceeds, cost dropped 300 → gain up 300
+        assert rows["PYPL"]["gain_delta_czk"] == Decimal("300.00")
+        assert rows["PYPL"]["proceeds_delta_czk"] == Decimal("0.00")
+        assert rows["PYPL"]["cost_basis_delta_czk"] == Decimal("-300.00")
+        # NEWCO exists only in run b
+        assert rows["NEWCO"]["gain_a_czk"] == Decimal("0.00")
+        assert rows["NEWCO"]["count_a"] == 0 and rows["NEWCO"]["count_b"] == 1
+        # Sorted by |gain delta| desc
+        assert [r["symbol"] for r in data["by_symbol"]] == ["PYPL", "NEWCO"]
+        final = next(r for r in data["liability"]
+                     if r["line"] == "final_czech_tax_after_credit_czk")
+        assert final["delta"] == Decimal("500.00")
+        assert data["notes"][0].startswith("All deltas are b")
+
+    def test_compare_runs_requires_shared_mode(self, service):
+        self._write_run(service, "run-daily", {}, [], modes=("daily",))
+        self._write_run(service, "run-uniform", {"fx_mode": "uniform"}, [],
+                        modes=("uniform",))
+        with pytest.raises(ValueError, match="No shared FX mode"):
+            service.compare_runs("run-daily", "run-uniform")
+
+    def test_compare_runs_unknown_run_raises(self, service):
+        with pytest.raises(ValueError, match="not found"):
+            service.compare_runs("ghost-a", "ghost-b")
+
+    def test_compare_runs_flags_year_and_data_differences(self, service):
+        self._write_run(service, "run-2025", {"tax_year": 2025,
+                                              "input_fingerprint": "aaa"}, [])
+        self._write_run(service, "run-2026", {"tax_year": 2026,
+                                              "input_fingerprint": "bbb"}, [])
+        data = service.compare_runs("run-2025", "run-2026")
+        assert any("different tax years" in n for n in data["notes"])
+        # Different years → the data-changed note must NOT fire
+        assert not any("Input data changed" in n for n in data["notes"])
+
+        self._write_run(service, "run-2026b", {"tax_year": 2026,
+                                               "input_fingerprint": "ccc"}, [])
+        data = service.compare_runs("run-2026", "run-2026b")
+        assert any("Input data changed" in n for n in data["notes"])
+
+    def test_disposal_summary_taxable_exempt_buckets(self, service):
+        self._write_run(service, "run-d", {}, [
+            self._sale("TAXCO", "100.00", "300.00", "200.00"),
+            self._sale("FREECO", "400.00", "900.00", "500.00",
+                       is_taxable=False, is_exempt=True,
+                       exemption_reason="TIME_TEST_EXEMPT"),
+            # Non-disposal items must be ignored entirely
+            {"item_type": "DIVIDEND", "asset_symbol": "TAXCO",
+             "amount_czk": "50.00"},
+        ])
+        data = service.disposal_summary("run-d", "daily")
+        assert data["totals"]["count"] == 2
+        assert data["totals"]["gain_loss_czk"] == Decimal("500.00")
+        assert data["totals"]["taxable_gain_loss_czk"] == Decimal("100.00")
+        assert data["totals"]["exempt_gain_loss_czk"] == Decimal("400.00")
+        rows = {r["symbol"]: r for r in data["by_symbol"]}
+        assert rows["FREECO"]["exempt_gain_loss_czk"] == Decimal("400.00")
+        assert rows["TAXCO"]["quantity_sold"] == Decimal("10")
+
+    def test_disposal_summary_symbol_matches_both_option_key_styles(self, service):
+        self._write_run(service, "run-o", {}, [
+            self._sale("PYPL", "10.00", "20.00", "10.00"),
+            self._sale("PYPL  260731C00061000", "5.00", "5.00", "0.00",
+                       category="OPTION", item_type="OPTION_CLOSE"),
+            self._sale("C TUI  20260619 9 M", "7.00", "7.00", "0.00",
+                       category="OPTION", item_type="OPTION_CLOSE"),
+            self._sale("PYPLX", "99.00", "99.00", "0.00"),
+        ])
+        pypl = service.disposal_summary("run-o", "daily", symbol="PYPL")
+        # Stock exact + OCC-style option; NOT the unrelated PYPLX stock
+        assert {r["symbol"] for r in pypl["by_symbol"]} == {
+            "PYPL", "PYPL  260731C00061000"}
+        assert len(pypl["lots"]) == 2
+
+        tui = service.disposal_summary("run-o", "daily", symbol="tui")
+        # Marker-first option key, case-insensitive filter
+        assert [r["symbol"] for r in tui["by_symbol"]] == ["C TUI  20260619 9 M"]
+
+        # symbol + include_lots combined: lots must stay filtered
+        both = service.disposal_summary("run-o", "daily", symbol="PYPL",
+                                        include_lots=True)
+        assert {l["symbol"] for l in both["lots"]} == {
+            "PYPL", "PYPL  260731C00061000"}
+
+    def test_disposal_summary_description_fallback_for_german_listings(self, service):
+        # Real-data shape: stock ticker TUI1, option keyed on underlying TUI —
+        # only the option's IBKR description starts with the stock ticker.
+        self._write_run(service, "run-de", {}, [
+            self._sale("TUI1", "10.00", "20.00", "10.00"),
+            self._sale("C TUI  20251219 6.4 M", "5.00", "5.00", "0.00",
+                       category="OPTION", item_type="OPTION_CLOSE",
+                       asset_description="TUI1 19DEC25 6.4 C"),
+        ])
+        data = service.disposal_summary("run-de", "daily", symbol="TUI1")
+        assert {r["symbol"] for r in data["by_symbol"]} == {
+            "TUI1", "C TUI  20251219 6.4 M"}
+
+    def test_disposal_summary_single_letter_symbol_no_marker_overmatch(self, service):
+        self._write_run(service, "run-c", {}, [
+            # Marker-first TUI call — must NOT match symbol='C' (Citigroup)
+            self._sale("C TUI  20260619 9 M", "7.00", "7.00", "0.00",
+                       category="OPTION", item_type="OPTION_CLOSE",
+                       asset_description="TUI1 19JUN26 9 C"),
+            # Genuine OCC option ON underlying C — must match
+            self._sale("C     260417C00050000", "3.00", "3.00", "0.00",
+                       category="OPTION", item_type="OPTION_CLOSE",
+                       asset_description="C 17APR26 50 C"),
+        ])
+        data = service.disposal_summary("run-c", "daily", symbol="C")
+        assert [r["symbol"] for r in data["by_symbol"]] == [
+            "C     260417C00050000"]
+
+    def test_disposal_summary_flags_failed_fx_conversions(self, service):
+        self._write_run(service, "run-fx", {}, [
+            self._sale("OKCO", "100.00", "300.00", "200.00"),
+            # Failed conversion: null money legs, flag set
+            self._sale("BADCO", None, None, "150.00",
+                       fx_conversion_failed=True),
+        ])
+        data = service.disposal_summary("run-fx", "daily")
+        assert data["totals"]["fx_failed_count"] == 1
+        assert data["totals"]["count"] == 2
+        assert "UNKNOWN" in data["fx_warning"]
+        rows = {r["symbol"]: r for r in data["by_symbol"]}
+        assert rows["BADCO"]["fx_failed_count"] == 1
+        assert rows["OKCO"]["fx_failed_count"] == 0
+        # Clean run → no warning key at all
+        clean = service.disposal_summary("run-fx", "daily", symbol="OKCO")
+        assert "fx_warning" not in clean
+
+    def test_compare_runs_flags_fx_failures_per_symbol(self, service):
+        self._write_run(service, "run-fxa", {}, [
+            self._sale("FXCO", "5000.00", "50000.00", "45000.00")])
+        self._write_run(service, "run-fxb", {}, [
+            self._sale("FXCO", None, "50000.00", None,
+                       fx_conversion_failed=True)])
+        data = service.compare_runs("run-fxa", "run-fxb")
+        [row] = data["by_symbol"]
+        assert row["fx_failed_a"] == 0 and row["fx_failed_b"] == 1
+        assert any("failed FX" in n for n in data["notes"])
+
+    def test_compare_runs_detects_taxable_exempt_flip(self, service):
+        # Same gross gain/proceeds/cost in both runs; only the §4/1/w
+        # exemption flips — the symbol must still surface as changed.
+        self._write_run(service, "run-ta", {}, [
+            self._sale("FLIPCO", "1000.00", "5000.00", "4000.00",
+                       is_taxable=False, is_exempt=True,
+                       exemption_reason="TIME_TEST_EXEMPT")])
+        self._write_run(service, "run-tb", {"pairing_method": "lifo"}, [
+            self._sale("FLIPCO", "1000.00", "5000.00", "4000.00")])
+        data = service.compare_runs("run-ta", "run-tb")
+        [row] = data["by_symbol"]
+        assert row["symbol"] == "FLIPCO"
+        assert row["gain_delta_czk"] == Decimal("0.00")
+        assert row["taxable_gain_delta_czk"] == Decimal("1000.00")
+        assert data["unchanged_symbols"] == []
+
+    def test_compare_runs_row_arithmetic_is_self_consistent(self, service):
+        """Sub-haléř inputs must not make a displayed row look wrong.
+
+        Raw gains 10.004 → 10.996: the delta is the accurate rounded 0.99
+        (not 11.00 − 10.00 = 1.00), and the displayed gain_b absorbs the
+        haléř so both row identities still hold.
+        """
+        self._write_run(service, "run-ea", {}, [
+            self._sale("EPCO", "10.004", "20.004", "10.00")])
+        self._write_run(service, "run-eb", {}, [
+            self._sale("EPCO", "10.996", "20.996", "10.00")])
+        data = service.compare_runs("run-ea", "run-eb")
+        [row] = data["by_symbol"]
+        assert row["gain_delta_czk"] == Decimal("0.99")
+        # Identity 1: displayed endpoints agree with the displayed delta
+        assert row["gain_b_czk"] - row["gain_a_czk"] == row["gain_delta_czk"]
+        # Identity 2: the decomposition adds up (gain = proceeds − cost)
+        assert (row["proceeds_delta_czk"] - row["cost_basis_delta_czk"]
+                == row["gain_delta_czk"])
+        # Identity 3: all items taxable → taxable delta equals the gross one
+        assert row["taxable_gain_delta_czk"] == row["gain_delta_czk"]
+
+    def test_compare_runs_explicit_mode_reads_that_modes_file(self, service):
+        self._write_run(service, "run-ma", {}, [], modes=("daily", "uniform"))
+        self._write_run(service, "run-mb", {}, [], modes=("daily", "uniform"))
+        data = service.compare_runs("run-ma", "run-mb", "uniform")
+        assert data["mode"] == "uniform"
+        row = next(r for r in data["liability"]
+                   if r["line"] == "taxable_interest_czk")
+        assert row["a"] == self.MODE_MARKER["uniform"]
+
+    def test_compare_runs_falls_back_to_shared_mode(self, service):
+        # 'daily' not shared → first shared mode wins
+        self._write_run(service, "run-ua", {"fx_mode": "uniform"}, [],
+                        modes=("uniform",))
+        self._write_run(service, "run-ub", {"fx_mode": "uniform"}, [],
+                        modes=("uniform",))
+        data = service.compare_runs("run-ua", "run-ub")
+        assert data["mode"] == "uniform"
+
+    def test_compare_runs_legacy_meta_defaults_to_daily(self, service):
+        self._write_run(service, "run-la", {}, [], legacy_meta=True)
+        self._write_run(service, "run-lb", {}, [], legacy_meta=True)
+        data = service.compare_runs("run-la", "run-lb")
+        assert data["mode"] == "daily"
+
+    def test_compare_runs_explicit_mode_unavailable_names_the_mode(self, service):
+        self._write_run(service, "run-xa", {}, [])
+        self._write_run(service, "run-xb", {}, [])
+        with pytest.raises(ValueError) as exc:
+            service.compare_runs("run-xa", "run-xb", "uniform")
+        assert "uniform" in str(exc.value)
+        assert "not available in both runs" in str(exc.value)
+        assert "No shared FX mode" not in str(exc.value)
+
+    def test_compare_runs_missing_result_file_raises(self, service):
+        self._write_run(service, "run-wa", {}, [], modes=("daily", "uniform"))
+        self._write_run(service, "run-wb", {}, [], modes=("daily", "uniform"))
+        (service.runs_dir / "run-wb" / "result.uniform.json").unlink()
+        with pytest.raises(ValueError, match="has no 'uniform' result file"):
+            service.compare_runs("run-wa", "run-wb", "uniform")
+
+    def test_compare_runs_liability_line_missing_on_one_side(self, service):
+        # Legacy persisted run predating a liability line: key absent
+        self._write_run(service, "run-new", {}, [],
+                        liability={"final_czech_tax_after_credit_czk": "1000.00"})
+        self._write_run(service, "run-old", {}, [], liability={})
+        data = service.compare_runs("run-new", "run-old")
+        rows = {r["line"]: r for r in data["liability"]}
+        row = rows["final_czech_tax_after_credit_czk"]
+        assert row["a"] == "1000.00"
+        assert row["b"] is None
+        assert row["delta"] == Decimal("-1000.00")
+        # Keys absent on both sides are omitted, not emitted as zero rows
+        assert "taxable_dividends_czk" not in rows
+
+    def test_compare_runs_data_note_requires_matching_settings(self, service):
+        # Pairing differs (the headline FIFO-vs-LIFO case) → fingerprints
+        # legitimately differ, the data-changed note must NOT fire.
+        self._write_run(service, "run-fp1", {"input_fingerprint": "aaa"}, [])
+        self._write_run(service, "run-fp2", {"input_fingerprint": "bbb",
+                                             "pairing_method": "lifo"}, [])
+        data = service.compare_runs("run-fp1", "run-fp2")
+        assert not any("Input data changed" in n for n in data["notes"])
+
+        # fx_mode differs → same suppression
+        self._write_run(service, "run-fp3", {"input_fingerprint": "ccc",
+                                             "fx_mode": "compare"}, [])
+        data = service.compare_runs("run-fp1", "run-fp3")
+        assert not any("Input data changed" in n for n in data["notes"])
+
+        # Identical fingerprints → no note either
+        self._write_run(service, "run-fp4", {"input_fingerprint": "aaa"}, [])
+        data = service.compare_runs("run-fp1", "run-fp4")
+        assert not any("Input data changed" in n for n in data["notes"])
+
+    def test_disposal_summary_missing_run_returns_none(self, service):
+        assert service.disposal_summary("nope", "daily") is None
