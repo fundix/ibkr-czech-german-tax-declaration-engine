@@ -74,8 +74,12 @@ DEFAULT_ACCOUNT = "default"
 # IBKR statements name the account column differently per report; trades/cash/
 # corp actions use ClientAccountID, positions use AccountId in some exports.
 _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
-# Bump when the fingerprint recipe changes so old runs never match a new one.
-_FINGERPRINT_VERSION = "v1"
+# Bump when the fingerprint recipe changes, OR when an engine change makes the
+# same inputs produce a different result — the hash covers inputs only, so
+# without a bump the cache happily serves a run computed by the old code.
+# v2: §4 odst. 1 letter corrected (w → u/t) and time-test-exempt proceeds now
+#     count toward the 100k limit sum.
+_FINGERPRINT_VERSION = "v2"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —
