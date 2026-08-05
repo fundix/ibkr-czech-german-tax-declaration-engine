@@ -145,6 +145,48 @@ class TestInputAssembly:
         lines = merged.read_text().splitlines()
         assert lines == [header, '"AAA","CASH","a1"', '"AAA","STOCK","a1"']
 
+    def test_merge_drops_headers_repeated_mid_file(self, service, tmp_path):
+        """IBKR repeats the header between export sections (multi-account)
+        and hand-concatenated uploads carry one per source file. Corp-action
+        rows validate even with non-numeric decimals (safe_decimal -> 0), so
+        a header-as-data row would become a phantom asset named "Symbol" —
+        it must never leave the merge."""
+        header = '"Symbol","Type","ActionID"'
+        (service.data_dir / "2024").mkdir(parents=True)
+        (service.data_dir / "2024" / "corporate_actions.csv").write_text(
+            f'{header}\n"AAA","CASH","a1"\n{header}\n"BBB","STOCK","a2"\n')
+        (service.data_dir / "2025").mkdir(parents=True)
+        (service.data_dir / "2025" / "corporate_actions.csv").write_text(
+            f'{header}\n{header}\n"CCC","CASH","a3"\n')
+
+        notes = []
+        merged = service._merge_years("corp_actions", 2025, tmp_path / "m.csv",
+                                      notes=notes)
+        lines = merged.read_text().splitlines()
+        assert lines == [
+            header,
+            '"AAA","CASH","a1"',
+            '"BBB","STOCK","a2"',
+            '"CCC","CASH","a3"',
+        ]
+        assert notes == []  # dropped headers are not duplicate-row warnings
+
+    def test_prepare_inputs_drops_repeated_headers_in_copied_files(
+            self, service, tmp_path):
+        """Cash and positions files are copied, not merged — the same
+        mid-file repeated headers must be dropped on that path too."""
+        _seed_synthetic_year(service)
+        for name in ("cash_transactions.csv", "positions_end.csv"):
+            path = service.data_dir / "2024" / name
+            lines = path.read_text().splitlines()
+            doctored = [lines[0], lines[1], lines[0], *lines[2:]]
+            path.write_text("\n".join(doctored) + "\n")
+
+            inputs = service._prepare_inputs(tmp_path / f"run_{name}", 2024)
+            slot = "cash" if name.startswith("cash") else "positions_end"
+            copied = inputs[slot].read_text().splitlines()
+            assert copied == lines  # header once, every data row kept
+
     def test_merge_without_id_column_keeps_everything(self, service, tmp_path):
         for year in (2024, 2025):
             d = service.data_dir / str(year)
