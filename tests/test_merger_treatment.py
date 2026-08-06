@@ -185,21 +185,22 @@ class TestProcessorRefuses:
         with pytest.raises(ValueError, match="qualified_23b"):
             MergerStockProcessor().process(event, ledger, self._context(policy))
 
-    def test_a_recorded_regime_still_refuses_but_names_the_decision(self, tmp_path):
-        """Mechanics are unimplemented — but the message must prove the
-        recorded decision was read, not lost."""
+    def test_the_taxable_path_still_refuses_but_names_the_decision(self, tmp_path):
+        """TAXABLE_DISPOSAL needs the consideration's fair value, so it still
+        refuses — but the message must prove the decision was read, not lost.
+        (CARRY_OVER is implemented; see tests/test_merger_carry_over.py.)"""
         from src.engine.event_processors.corporate_action_processor import (
             MergerStockProcessor,
         )
 
         path = tmp_path / "m.json"
         path.write_text(json.dumps({
-            "A1|2025-06-10|?->?": "qualified_23c",
+            "A1|2025-06-10|?->?": "outside_safe_harbor",
         }), encoding="utf-8")
         policy = CzMergerPolicy(store=MergerTreatmentStore(cache_file_path=path))
         event, ledger = self._event_and_ledger()
 
-        with pytest.raises(ValueError, match="CARRY_OVER"):
+        with pytest.raises(ValueError, match="TAXABLE_DISPOSAL"):
             MergerStockProcessor().process(event, ledger, self._context(policy))
 
     def test_missing_policy_refuses_rather_than_defaulting(self):

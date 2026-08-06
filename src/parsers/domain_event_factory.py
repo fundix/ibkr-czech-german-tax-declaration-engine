@@ -775,13 +775,25 @@ class DomainEventFactory:
                              description_source_type="corp_act_generated"
                          )
                          logger.debug(f"CA Record {idx+1} (TC-Stock): Attempted to resolve/create new asset by symbol '{new_asset_symbol_from_desc}'. Resulting asset ID: {new_asset.internal_asset_id if new_asset else 'Not Found/Created'}")
-                         if new_asset:
+                         if new_asset and new_asset.internal_asset_id == affected_asset.internal_asset_id:
+                            # The RECEIVING leg: brokers report a merger as two rows
+                            # and the description scrapes back to the same symbol.
+                            # Only the disposing leg has lots to carry, so drop this
+                            # one here rather than let it reach the processor and be
+                            # written into the treatment store as a NEW->NEW key.
+                            logger.info(
+                                f"CA Record {idx+1} (TC-Stock): skipping the receiving leg of "
+                                f"CA {rca.action_id_ibkr} — old and new asset are the same "
+                                f"({new_asset_symbol_from_desc})."
+                            )
+                         elif new_asset:
                             common_ca_params_kw_base["gross_amount_foreign_currency"] = Decimal('0.0')
                             common_ca_params_kw = {k: v for k, v in common_ca_params_kw_base.items() if v is not None}
                             domain_ca_event_instance = CorpActionMergerStock(
                                 asset_internal_id=affected_asset.internal_asset_id, event_date=event_date_str,
                                 new_asset_internal_id=new_asset.internal_asset_id,
                                 new_shares_received_per_old=new_shares_per_old_stock,
+                                quantity_exchanged=quantity_ca,
                                 **common_ca_params_kw
                             )
                          else:

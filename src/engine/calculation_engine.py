@@ -41,6 +41,39 @@ from .event_processors.option_processor import (
 
 logger = logging.getLogger(__name__)
 
+def _make_event_ledger_accessor(event, fifo_ledgers):
+    """Give a processor the ledgers of the two assets *event* names, and no others.
+
+    A stock-for-stock merger is the only event that has to reach a second
+    asset's lots. Handing the whole ``fifo_ledgers`` dict to every processor
+    would grant write access to every asset; a bare ``.get`` would return a
+    silent ``None`` for a missing target, which is the one failure a merger must
+    never take quietly.
+    """
+    allowed = {event.asset_internal_id}
+    target_id = getattr(event, "new_asset_internal_id", None)
+    if target_id is not None:
+        allowed.add(target_id)
+
+    def ledger_for(asset_internal_id):
+        if asset_internal_id not in allowed:
+            raise ValueError(
+                f"Event {event.event_id} ({event.event_type.name}) asked for the "
+                f"ledger of asset {asset_internal_id}, which it does not name."
+            )
+        ledger = fifo_ledgers.get(asset_internal_id)
+        if ledger is None:
+            raise ValueError(
+                f"No FIFO ledger exists for asset {asset_internal_id}, required by "
+                f"event {event.event_id} ({event.event_type.name}). A ledger is "
+                "created for every non-cash asset, so this is either a mis-plumbed "
+                "run or an asset that classified as a cash balance."
+            )
+        return ledger
+
+    return ledger_for
+
+
 def _format_asset_info(asset_obj) -> str:
     """Helper to format asset information for logging."""
     if not asset_obj:
@@ -217,6 +250,9 @@ def run_main_calculations(
     current_year_events: List[FinancialEvent] = []
 
     pending_option_adjustments: Dict[uuid.UUID, Tuple[Decimal, uuid.UUID, str]] = {}
+    # Merger event keys already applied in this run. Nothing upstream dedupes
+    # corporate-action rows, and applying one twice would rescale the lots again.
+    applied_merger_keys: set = set()
 
     tax_year_start_date_str = f"{tax_year}-01-01"
     tax_year_end_date_str = f"{tax_year}-12-31"
@@ -241,6 +277,22 @@ def run_main_calculations(
             continue
 
         if event_date_obj < tax_year_start_date_obj:
+            if isinstance(event, CorpActionMergerStock):
+                # Mergers are not replayed during SOY reconstruction: the replay
+                # is per-asset and cannot move quantity to another asset id. The
+                # target would then be seeded from the SOY snapshot, whose single
+                # date becomes BOTH the acquisition and the holding start — a
+                # confident, RESOLVED, and wrong taxable verdict on an invented
+                # holding start. Refuse instead of over-taxing silently.
+                raise ValueError(
+                    f"Stock-for-stock merger {getattr(event, 'ca_action_id_ibkr', None) or event.event_id} "
+                    f"closed on {event.event_date}, before tax year {tax_year}. "
+                    "Replaying mergers during start-of-year reconstruction is not "
+                    "implemented, so the carried holding period cannot be "
+                    "reconstructed — the run is refused rather than reporting a "
+                    "holding period the data does not support. See "
+                    "docs/cz-tax-policy.md (Mergers)."
+                )
             if isinstance(event, (TradeEvent, CorpActionSplitForward, CorpActionStockDividend, OptionLifecycleEvent)):
                 historical_events_by_asset[event.asset_internal_id].append(event)
         elif event_date_obj <= tax_year_end_date_obj:
@@ -388,6 +440,12 @@ def run_main_calculations(
                     'currency_converter': currency_converter,
                     'tax_classifier': tax_classifier,
                     'merger_policy': merger_policy,
+                    # A stock-for-stock merger has to reach a SECOND asset's
+                    # ledger. Bound to this event so a processor can only ever
+                    # touch the two assets the event names, and so a missing
+                    # target is a loud refusal rather than a silent None.
+                    'ledger_for': _make_event_ledger_accessor(event, fifo_ledgers),
+                    'applied_merger_keys': applied_merger_keys,
                 }
                 logger.debug(f"Dispatching event {event.event_id} ({event.event_type.name}) to {type(processor).__name__}")
 
