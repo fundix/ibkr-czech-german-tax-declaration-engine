@@ -116,6 +116,11 @@ class CzTaxItem:
     # --- Dates ---
     event_date: str = ""                  # primary date (trade / payment date)
     acquisition_date: Optional[str] = None  # for disposals: lot acquisition date
+    # When the holding period began — the acquisition date unless the holding was
+    # carried over by a qualified merger (§23b/§23c). The time test measures the
+    # period from here but picks the regime from acquisition_date.
+    holding_period_start: Optional[str] = None
+    holding_period_start_estimated: bool = False
     holding_period_days: Optional[int] = None
     # True when acquisition_date is a synthetic SOY fallback (31 Dec of the
     # prior year) — the real purchase date is unknown; the time test flags
@@ -205,6 +210,11 @@ class CzTaxItem:
             "asset_category": self.asset_category,
             "event_date": self.event_date,
             "acquisition_date": self.acquisition_date,
+            # Always emitted (never null) so an exporter cell reading empty
+            # means "no acquisition", not "field not plumbed".
+            "holding_period_start": self.holding_period_start or self.acquisition_date,
+            "holding_period_start_estimated": self.holding_period_start_estimated,
+            "acquisition_date_estimated": self.acquisition_date_estimated,
             "holding_period_days": self.holding_period_days,
             "original_amount": str(self.original_amount) if self.original_amount is not None else None,
             "original_currency": self.original_currency,

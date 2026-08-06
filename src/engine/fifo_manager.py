@@ -30,6 +30,12 @@ _TaxClassifierCallable = Optional[Callable[[RealizedGainLoss], None]]
 
 logger = logging.getLogger(__name__)
 
+# Source-transaction-id prefixes for lots the engine invented because the trade
+# history could not be reconstructed. Both are matched by prefix, so the short
+# marker is covered by the long one.
+SOY_FALLBACK_PREFIX = "SOY_FALLBACK"
+SOY_SNAPSHOT_PREFIX = "SOY_SNAPSHOT"
+
 
 def split_position_flip_event(event: TradeEvent,
                              available_long_qty: Decimal,
@@ -130,11 +136,29 @@ def split_position_flip_event(event: TradeEvent,
 
 @dataclass
 class FifoLot:
-    acquisition_date: str  # YYYY-MM-DD
+    acquisition_date: str  # YYYY-MM-DD — when THIS security was acquired
     quantity: Decimal # Represents shares/units OR contracts for options
     unit_cost_basis_eur: Decimal # Renamed from cost_basis_eur_per_unit
     total_cost_basis_eur: Decimal # Stored with high precision
     source_transaction_id: str # IBKR Transaction ID (or fallback string like "SOY_FALLBACK")
+
+    # When the holding period began, which is NOT always the acquisition date.
+    # A qualified Czech merger (§23b/§23c) hands the new share the old share's
+    # running holding period, while the regime that period is measured under is
+    # still chosen by when THIS share was acquired — the pre-2014 six-month test
+    # does not transfer to a share issued later (NSS 3 Afs 249/2024-45). One
+    # field cannot answer both questions, so there are two.
+    #
+    # None means "same as acquisition_date"; __post_init__ fills it in, so every
+    # consumer can read it without remembering an `or`.
+    holding_period_start: Optional[str] = None
+
+    # Whether each date is real or synthetic. Derived from the source id today,
+    # but stored rather than re-sniffed: the moment a merger mints a lot under a
+    # corporate-action id, every `startswith("SOY_FALLBACK")` check elsewhere
+    # would stop recognising an estimated date and silently grant an exemption.
+    acquisition_date_estimated: bool = False
+    holding_period_start_estimated: bool = False
 
     def __post_init__(self):
         if not isinstance(self.quantity, Decimal) or not self.quantity.is_finite() or self.quantity <= Decimal(0):
@@ -145,6 +169,24 @@ class FifoLot:
             raise ValueError(f"FifoLot total_cost_basis_eur must be a non-negative finite Decimal: {self.total_cost_basis_eur}")
         if not self.source_transaction_id:
              raise ValueError(f"FifoLot requires a non-empty source_transaction_id.")
+
+        # A synthetic SOY fallback lot (31 Dec of the prior year) has no real
+        # purchase date. Derive the flag here so it is carried on the lot from
+        # now on instead of being re-sniffed from the id at every reader.
+        if str(self.source_transaction_id).startswith(SOY_FALLBACK_PREFIX):
+            self.acquisition_date_estimated = True
+
+        if not self.holding_period_start:
+            self.holding_period_start = self.acquisition_date
+            self.holding_period_start_estimated = self.acquisition_date_estimated
+        elif parse_ibkr_date(self.holding_period_start) is None:
+            # The acquisition date gets this guard at every consumption site; an
+            # unparseable carried date must fail here too rather than silently
+            # sorting as datetime.min and reading as an ancient holding.
+            raise ValueError(
+                f"FifoLot {self.source_transaction_id}: unparseable "
+                f"holding_period_start '{self.holding_period_start}'."
+            )
 
         ctx_check = Context(prec=get_global_context().prec)
         expected_total = ctx_check.multiply(self.quantity, self.unit_cost_basis_eur) # Renamed
@@ -169,7 +211,15 @@ class ShortFifoLot:
     total_sale_proceeds_eur: Decimal # Total sale proceeds when shorted
     source_transaction_id: str # IBKR Transaction ID (or fallback string like "SOY_FALLBACK_SHORT")
 
+    # No second date here on purpose: a short position can never pass the
+    # holding-period test (the sale precedes the purchase), so evaluate_time_test
+    # short-circuits on is_short_position before any date is read. Only the
+    # estimated flag is stored, to replace the prefix sniffing at the RGL site.
+    opening_date_estimated: bool = False
+
     def __post_init__(self):
+        if str(self.source_transaction_id).startswith(SOY_FALLBACK_PREFIX):
+            self.opening_date_estimated = True
         if not isinstance(self.quantity_shorted, Decimal) or not self.quantity_shorted.is_finite() or self.quantity_shorted <= Decimal(0):
             raise ValueError(f"ShortFifoLot quantity_shorted must be a positive finite Decimal: {self.quantity_shorted}")
         if not isinstance(self.unit_sale_proceeds_eur, Decimal) or not self.unit_sale_proceeds_eur.is_finite() or self.unit_sale_proceeds_eur < Decimal(0): # Renamed
@@ -387,7 +437,13 @@ class FifoLedger:
                             acquisition_date=lot.acquisition_date, quantity=qty_from_this_lot,
                             unit_cost_basis_eur=lot.unit_cost_basis_eur, # Renamed
                             total_cost_basis_eur=self.ctx.multiply(qty_from_this_lot, lot.unit_cost_basis_eur), # Renamed
-                            source_transaction_id=lot.source_transaction_id
+                            source_transaction_id=lot.source_transaction_id,
+                            # Carry both dates and their flags: the rebuild
+                            # re-creates the lot, so dropping them here would
+                            # silently reset a carried-over holding.
+                            holding_period_start=lot.holding_period_start,
+                            acquisition_date_estimated=lot.acquisition_date_estimated,
+                            holding_period_start_estimated=lot.holding_period_start_estimated,
                         )
                         self.lots.append(final_lot)
                         qty_to_assign -= qty_from_this_lot
@@ -757,10 +813,14 @@ class FifoLedger:
                 gross_gain_loss = self.ctx.subtract(realization_value_for_portion, cost_basis_for_portion)
 
                 acq_date_obj = parse_ibkr_date(current_lot.acquisition_date)
+                # Measured from where the holding began, not from when this
+                # security was acquired — they differ for a carried-over lot.
+                hps_date_obj = parse_ibkr_date(
+                    current_lot.holding_period_start or current_lot.acquisition_date)
                 real_date_obj = parse_ibkr_date(sale_event.event_date)
                 holding_period_days: Optional[int] = None
-                if acq_date_obj and real_date_obj and real_date_obj >= acq_date_obj :
-                    holding_period_days = (real_date_obj - acq_date_obj).days
+                if hps_date_obj and real_date_obj and real_date_obj >= hps_date_obj :
+                    holding_period_days = (real_date_obj - hps_date_obj).days
 
                 rgl = RealizedGainLoss(
                     originating_event_id=sale_event.event_id, asset_internal_id=self.asset_internal_id,
@@ -774,7 +834,9 @@ class FifoLedger:
                     total_realization_value_eur=realization_value_for_portion,
                     gross_gain_loss_eur=gross_gain_loss, holding_period_days=holding_period_days,
                     fund_type_at_sale=self.fund_type if self.asset_category == AssetCategory.INVESTMENT_FUND else None,
-                    is_acquisition_estimated=str(current_lot.source_transaction_id or "").startswith("SOY_FALLBACK"),
+                    holding_period_start=current_lot.holding_period_start,
+                    holding_period_start_estimated=current_lot.holding_period_start_estimated,
+                    is_acquisition_estimated=current_lot.acquisition_date_estimated,
                 )
                 if self._tax_classifier is not None:
                     self._tax_classifier(rgl)
@@ -902,7 +964,7 @@ class FifoLedger:
                     total_realization_value_eur=realization_value_for_portion,
                     gross_gain_loss_eur=gross_gain_loss, holding_period_days=holding_period_days,
                     fund_type_at_sale=self.fund_type if self.asset_category == AssetCategory.INVESTMENT_FUND else None,
-                    is_acquisition_estimated=str(current_short_lot.source_transaction_id or "").startswith("SOY_FALLBACK"),
+                    is_acquisition_estimated=current_short_lot.opening_date_estimated,
                 )
                 if self._tax_classifier is not None:
                     self._tax_classifier(rgl)
@@ -1057,10 +1119,12 @@ class FifoLedger:
             gross_gain_loss = self.ctx.subtract(realization_value_for_portion, cost_basis_for_portion)
 
             acq_date_obj = parse_ibkr_date(current_lot.acquisition_date)
+            hps_date_obj = parse_ibkr_date(
+                current_lot.holding_period_start or current_lot.acquisition_date)
             real_date_obj = parse_ibkr_date(event.event_date)
             holding_period_days: Optional[int] = None
-            if acq_date_obj and real_date_obj and real_date_obj >= acq_date_obj :
-                holding_period_days = (real_date_obj - acq_date_obj).days
+            if hps_date_obj and real_date_obj and real_date_obj >= hps_date_obj :
+                holding_period_days = (real_date_obj - hps_date_obj).days
 
             rgl = RealizedGainLoss(
                 originating_event_id=event.event_id, asset_internal_id=self.asset_internal_id,
@@ -1073,6 +1137,9 @@ class FifoLedger:
                 total_cost_basis_eur=cost_basis_for_portion,
                 total_realization_value_eur=realization_value_for_portion,
                 gross_gain_loss_eur=gross_gain_loss, holding_period_days=holding_period_days,
+                holding_period_start=current_lot.holding_period_start,
+                holding_period_start_estimated=current_lot.holding_period_start_estimated,
+                is_acquisition_estimated=current_lot.acquisition_date_estimated,
                 fund_type_at_sale=self.fund_type if self.asset_category == AssetCategory.INVESTMENT_FUND else None,
             )
             if self._tax_classifier is not None:

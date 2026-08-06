@@ -98,7 +98,7 @@ venue, ticker or ISIN.
 | Regime → ledger mechanics (§23b/§23c → carry-over; otherwise → taxable disposal) | **IMPLEMENTED** |
 | Applying carry-over (lot transfer, cost and holding period preserved) | **NOT IMPLEMENTED** |
 | Applying a taxable disposal (RGL at the consideration's fair value) | **NOT IMPLEMENTED** — needs `HistoricalPriceProvider` (PR #36) |
-| `holding_period_start` separate from `acquisition_date` | **NOT IMPLEMENTED** — required, see below |
+| `holding_period_start` separate from `acquisition_date` | **IMPLEMENTED** — see below |
 | Cash doplatek / `cash in lieu` for fractional shares | **NOT IMPLEMENTED** |
 | §23d odst. 1 notice to the tax office before the transaction | **NOT IMPLEMENTED** — compliance flag only |
 | Merger replayed during SOY reconstruction | **NOT IMPLEMENTED** — `initialize_lots_from_soy` handles splits and stock dividends, not mergers |
@@ -112,12 +112,43 @@ opposite directions:
 - the pre-2014 six-month grandfathering **does not** carry to a share issued
   after 2014 (NSS 3 Afs 249/2024-45).
 
-`time_test.py` picks the regime from `acquisition_date < 2014-01-01` and
-measures the period from the same field. Carrying an old date over would keep
-the holding period correctly but also wrongly hand the new share the pre-2014
-six-month test. The two decisions need two dates: the acquisition (merger date,
-selecting the current regime) and the holding-period start (the original
-purchase).
+`time_test.py` picks the regime from `acquisition_date < 2014-01-01` and used to
+measure the period from the same field. Carrying an old date over would keep the
+holding period correctly but also wrongly hand the new share the pre-2014
+six-month test. The two decisions now have two dates:
+
+| Field | Question it answers | Used by |
+|---|---|---|
+| `acquisition_date` | when was THIS security acquired | regime selection, FIFO consumption order, "Nabytí" in every report |
+| `holding_period_start` | when did the holding begin | `holding_period_days`, the deadline, the CZK cost-basis FX date |
+
+Both live on `FifoLot`, `RealizedGainLoss` and `CzTaxItem`, each with its own
+`*_estimated` flag; `holding_period_start` normalises to `acquisition_date` when
+absent, so it is never null downstream. `time_test_deadline()` takes both as
+**required keyword arguments** on purpose — a default would let a call site
+silently measure from the wrong date, and the distinction is invisible in the
+common case where they coincide.
+
+`ShortFifoLot` deliberately keeps a single `opening_date`: a short position can
+never pass the holding-period test, so the evaluator short-circuits before any
+date is read.
+
+**Open questions this raised** (worth a line in the advisor's next round):
+
+- IBKR's `HoldingPeriodDateTime` is a holding-period start, but computed under
+  **US** rules (pushed by wash sales, carried over for IRC §368 reorganisations
+  — which the advisor classifies as a *taxable* pozbytí in CZ). It currently
+  feeds `acquisition_date` as a fallback in `parsing_orchestrator.py` and
+  therefore *selects the regime*. In this account both IBKR dates are identical
+  on all 175 lot rows, so nothing is wrong today, but a share issued in a
+  post-2014 merger whose IBKR basis is a pre-2014 purchase would get the
+  six-month test with no merger event in the data.
+- Should a carried-over lot keep its old FIFO queue position, or go to the back?
+  The engine keys consumption order on `acquisition_date` (back of the queue),
+  which matches the broker; `holding_period_start` is not used for ordering.
+- The pre-2014 branch measures from `holding_period_start` too, for consistency.
+  That cannot change any figure reachable today (it needs a disposal on or
+  before 2014-06-30), but it is an unverified extension of čl. II bod 5.
 
 ---
 

@@ -26,7 +26,7 @@ from decimal import Decimal
 from typing import Callable, Dict, List, Optional
 
 from src.countries.cz.config import CzTaxConfig
-from src.countries.cz.time_test import time_test_deadline
+from src.countries.cz.time_test import time_test_exempt
 from src.domain.enums import RealizationType
 from src.domain.events import CorporateActionEvent, FinancialEvent
 from src.domain.enums import FinancialEventType
@@ -75,24 +75,36 @@ def _build_supplies(
         acq = parse_ibkr_date(r.acquisition_date)
         if acq is None:
             return None
+        hps = parse_ibkr_date(r.holding_period_start or r.acquisition_date)
+        if hps is None:
+            return None
         supplies.append(SupplyLot(
             acq_date=acq,
             quantity=r.quantity_realized,
             unit_cost_eur=r.unit_cost_basis_eur,
             source_id="SOY_FALLBACK" if r.is_acquisition_estimated else "REAL",
             estimated=bool(r.is_acquisition_estimated),
+            holding_start=hps,
+            holding_start_estimated=bool(r.holding_period_start_estimated),
         ))
     if ledger is not None:
         for lot in getattr(ledger, "lots", []):
             acq = parse_ibkr_date(lot.acquisition_date)
             if acq is None:
                 return None
+            hps = parse_ibkr_date(lot.holding_period_start or lot.acquisition_date)
+            if hps is None:
+                return None
             supplies.append(SupplyLot(
                 acq_date=acq,
                 quantity=lot.quantity,
                 unit_cost_eur=lot.unit_cost_basis_eur,
                 source_id=lot.source_transaction_id,
-                estimated=str(lot.source_transaction_id or "").startswith("SOY_FALLBACK"),
+                # The lot carries the flag now; sniffing the id prefix would stop
+                # recognising a carried-over lot minted under a corp-action id.
+                estimated=bool(lot.acquisition_date_estimated),
+                holding_start=hps,
+                holding_start_estimated=bool(lot.holding_period_start_estimated),
             ))
     return supplies
 
@@ -136,7 +148,7 @@ def _emit_rgls(
         total_cost = ctx_multiply(qty, lot.unit_cost_eur)
         total_proceeds = ctx_multiply(qty, sale.unit_proceeds_eur)
         gross = total_proceeds - total_cost
-        holding_days = (sale.sale_date - lot.acq_date).days
+        holding_days = (sale.sale_date - lot.holding_start).days
         rgl = RealizedGainLoss(
             originating_event_id=sale.originating_event_id,
             asset_internal_id=template.asset_internal_id,
@@ -151,6 +163,8 @@ def _emit_rgls(
             total_realization_value_eur=total_proceeds,
             gross_gain_loss_eur=gross,
             holding_period_days=holding_days,
+            holding_period_start=lot.holding_start.isoformat(),
+            holding_period_start_estimated=lot.holding_start_estimated,
             fund_type_at_sale=template.fund_type_at_sale,
             is_acquisition_estimated=lot.estimated,
         )
@@ -173,11 +187,20 @@ def apply_cz_optimal_pairing(
     complex_ids = _complex_asset_ids(all_financial_events, tax_year)
 
     def _exempt(lot: SupplyLot, sale: SaleDemand) -> bool:
-        # Mirror evaluate_time_test: estimated SOY lots are never exempt; a
-        # disposal strictly after the deadline is exempt.
-        if lot.estimated:
+        # Scores with the SAME predicate evaluate_time_test applies, rather than
+        # re-deriving the arithmetic — a mirrored copy drifts, and a second date
+        # would only double the drift. Either synthetic date disqualifies the
+        # lot, matching the evaluator's PENDING_MANUAL_REVIEW gate.
+        if lot.estimated or lot.holding_start_estimated:
             return False
-        return sale.sale_date > time_test_deadline(lot.acq_date, config)
+        if not config.time_test_enabled:
+            return False
+        return time_test_exempt(
+            acquisition_date=lot.acq_date,
+            holding_period_start=lot.holding_start,
+            sale_date=sale.sale_date,
+            config=config,
+        )
 
     def _mul(a: Decimal, b: Decimal) -> Decimal:
         return a * b
