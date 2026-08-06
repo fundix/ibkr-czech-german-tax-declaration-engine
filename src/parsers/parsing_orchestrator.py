@@ -82,18 +82,30 @@ class ParsingOrchestrator:
         return (raw_pos.level_of_detail or "").strip().upper() == "LOT"
 
     @staticmethod
-    def _lot_open_date(raw_pos) -> Optional[str]:
-        """ISO date of a LOT row: OpenDateTime, falling back to
-        HoldingPeriodDateTime. IBKR datetimes come as 'YYYY-MM-DD;HHMMSS'
-        or 'YYYYMMDD;HHMMSS' depending on query settings — take the date part."""
-        for value in (raw_pos.open_date_time, raw_pos.holding_period_date_time):
-            if not value:
-                continue
-            date_part = value.split(";")[0].split(",")[0].split(" ")[0]
-            parsed = parse_ibkr_date(date_part)
-            if parsed:
-                return parsed.isoformat()
-        return None
+    def _iso_date_part(value) -> Optional[str]:
+        """IBKR datetimes come as 'YYYY-MM-DD;HHMMSS' or 'YYYYMMDD;HHMMSS'
+        depending on query settings — take the date part."""
+        if not value:
+            return None
+        date_part = str(value).split(";")[0].split(",")[0].split(" ")[0]
+        parsed = parse_ibkr_date(date_part)
+        return parsed.isoformat() if parsed else None
+
+    @classmethod
+    def _lot_dates(cls, raw_pos):
+        """Both dates of a LOT row, kept apart.
+
+        Returns ``(open_date, holding_period_date, open_is_holding_basis)``.
+        OpenDateTime is the acquisition date Czech law asks for; when it is
+        absent the holding basis is the only date available, so it is used and
+        the caller is told — an unmarked substitute would let IBKR's US holding
+        rules silently pick the applicable Czech regime.
+        """
+        open_date = cls._iso_date_part(raw_pos.open_date_time)
+        holding_date = cls._iso_date_part(raw_pos.holding_period_date_time)
+        if open_date:
+            return open_date, holding_date, False
+        return holding_date, holding_date, holding_date is not None
 
     def process_positions(self):
         # ... (implementation is the same)
@@ -112,18 +124,36 @@ class ParsingOrchestrator:
             if self._is_lot_row(raw_pos):
                 # Lot-level detail row: collect the real acquisition date for
                 # the SOY FIFO seeding; totals come from the SUMMARY row.
-                open_date = self._lot_open_date(raw_pos)
+                open_date, holding_date, from_basis = self._lot_dates(raw_pos)
                 if open_date is None:
                     logger.warning(
                         f"Asset {asset.get_classification_key()}: SOY LOT row "
                         f"without a parseable OpenDateTime — lot detail ignored."
                     )
                     continue
+                if from_basis:
+                    logger.warning(
+                        f"Asset {asset.get_classification_key()}: SOY LOT row has no "
+                        f"OpenDateTime; falling back to HoldingPeriodDateTime "
+                        f"({holding_date}), which is a US-rules holding basis. The "
+                        "lot's acquisition date is marked estimated so the time test "
+                        "is not decided from it."
+                    )
+                elif holding_date and holding_date != open_date:
+                    logger.warning(
+                        f"Asset {asset.get_classification_key()}: SOY LOT opened "
+                        f"{open_date} but IBKR reports a holding basis of "
+                        f"{holding_date}. That gap is a US adjustment (wash sale or "
+                        "a §368 reorganisation) with no Czech equivalent, so it is "
+                        "not imported — the lot is flagged for review instead."
+                    )
                 asset.soy_lots.append(SoyPositionLot(
                     open_date=open_date,
                     quantity=safe_decimal(raw_pos.position, default=Decimal(0)),
                     cost_basis_amount=safe_decimal(raw_pos.cost_basis_money),
                     cost_basis_currency=raw_pos.currency_primary,
+                    holding_period_date=holding_date,
+                    open_date_is_holding_basis=from_basis,
                 ))
                 continue
             asset.soy_quantity = safe_decimal(raw_pos.position, default=Decimal(0)) # Changed from initial_quantity_soy

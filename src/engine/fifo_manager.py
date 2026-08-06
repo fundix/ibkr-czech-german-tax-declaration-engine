@@ -685,17 +685,42 @@ class FifoLedger:
             qty = lot.quantity.copy_abs()
             unit = self.ctx.divide(amount_eur, qty) if qty != Decimal(0) else Decimal(0)
             source_id = f"SOY_SNAPSHOT_{index}_{self.asset_internal_id}"
+            # IBKR's HoldingPeriodDateTime is a US-rules holding basis and is
+            # never imported as a date. It still carries information: when it is
+            # the only date available the acquisition is not established, and
+            # when it disagrees with the lot open date the broker has applied an
+            # adjustment (wash sale, §368 tacking) whose Czech counterpart is
+            # unknown. Either way the lot is flagged rather than trusted, so the
+            # time test routes it to manual review instead of deciding from a
+            # date the data does not support.
+            acq_estimated = bool(lot.open_date_is_holding_basis)
+            basis_diverges = bool(
+                lot.holding_period_date
+                and not lot.open_date_is_holding_basis
+                and lot.holding_period_date != lot.open_date
+            )
             if long_side:
                 self.lots.append(FifoLot(
                     acquisition_date=lot.open_date, quantity=qty,
                     unit_cost_basis_eur=unit, total_cost_basis_eur=amount_eur,
                     source_transaction_id=source_id,
+                    acquisition_date_estimated=acq_estimated,
+                    # Pass the start EXPLICITLY even though it equals the
+                    # acquisition date: leaving it None takes the defaulting
+                    # branch of __post_init__, which overwrites the flag below
+                    # with acquisition_date_estimated and would silently drop a
+                    # divergent-basis warning.
+                    holding_period_start=lot.open_date,
+                    holding_period_start_estimated=acq_estimated or basis_diverges,
                 ))
             else:
                 self.short_lots.append(ShortFifoLot(
                     opening_date=lot.open_date, quantity_shorted=qty,
                     unit_sale_proceeds_eur=unit, total_sale_proceeds_eur=amount_eur,
                     source_transaction_id=source_id,
+                    # A short can never pass the time test, so the flag only
+                    # matters for the cover RGL's audit trail.
+                    opening_date_estimated=acq_estimated,
                 ))
         logger.info(
             f"Asset {asset.get_classification_key()}: Seeded {len(prepared)} SOY {side} lot(s) "

@@ -738,7 +738,14 @@ class TestM8SoyFallbackEstimatedFlag:
         assert item.is_exempt is False
         assert item.is_taxable is True
         assert item.tax_review_status == CzTaxReviewStatus.PENDING_MANUAL_REVIEW
-        assert "SOY fallback" in (item.tax_review_note or "")
+        # The note deliberately does not name a cause: the same flag is raised
+        # by a 31-Dec seed, by a snapshot row whose only date was the broker's
+        # US holding basis, and by one where that basis disagrees with the lot
+        # open date. It must say the date is unestablished and that the test was
+        # not evaluated.
+        note = item.tax_review_note or ""
+        assert "not established" in note
+        assert "NOT evaluated" in note
 
 
 class TestM13DroppedTradesVisible:
