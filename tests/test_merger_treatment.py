@@ -185,10 +185,11 @@ class TestProcessorRefuses:
         with pytest.raises(ValueError, match="qualified_23b"):
             MergerStockProcessor().process(event, ledger, self._context(policy))
 
-    def test_the_taxable_path_still_refuses_but_names_the_decision(self, tmp_path):
-        """TAXABLE_DISPOSAL needs the consideration's fair value, so it still
-        refuses — but the message must prove the decision was read, not lost.
-        (CARRY_OVER is implemented; see tests/test_merger_carry_over.py.)"""
+    def test_a_recorded_regime_is_dispatched_not_refused_as_unimplemented(self, tmp_path):
+        """Both mechanics are implemented now, so a decided regime must reach
+        them. Proven by WHICH refusal an incomplete context produces: a wiring
+        complaint means the decision was read and dispatched, whereas "not
+        implemented yet" would mean it was dropped on the way."""
         from src.engine.event_processors.corporate_action_processor import (
             MergerStockProcessor,
         )
@@ -200,7 +201,7 @@ class TestProcessorRefuses:
         policy = CzMergerPolicy(store=MergerTreatmentStore(cache_file_path=path))
         event, ledger = self._event_and_ledger()
 
-        with pytest.raises(ValueError, match="TAXABLE_DISPOSAL"):
+        with pytest.raises(ValueError, match="wiring error"):
             MergerStockProcessor().process(event, ledger, self._context(policy))
 
     def test_missing_policy_refuses_rather_than_defaulting(self):
