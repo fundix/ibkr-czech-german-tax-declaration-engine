@@ -143,14 +143,18 @@ date is read.
 
 **Open questions this raised** (worth a line in the advisor's next round):
 
-- IBKR's `HoldingPeriodDateTime` is a holding-period start, but computed under
-  **US** rules (pushed by wash sales, carried over for IRC §368 reorganisations
-  — which the advisor classifies as a *taxable* pozbytí in CZ). It currently
-  feeds `acquisition_date` as a fallback in `parsing_orchestrator.py` and
-  therefore *selects the regime*. In this account both IBKR dates are identical
-  on all 175 lot rows, so nothing is wrong today, but a share issued in a
-  post-2014 merger whose IBKR basis is a pre-2014 purchase would get the
-  six-month test with no merger event in the data.
+- **Resolved:** IBKR's `HoldingPeriodDateTime` is no longer used as a date. It is
+  a **US-rules** holding basis — pushed forward by wash sales, which Czech law
+  has no equivalent of, and carried back over IRC §368 reorganisations, which the
+  advisor classifies as a *taxable* pozbytí in CZ — so it is wrong for both Czech
+  questions. `acquisition_date` now comes from `OpenDateTime` alone. The broker
+  date is still read, because a divergence carries information: when the two
+  differ the lot's `holding_period_start_estimated` is set, and when
+  `OpenDateTime` is missing entirely both flags are set, so the time test routes
+  the item to `PENDING_MANUAL_REVIEW` instead of deciding from a date the data
+  does not support. Both cases are logged at the point of seeding with the
+  specific cause. No effect on this account: all 175 lot rows report the two
+  dates identically.
 - Should a carried-over lot keep its old FIFO queue position, or go to the back?
   The engine keys consumption order on `acquisition_date` (back of the queue),
   which matches the broker; `holding_period_start` is not used for ordering.

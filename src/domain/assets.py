@@ -14,11 +14,25 @@ class SoyPositionLot:
     Present only when the positions Flex query has the "Lot" level of
     detail enabled — it carries the REAL acquisition date of a lot, so the
     FIFO seeding can avoid the estimated 31 Dec fallback date.
+
+    IBKR reports two dates and they are NOT interchangeable:
+
+    * ``open_date`` (OpenDateTime) — when the lot was actually opened. This is
+      what Czech law asks for as the acquisition date.
+    * ``holding_period_date`` (HoldingPeriodDateTime) — IBKR's holding basis,
+      computed under **US** rules: pushed forward by wash sales (no Czech
+      equivalent) and carried back over IRC §368 reorganisations, which the
+      Czech treatment classifies as a taxable disposal rather than a deferral.
+      It is recorded so a divergence can be SURFACED, and deliberately never
+      used as a date — importing it would answer a Czech question with an
+      American rule.
     """
-    open_date: str                              # YYYY-MM-DD
+    open_date: str                              # YYYY-MM-DD (OpenDateTime)
     quantity: Decimal                           # signed as reported (< 0 = short lot)
     cost_basis_amount: Optional[Decimal] = None # total for the lot (proceeds for short)
     cost_basis_currency: Optional[str] = None
+    holding_period_date: Optional[str] = None   # IBKR's US-rules holding basis
+    open_date_is_holding_basis: bool = False    # True when OpenDateTime was absent
 
 
 @dataclass # Base class defines eq and hash

@@ -240,6 +240,12 @@ def evaluate_time_test(
         # be evaluated reliably — keep taxable and flag for manual review
         # (the position may actually be exempt if held > 3 years).
         if item.acquisition_date_estimated or item.holding_period_start_estimated:
+            # Do not name a cause here. The flag is raised by three different
+            # situations — a synthetic 31 Dec start-of-year lot, a lot-level
+            # snapshot row whose only date was the broker's US holding basis,
+            # and a row where that basis disagrees with the lot open date — and
+            # the item does not carry which. The run log records the specific
+            # one at the point of seeding.
             which = (
                 "Acquisition date" if item.acquisition_date_estimated
                 else "Holding-period start"
@@ -250,9 +256,11 @@ def evaluate_time_test(
             item.included_in_tax_base = True
             item.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
             item.tax_review_note = (
-                f"{which} is a synthetic SOY fallback (31 Dec) — the "
-                "real purchase date is unknown; time test not evaluated. Item "
-                "kept taxable as conservative default; review manually."
+                f"{which} is not established from the trade history (start-of-year "
+                "seed, or a broker holding basis that cannot be used under Czech "
+                "rules) — the time test was NOT evaluated. Item kept taxable as a "
+                "conservative default; see the run log for which date is in doubt "
+                "and review manually."
             )
             continue
 
