@@ -224,6 +224,7 @@ def run_main_calculations(
     decimal_rounding_mode: str,
     tax_classifier: Optional[Any] = None,
     merger_policy: Optional[Any] = None,
+    security_price_provider: Optional[Any] = None,
     pairing_method: PairingMethod = PairingMethod.FIFO,
 ) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger]]:
     """
@@ -446,6 +447,11 @@ def run_main_calculations(
                     # target is a loud refusal rather than a silent None.
                     'ledger_for': _make_event_ledger_accessor(event, fifo_ledgers),
                     'applied_merger_keys': applied_merger_keys,
+                    # Past closing prices, for valuing a merger the broker
+                    # reports but does not price. Injected like the FX
+                    # converter above — also network-backed, also not the
+                    # engine's business to construct.
+                    'security_price_provider': security_price_provider,
                 }
                 logger.debug(f"Dispatching event {event.event_id} ({event.event_type.name}) to {type(processor).__name__}")
 

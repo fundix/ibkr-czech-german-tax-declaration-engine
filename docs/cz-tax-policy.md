@@ -102,7 +102,9 @@ venue, ticker or ISIN.
 | Merger applied twice / self-merger / receiving leg / empty source / bad ratio or date | **IMPLEMENTED** — each refuses before either ledger is touched |
 | Fractional credited share (cash in lieu) | **NOT IMPLEMENTED** — refused. Makes carry-over unusable for a ratio that does not divide the position evenly; the fix is to book the fraction's disposal from the cash-in-lieu row |
 | Prior-year merger (SOY replay) | **NOT IMPLEMENTED** — refused (was silently dropped, which handed the target an invented holding start and a confident taxable verdict) |
-| Applying a taxable disposal (RGL at the consideration's fair value) | **NOT IMPLEMENTED** — needs `HistoricalPriceProvider` (PR #36) |
+| Applying a taxable disposal (RGL at the consideration's fair value) | **IMPLEMENTED** — one RGL per source lot at the new share's close on the merger date (§19 look-back), converted at the CLOSE date; replacement lots start a fresh basis and holding period |
+| Price source reachable by the engine | **IMPLEMENTED** — `src/utils/historical_price_provider.py`, injected into the processor context like the FX converter; `src/webapp/quotes.py` keeps the live-quote service and re-exports it |
+| Short position on the disposing side of a taxable merger | **NOT IMPLEMENTED** — refused; realising a short against the acquirer's price is not the same transaction as closing it |
 | `holding_period_start` separate from `acquisition_date` | **IMPLEMENTED** — see below |
 | FIFO queue position of a carried lot | back of the queue (`acquisition_date` = merger date), holding-seniority tie-break among carried lots. Matches the broker; if the advisor disagrees the remedy is LIFO/OPTIMAL, not a second sort rule |
 | Cash doplatek / `cash in lieu` for fractional shares | **NOT IMPLEMENTED** |

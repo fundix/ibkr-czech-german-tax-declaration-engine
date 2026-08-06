@@ -2,6 +2,9 @@
 """
 HistoricalPriceProvider — the §19 closing-price look-back and its disk cache.
 
+Lives in src/utils because the engine needs it (src/engine must not import
+src/webapp); the live-quote service in src/webapp/quotes.py re-exports it.
+
 Offline: every test injects a fetcher, so no test touches the network. The
 recorded windows mirror real Yahoo behaviour observed against the live API:
 only traded days come back, weekends and holidays are simply absent.
@@ -12,7 +15,7 @@ from decimal import Decimal
 
 import pytest
 
-from src.webapp.quotes import HistoricalPriceProvider
+from src.utils.historical_price_provider import HistoricalPriceProvider
 
 D = datetime.date
 
@@ -214,7 +217,7 @@ class TestFetcherParsing:
         }]}}
 
     def _fetch(self, monkeypatch, payload, start, end, symbol="X"):
-        from src.webapp import quotes
+        from src.utils import historical_price_provider as quotes
 
         class FakeResp:
             def raise_for_status(self): pass
@@ -298,7 +301,7 @@ class TestFetcherParsing:
         assert prices[D(2025, 7, 25)] == Decimal("12.73")
 
     def test_http_failure_returns_none(self, monkeypatch):
-        from src.webapp import quotes
+        from src.utils import historical_price_provider as quotes
 
         def boom(*a, **k):
             raise RuntimeError("connection reset")

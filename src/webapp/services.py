@@ -82,7 +82,9 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 # v3: the holding period is measured from holding_period_start, so the frozen
 #     time_test_deadline in portfolio.json and the CZK cost basis of a carried
 #     lot both change.
-_FINGERPRINT_VERSION = "v3"
+# v4: a stock-for-stock merger is now applied (carry-over or taxable disposal)
+#     instead of aborting the run.
+_FINGERPRINT_VERSION = "v4"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —

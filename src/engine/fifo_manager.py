@@ -908,6 +908,119 @@ class FifoLedger:
         ))
         return sum((lot.quantity for lot in prepared_long), Decimal(0))
 
+    def realize_all_lots_for_merger(
+        self,
+        *,
+        unit_value_eur: Decimal,
+        ratio: Decimal,
+        merger_date: str,
+    ) -> Tuple[List[RealizedGainLoss], List[Decimal]]:
+        """Close every long lot against the consideration's fair value.
+
+        The non-deferral treatment: the old shares are disposed of, measured at
+        what was received for them. One RGL per lot, so each keeps its own
+        acquisition date and holding-period start — the holding-period test
+        applies to the OLD shares being sold, per lot.
+
+        *unit_value_eur* is the fair value of ONE new share. Each lot's proceeds
+        are the shares credited for it times that value, using the same
+        allocation as the carry-over path so the credited total is exact and
+        whole.
+
+        Returns ``(realized, credited_quantities)`` — the caller needs the
+        second to open the replacement lots, and recomputing the allocation
+        there would be a second chance to disagree.
+        """
+        if not self.lots:
+            return [], []
+
+        credited = _allocate_rescaled_quantities(
+            [lot.quantity for lot in self.lots],
+            ratio,
+            [
+                (parse_ibkr_date(lot.holding_period_start) or datetime.min.date(), i)
+                for i, lot in enumerate(self.lots)
+            ],
+            self.ctx,
+        )
+
+        realized: List[RealizedGainLoss] = []
+        real_date_obj = parse_ibkr_date(merger_date)
+        for lot, new_qty in zip(self.lots, credited):
+            proceeds = self.ctx.multiply(new_qty, unit_value_eur)
+            cost = lot.total_cost_basis_eur
+            hps_date_obj = parse_ibkr_date(lot.holding_period_start)
+            holding_period_days: Optional[int] = None
+            if hps_date_obj and real_date_obj and real_date_obj >= hps_date_obj:
+                holding_period_days = (real_date_obj - hps_date_obj).days
+
+            rgl = RealizedGainLoss(
+                originating_event_id=uuid.uuid4(),
+                asset_internal_id=self.asset_internal_id,
+                asset_category_at_realization=self.asset_category,
+                acquisition_date=lot.acquisition_date,
+                realization_date=merger_date,
+                realization_type=RealizationType.LONG_POSITION_SALE,
+                quantity_realized=lot.quantity,
+                unit_cost_basis_eur=lot.unit_cost_basis_eur,
+                unit_realization_value_eur=(
+                    self.ctx.divide(proceeds, lot.quantity)
+                    if lot.quantity != Decimal(0) else Decimal(0)
+                ),
+                total_cost_basis_eur=cost,
+                total_realization_value_eur=proceeds,
+                gross_gain_loss_eur=self.ctx.subtract(proceeds, cost),
+                holding_period_days=holding_period_days,
+                holding_period_start=lot.holding_period_start,
+                holding_period_start_estimated=lot.holding_period_start_estimated,
+                is_acquisition_estimated=lot.acquisition_date_estimated,
+                fund_type_at_sale=(
+                    self.fund_type
+                    if self.asset_category == AssetCategory.INVESTMENT_FUND else None
+                ),
+            )
+            if self._tax_classifier is not None:
+                self._tax_classifier(rgl)
+            realized.append(rgl)
+
+        self.lots.clear()
+        logger.info(
+            f"Merger realised {len(realized)} lot(s) of asset "
+            f"{self.asset_internal_id} at {unit_value_eur} EUR per new share."
+        )
+        return realized, credited
+
+    def open_lots_at_merger_value(
+        self,
+        *,
+        quantities: List[Decimal],
+        unit_value_eur: Decimal,
+        merger_date: str,
+        source_transaction_id: str,
+        carried_from_prefix: str,
+    ) -> Decimal:
+        """Open the replacement lots after a taxable merger.
+
+        Nothing carries over here: the shares were just valued, so that value is
+        their cost, and both dates are the merger date — the holding period
+        restarts. One lot per realised source lot, matching the disposal rows.
+        """
+        for index, qty in enumerate(quantities):
+            if qty <= Decimal(0):
+                continue
+            self.lots.append(FifoLot(
+                acquisition_date=merger_date,
+                quantity=qty,
+                unit_cost_basis_eur=unit_value_eur,
+                total_cost_basis_eur=self.ctx.multiply(qty, unit_value_eur),
+                source_transaction_id=source_transaction_id,
+                # holding_period_start defaults to the acquisition date: a
+                # taxable exchange starts a new holding.
+                carried_from=f"{carried_from_prefix}:taxable-merger[{index}]",
+            ))
+        self.lots.sort(key=_long_lot_sort_key)
+        return sum((q for q in quantities if q > Decimal(0)), Decimal(0))
+
     def add_long_lot(self, trade_event: TradeEvent):
         if trade_event.event_type != FinancialEventType.TRADE_BUY_LONG: return
         if trade_event.quantity is None or trade_event.quantity <= Decimal(0): return

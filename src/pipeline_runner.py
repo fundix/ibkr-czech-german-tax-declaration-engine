@@ -16,6 +16,7 @@ from src.parsers.parsing_orchestrator import ParsingOrchestrator
 from src.classification.asset_classifier import AssetClassifier
 from src.processing.enrichment import enrich_financial_events
 from src.utils.currency_converter import CurrencyConverter
+from src.utils.historical_price_provider import HistoricalPriceProvider
 from src.utils.exchange_rate_provider import ECBExchangeRateProvider, ExchangeRateProvider # Added base for custom provider
 from src.engine.calculation_engine import run_main_calculations
 from src.engine.pairing import PairingMethod
@@ -140,6 +141,7 @@ def run_core_processing_pipeline(
             decimal_rounding_mode=config.DECIMAL_ROUNDING_MODE,
             tax_classifier=_tax_classifier.classify,
             merger_policy=getattr(_tax_plugin, "get_merger_policy", lambda: None)(),
+            security_price_provider=HistoricalPriceProvider(),
             pairing_method=pairing_method,
         )
     except Exception as e:
