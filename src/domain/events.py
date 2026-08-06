@@ -206,15 +206,21 @@ class CorpActionMergerStock(CorporateActionEvent): # Stock-for-stock merger
     _: KW_ONLY
     new_asset_internal_id: uuid.UUID # Asset ID of the new shares received
     new_shares_received_per_old: Decimal # Ratio: new shares received per one old share
+    # Raw signed Quantity from the corporate-action row. The SIGN is the only
+    # thing distinguishing the disposing leg (negative) from the receiving leg
+    # (positive) when a broker reports both; the engine refuses the latter.
+    quantity_exchanged: Optional[Decimal] = None
 
     def __init__(self, asset_internal_id: uuid.UUID, event_date: str, *,
                  new_asset_internal_id: uuid.UUID,
                  new_shares_received_per_old: Decimal,
+                 quantity_exchanged: Optional[Decimal] = None,
                  **kwargs_for_parent_kw_only):
         super().__init__(asset_internal_id, event_date,
                          event_type=FinancialEventType.CORP_MERGER_STOCK, # Renamed
                          **kwargs_for_parent_kw_only)
         self.new_asset_internal_id = new_asset_internal_id
+        self.quantity_exchanged = quantity_exchanged
         self.new_shares_received_per_old = new_shares_received_per_old
 
     def __post_init__(self):

@@ -4,8 +4,8 @@ How the ledger should treat a stock-for-stock merger — the mechanical question
 asked without knowing anyone's tax law.
 
 There are only two things the FIFO ledger can do with such an event: move the
-lots across to the new asset keeping their cost and dates, or close them and
-open fresh ones at the consideration's value. Which is correct is a legal
+lots across to the new asset keeping their cost and running holding period, or
+close them and open fresh ones at the consideration's value. Which is correct is a legal
 question with different answers per jurisdiction (Czech §23b/§23c vs German
 §20 Abs 4a EStG), so it is answered by a ``MergerPolicy`` supplied through the
 processor context. This module deliberately holds no citations and no country
@@ -26,7 +26,11 @@ from typing import Optional, Protocol
 class MergerMechanics(Enum):
     """What the ledger does with the source lots."""
 
-    #: Transfer the lots to the new asset, preserving cost basis and dates.
+    #: Transfer the lots to the new asset, preserving cost basis and the running
+    #: holding period. WHICH date the new lot carries as its acquisition is the
+    #: policy's business, not this enum's: Czech law needs the new share's own
+    #: acquisition date to pick the applicable regime, while German
+    #: Fußstapfentheorie copies the transferor's.
     CARRY_OVER = auto()
 
     #: Close the lots against the consideration's value and open new ones.

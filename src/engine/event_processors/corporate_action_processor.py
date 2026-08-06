@@ -1,5 +1,6 @@
 # src/engine/event_processors/corporate_action_processor.py
 import logging
+from decimal import Decimal
 from typing import List, Dict, Any 
 
 from src.domain.events import (
@@ -11,6 +12,7 @@ from src.engine.fifo_manager import FifoLedger
 from .base_processor import EventProcessor
 from src.domain.enums import FinancialEventType # Added for checking event type
 from src.engine.merger_policy import MergerMechanics, merger_event_key
+from src.utils.type_utils import parse_ibkr_date
 
 logger = logging.getLogger(__name__)
 
@@ -135,8 +137,12 @@ class MergerStockProcessor(EventProcessor):
             # The policy writes this text — it is the one that knows the law.
             raise ValueError(decision.reason)
 
-        # The mechanics are chosen; neither is built yet. Naming the decision
-        # makes clear it was read rather than lost.
+        if decision.mechanics is MergerMechanics.CARRY_OVER:
+            return self._carry_over(event, ledger, context, key, decision,
+                                    old_asset, new_asset)
+
+        # TAXABLE_DISPOSAL still needs the consideration's fair value, which
+        # means a historical price source the engine cannot reach yet.
         raise ValueError(
             f"Stock-for-stock merger '{key}' resolves to "
             f"{decision.mechanics.name}"
@@ -144,6 +150,129 @@ class MergerStockProcessor(EventProcessor):
             f"it is not implemented yet — refusing rather than reporting "
             f"figures that ignore the merger."
         )
+
+    def _carry_over(self, event, ledger, context, key, decision,
+                    old_asset, new_asset) -> List[RealizedGainLoss]:
+        """Move the lots to the new asset, keeping cost and the running holding.
+
+        Every refusal happens BEFORE either ledger is touched, so a rejected
+        merger leaves no partial state. Only the two rescale failures can fire
+        after the drain, and those roll the source ledger back.
+        """
+        # R6 — nothing upstream dedupes corporate-action rows, and the parser's
+        # duplicate check keys on a per-run uuid so it can never fire. Applying
+        # a merger twice would rescale the already-rescaled lots.
+        applied = context.get('applied_merger_keys')
+        if applied is not None:
+            if key in applied:
+                raise ValueError(
+                    f"Stock-for-stock merger '{key}' was already applied in this "
+                    "run — the corporate-action row appears to be duplicated. "
+                    "Applying it again would rescale the carried lots a second time."
+                )
+
+        # R4 — a self-merger would restamp every pre-existing lot of the acquirer
+        # with the merger date and apply the ratio twice.
+        if event.asset_internal_id == event.new_asset_internal_id:
+            raise ValueError(
+                f"Stock-for-stock merger '{key}' names the same asset as both "
+                f"source and target ({getattr(old_asset, 'ibkr_symbol', '?')}) — "
+                "this is the receiving leg of the corporate action and carries no "
+                "lots to transfer."
+            )
+
+        # R5 — the disposing leg reports a negative quantity; a positive one is
+        # the receiving leg, which has nothing to give away.
+        qty_exchanged = getattr(event, 'quantity_exchanged', None)
+        if qty_exchanged is not None and qty_exchanged > Decimal(0):
+            raise ValueError(
+                f"Stock-for-stock merger '{key}' reports a positive quantity "
+                f"({qty_exchanged}): this is the receiving leg of action "
+                f"{getattr(event, 'ca_action_id_ibkr', None)}. The disposing leg "
+                "carries a negative quantity and is the one that transfers lots."
+            )
+
+        # R8 — a None ratio would reach the arithmetic as a TypeError, which the
+        # dispatch loop swallows with `continue`.
+        ratio = event.new_shares_received_per_old
+        if ratio is None or not isinstance(ratio, Decimal) or not ratio.is_finite() or ratio <= Decimal(0):
+            raise ValueError(
+                f"Stock-for-stock merger '{key}' has an unusable exchange ratio "
+                f"({ratio!r}), scraped from: "
+                f"{getattr(event, 'ibkr_activity_description', None)!r}."
+            )
+
+        # R9 — acquisition_date is never validated by FifoLot; an unparseable
+        # merger date would surface later with no mention of the merger.
+        if parse_ibkr_date(event.event_date) is None:
+            raise ValueError(
+                f"Stock-for-stock merger '{key}' has an unparseable date "
+                f"'{event.event_date}'."
+            )
+
+        # R3 — reach the target ledger through the event-bound accessor.
+        ledger_for = context.get('ledger_for')
+        if ledger_for is None:
+            raise ValueError(
+                f"Stock-for-stock merger '{key}' cannot be applied: the run did "
+                "not provide a ledger accessor, so the target asset's lots are "
+                "unreachable. This is an engine wiring error, not a data problem."
+            )
+        target_ledger = ledger_for(event.new_asset_internal_id)   # raises on absence
+
+        # R7 — an empty source is indistinguishable between a duplicated row, a
+        # position absent from the SOY file, and buys dropped for failed FX. All
+        # three mean the carried basis and holding start would be lost silently:
+        # the EOY check compares quantities and cannot see a missing cost basis.
+        if not ledger.lots and not ledger.short_lots:
+            raise ValueError(
+                f"Stock-for-stock merger '{key}' has no lots to carry: the source "
+                f"ledger for {getattr(old_asset, 'ibkr_symbol', '?')} is empty. "
+                "Either the corporate-action row is duplicated, the position is "
+                "missing from the start-of-year file, or its purchases were dropped "
+                "for a failed FX conversion. Transferring nothing would silently "
+                "lose the carried acquisition cost and holding period."
+            )
+
+        source_id = (
+            getattr(event, 'ca_action_id_ibkr', None)
+            or event.ibkr_transaction_id
+            or f"MERGER_{event.event_date}"
+        )
+        old_symbol = getattr(old_asset, 'ibkr_symbol', None) or "?"
+
+        long_lots = ledger.drain_all_long_lots()
+        short_lots = ledger.drain_all_short_lots()
+        try:
+            transferred = target_ledger.receive_carried_lots_from_merger(
+                long_lots=long_lots,
+                short_lots=short_lots,
+                ratio=ratio,
+                merger_date=event.event_date,
+                source_transaction_id=str(source_id),
+                carried_from_prefix=old_symbol,
+            )
+        except Exception:
+            # R10/R11 and any lot-validation failure: put the source back exactly
+            # as it was. The target was only ever extended on success.
+            ledger.restore_drained_lots(long_lots, short_lots)
+            raise
+
+        if applied is not None:
+            applied.add(key)
+
+        earliest = min(
+            (lot.holding_period_start for lot in long_lots if lot.holding_period_start),
+            default=None,
+        )
+        logger.info(
+            f"Merger '{key}' [{decision.label}]: carried "
+            f"{len(long_lots)} long + {len(short_lots)} short lot(s) from "
+            f"{old_symbol} to {getattr(new_asset, 'ibkr_symbol', '?')} at ratio "
+            f"{ratio} — {transferred} share(s) credited, holding period running "
+            f"from {earliest}. No realised gain: this is a deferral."
+        )
+        return []
 
 class ExpireDividendRightsProcessor(EventProcessor):
     def process(self, event: FinancialEvent, ledger: FifoLedger, context: Dict[str, Any]) -> List[RealizedGainLoss]:

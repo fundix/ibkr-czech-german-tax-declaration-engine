@@ -96,9 +96,15 @@ venue, ticker or ISIN.
 | Regime recorded per event in `cache/merger_treatments.json` (hand-edited, like the classification cache) | **IMPLEMENTED** |
 | Unclassified merger → run refuses, naming the key, the choices and the evidence needed | **IMPLEMENTED** |
 | Regime → ledger mechanics (§23b/§23c → carry-over; otherwise → taxable disposal) | **IMPLEMENTED** |
-| Applying carry-over (lot transfer, cost and holding period preserved) | **NOT IMPLEMENTED** |
+| Applying carry-over (lot transfer, cost and holding period preserved) | **IMPLEMENTED** — one target lot per source lot; total basis verbatim, unit re-derived; `acquisition_date` = merger date, `holding_period_start` carried |
+| Carried quantity rescaled by the ratio | **IMPLEMENTED** — largest-remainder allocation against one whole-transfer target, residual to the oldest holding (per-lot rounding drifts 1e-8, and a shortfall aborts the run) |
+| Short lots carried with their opening date | **IMPLEMENTED** — the proceeds figure is the tax attribute; leaving them behind breaks the eventual cover |
+| Merger applied twice / self-merger / receiving leg / empty source / bad ratio or date | **IMPLEMENTED** — each refuses before either ledger is touched |
+| Fractional credited share (cash in lieu) | **NOT IMPLEMENTED** — refused. Makes carry-over unusable for a ratio that does not divide the position evenly; the fix is to book the fraction's disposal from the cash-in-lieu row |
+| Prior-year merger (SOY replay) | **NOT IMPLEMENTED** — refused (was silently dropped, which handed the target an invented holding start and a confident taxable verdict) |
 | Applying a taxable disposal (RGL at the consideration's fair value) | **NOT IMPLEMENTED** — needs `HistoricalPriceProvider` (PR #36) |
 | `holding_period_start` separate from `acquisition_date` | **IMPLEMENTED** — see below |
+| FIFO queue position of a carried lot | back of the queue (`acquisition_date` = merger date), holding-seniority tie-break among carried lots. Matches the broker; if the advisor disagrees the remedy is LIFO/OPTIMAL, not a second sort rule |
 | Cash doplatek / `cash in lieu` for fractional shares | **NOT IMPLEMENTED** |
 | §23d odst. 1 notice to the tax office before the transaction | **NOT IMPLEMENTED** — compliance flag only |
 | Merger replayed during SOY reconstruction | **NOT IMPLEMENTED** — `initialize_lots_from_soy` handles splits and stock dividends, not mergers |

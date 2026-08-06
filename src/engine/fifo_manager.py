@@ -1,7 +1,7 @@
 import logging
 from dataclasses import dataclass
-from decimal import Decimal, Context, getcontext as get_global_context
-from typing import List, Optional, Tuple
+from decimal import Decimal, Context, ROUND_DOWN, getcontext as get_global_context
+from typing import Any, List, Optional, Tuple
 import uuid
 from datetime import date as date_obj, datetime
 
@@ -35,6 +35,87 @@ logger = logging.getLogger(__name__)
 # marker is covered by the long one.
 SOY_FALLBACK_PREFIX = "SOY_FALLBACK"
 SOY_SNAPSHOT_PREFIX = "SOY_SNAPSHOT"
+
+
+def _long_lot_sort_key(lot: "FifoLot"):
+    """Consumption order for long lots.
+
+    ``acquisition_date`` first — that is the FIFO queue. ``holding_period_start``
+    second, because every lot carried in by one merger shares a single
+    acquisition date, which makes the old two-part key degenerate across the
+    whole carried block and leaves their relative order resting on sort
+    stability, which the next unrelated insertion silently rebuilds. A no-op for
+    any lot that was actually bought: the two dates are equal unless carried.
+    """
+    return (
+        parse_ibkr_date(lot.acquisition_date) or datetime.min.date(),
+        parse_ibkr_date(lot.holding_period_start) or datetime.min.date(),
+        numeric_tx_sort_key(lot.source_transaction_id),
+    )
+
+
+def _allocate_rescaled_quantities(
+    quantities: List[Decimal],
+    ratio: Decimal,
+    order_keys: List[Any],
+    ctx: Context,
+) -> List[Decimal]:
+    """Rescale *quantities* by *ratio*, on the 1e-8 grid, summing exactly.
+
+    Quantising each lot independently drifts from the true total in both
+    directions — three 100-share lots at ratio 1/3 floor to 99.99999999, and
+    100+100+80 at 3/7 overshoot to 120.00000001. A shortfall is the dangerous
+    one: the next full-position sale finds less than it needs, and
+    ``consume_long_lots_for_sale`` tolerates 1e-10 before raising, which aborts
+    the whole run.
+
+    So the target is computed once for the transfer as a whole, each lot takes
+    its floor, and the remaining 1e-8 units are handed out by largest fractional
+    remainder — ties, and therefore the residual, going to the oldest holding so
+    the result is deterministic rather than dependent on dict order.
+    """
+    pq = global_config.PRECISION_QUANTITY
+    target = ctx.multiply(sum(quantities, Decimal(0)), ratio).quantize(pq, context=ctx)
+    if target != target.to_integral_value():
+        # A broker credits whole shares and pays cash in lieu of the fraction,
+        # which is a separate disposal of the fractional claim — a figure this
+        # event does not carry (its gross is pinned to zero at parse time).
+        # Rounding the fraction away would destroy real basis; inventing a
+        # zero-proceeds disposal would invent a loss. Refuse and say why.
+        # Tested on the SUM, never per lot: two 3-share lots at ratio 2.5 give
+        # 7.5 + 7.5 while the account is credited 15 whole shares.
+        raise ValueError(
+            f"Carrying {sum(quantities, Decimal(0))} share(s) at ratio {ratio} "
+            f"credits {target} shares — not a whole number. The broker credits "
+            "whole shares and pays cash in lieu of the fraction; that fraction is "
+            "a separate disposal of the fractional claim and is not implemented. "
+            "Record it manually — see docs/cz-tax-policy.md (Mergers)."
+        )
+
+    floors = [ctx.multiply(q, ratio).quantize(pq, rounding=ROUND_DOWN) for q in quantities]
+    remainders = [
+        ctx.multiply(q, ratio) - f for q, f in zip(quantities, floors)
+    ]
+    deficit = target - sum(floors, Decimal(0))
+
+    max_deficit = pq * len(quantities)
+    if deficit < Decimal(0) or deficit > max_deficit:
+        raise ValueError(
+            f"Rescaling {len(quantities)} lot(s) by ratio {ratio} left a residual "
+            f"of {deficit}, outside the expected [0, {max_deficit}] — refusing to "
+            f"guess how to distribute it."
+        )
+
+    # Largest remainder first; the oldest holding wins a tie.
+    units = int((deficit / pq).to_integral_value())
+    ranked = sorted(
+        range(len(quantities)),
+        key=lambda i: (-remainders[i], order_keys[i]),
+    )
+    result = list(floors)
+    for i in ranked[:units]:
+        result[i] = result[i] + pq
+    return result
 
 
 def split_position_flip_event(event: TradeEvent,
@@ -160,6 +241,12 @@ class FifoLot:
     acquisition_date_estimated: bool = False
     holding_period_start_estimated: bool = False
 
+    # Free-text origin of a lot that arrived by transfer rather than purchase,
+    # e.g. "OLDCO:1234567890". Satisfies the requirement to preserve each lot's
+    # virtual origin without smuggling anything into source_transaction_id,
+    # which the FIFO tie-break compares. Read by nothing that computes a figure.
+    carried_from: Optional[str] = None
+
     def __post_init__(self):
         if not isinstance(self.quantity, Decimal) or not self.quantity.is_finite() or self.quantity <= Decimal(0):
             raise ValueError(f"FifoLot quantity must be a positive finite Decimal: {self.quantity} (type: {type(self.quantity)})")
@@ -216,6 +303,12 @@ class ShortFifoLot:
     # short-circuits on is_short_position before any date is read. Only the
     # estimated flag is stored, to replace the prefix sniffing at the RGL site.
     opening_date_estimated: bool = False
+
+    # Free-text origin of a lot that arrived by transfer rather than purchase,
+    # e.g. "OLDCO:1234567890". Satisfies the requirement to preserve each lot's
+    # virtual origin without smuggling anything into source_transaction_id,
+    # which the FIFO tie-break compares. Read by nothing that computes a figure.
+    carried_from: Optional[str] = None
 
     def __post_init__(self):
         if str(self.source_transaction_id).startswith(SOY_FALLBACK_PREFIX):
@@ -510,7 +603,7 @@ class FifoLedger:
                     self._create_fallback_short_lot(asset, reported_soy_qty.copy_abs(), tax_year)
 
         if self.lots:
-            self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
+            self.lots.sort(key=_long_lot_sort_key)
             if any((parse_ibkr_date(lot.acquisition_date) is None) for lot in self.lots):
                  raise ValueError(f"Unparseable acquisition date found in final SOY lots for asset {self.asset_internal_id}.")
         if self.short_lots:
@@ -681,6 +774,140 @@ class FifoLedger:
             f"Qty Short: {fallback_short_lot.quantity_shorted}, Proceeds/Unit EUR: {fallback_short_lot.unit_sale_proceeds_eur}, Opening Date: {fallback_short_lot.opening_date}" # Renamed
         )
 
+    # --- Stock-for-stock merger: carry lots across to the new asset ----------
+    #
+    # Only the mechanical half lives here. Whether a merger is a deferral at all
+    # is a legal question answered by a MergerPolicy (src/engine/merger_policy.py)
+    # and dispatched by MergerStockProcessor; this method is reached only once
+    # that has resolved to CARRY_OVER.
+
+    def drain_all_long_lots(self) -> List[FifoLot]:
+        """Remove and return every long lot, in ledger order.
+
+        Returns a copy, so the caller can hand it back to
+        ``restore_drained_lots`` if the transfer fails.
+        """
+        drained = list(self.lots)
+        self.lots.clear()
+        return drained
+
+    def drain_all_short_lots(self) -> List[ShortFifoLot]:
+        """Remove and return every short lot, in ledger order."""
+        drained = list(self.short_lots)
+        self.short_lots.clear()
+        return drained
+
+    def restore_drained_lots(
+        self,
+        long_lots: List[FifoLot],
+        short_lots: List[ShortFifoLot],
+    ) -> None:
+        """Put drained lots back exactly as they were.
+
+        Slice assignment, deliberately: re-sorting here would rebuild the order
+        from the sort key rather than restore it, and the ledger must come out of
+        a failed transfer byte-identical to how it went in.
+        """
+        self.lots[:] = long_lots
+        self.short_lots[:] = short_lots
+
+    def receive_carried_lots_from_merger(
+        self,
+        *,
+        long_lots: List[FifoLot],
+        short_lots: List[ShortFifoLot],
+        ratio: Decimal,
+        merger_date: str,
+        source_transaction_id: str,
+        carried_from_prefix: str,
+    ) -> Decimal:
+        """Take drained lots from a merged asset, rescaled by *ratio*.
+
+        Takes primitives rather than the event so the arithmetic is unit-testable
+        and no event-shape knowledge leaks into the ledger.
+
+        Per lot, and per the Czech treatment of a qualified §23b/§23c exchange:
+
+        * ``total_cost_basis_eur`` is preserved **verbatim** and the unit cost
+          re-derived from the new quantity. Scaling the total would multiply the
+          acquisition cost by the ratio; carrying the unit would leave it stale,
+          and the next partial disposal overwrites the total from the unit.
+        * ``acquisition_date`` becomes the **merger date** — it selects the
+          applicable regime, and the pre-2014 six-month test must not transfer to
+          a share issued later (NSS 3 Afs 249/2024-45).
+        * ``holding_period_start`` is copied from the source lot's own
+          ``holding_period_start``, not its acquisition date, so a chained merger
+          keeps the original purchase.
+        * both estimated flags are set explicitly: the merger date is real, while
+          a synthetic carried start must stay marked as such.
+
+        One target lot per source lot — never coalesced, since each carries its
+        own basis, holding start and estimated flag.
+
+        Two phases. PREPARE constructs every lot, so any validation failure
+        raises before either ledger is touched. COMMIT extends and sorts, which
+        cannot fail. Returns the committed aggregate long quantity.
+        """
+        prepared_long: List[FifoLot] = []
+        prepared_short: List[ShortFifoLot] = []
+
+        if long_lots:
+            new_quantities = _allocate_rescaled_quantities(
+                [lot.quantity for lot in long_lots],
+                ratio,
+                [
+                    (parse_ibkr_date(lot.holding_period_start) or datetime.min.date(), i)
+                    for i, lot in enumerate(long_lots)
+                ],
+                self.ctx,
+            )
+            for lot, new_qty in zip(long_lots, new_quantities):
+                prepared_long.append(FifoLot(
+                    acquisition_date=merger_date,
+                    quantity=new_qty,
+                    unit_cost_basis_eur=self.ctx.divide(lot.total_cost_basis_eur, new_qty),
+                    total_cost_basis_eur=lot.total_cost_basis_eur,
+                    source_transaction_id=source_transaction_id,
+                    holding_period_start=lot.holding_period_start,
+                    holding_period_start_estimated=lot.holding_period_start_estimated,
+                    # acquisition_date_estimated stays False: the merger date is real.
+                    carried_from=f"{carried_from_prefix}:{lot.source_transaction_id}",
+                ))
+
+        if short_lots:
+            new_quantities = _allocate_rescaled_quantities(
+                [lot.quantity_shorted for lot in short_lots],
+                ratio,
+                [
+                    (parse_ibkr_date(lot.opening_date) or datetime.min.date(), i)
+                    for i, lot in enumerate(short_lots)
+                ],
+                self.ctx,
+            )
+            for lot, new_qty in zip(short_lots, new_quantities):
+                prepared_short.append(ShortFifoLot(
+                    # A short keeps its opening date: the proceeds were received
+                    # then, and a short can never pass the holding-period test.
+                    opening_date=lot.opening_date,
+                    quantity_shorted=new_qty,
+                    unit_sale_proceeds_eur=self.ctx.divide(
+                        lot.total_sale_proceeds_eur, new_qty),
+                    total_sale_proceeds_eur=lot.total_sale_proceeds_eur,
+                    source_transaction_id=source_transaction_id,
+                    opening_date_estimated=lot.opening_date_estimated,
+                    carried_from=f"{carried_from_prefix}:{lot.source_transaction_id}",
+                ))
+
+        # COMMIT — cannot fail.
+        self.lots.extend(prepared_long)
+        self.lots.sort(key=_long_lot_sort_key)
+        self.short_lots.extend(prepared_short)
+        self.short_lots.sort(key=lambda lot: (
+            parse_ibkr_date(lot.opening_date) or datetime.min.date(),
+            numeric_tx_sort_key(lot.source_transaction_id),
+        ))
+        return sum((lot.quantity for lot in prepared_long), Decimal(0))
+
     def add_long_lot(self, trade_event: TradeEvent):
         if trade_event.event_type != FinancialEventType.TRADE_BUY_LONG: return
         if trade_event.quantity is None or trade_event.quantity <= Decimal(0): return
@@ -711,7 +938,7 @@ class FifoLedger:
             source_transaction_id=trade_event.ibkr_transaction_id
         )
         self.lots.append(new_lot)
-        self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
+        self.lots.sort(key=_long_lot_sort_key)
         if any((parse_ibkr_date(lot.acquisition_date) is None) for lot in self.lots):
              raise ValueError(f"Unparseable acquisition date found in FIFO lots for asset {self.asset_internal_id} after adding lot.")
 
@@ -993,7 +1220,7 @@ class FifoLedger:
                     source_transaction_id=cover_event.ibkr_transaction_id or str(cover_event.event_id),
                 )
                 self.lots.append(flip_lot)
-                self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
+                self.lots.sort(key=_long_lot_sort_key)
                 logger.info(
                     f"Position FLIP (C;O) for cover {cover_event.ibkr_transaction_id or cover_event.event_id}: "
                     f"covered {quantity_to_realize - quantity_remaining_to_realize} short, "
@@ -1176,7 +1403,7 @@ class FifoLedger:
                 source_transaction_id=event.ca_action_id_ibkr or event.ibkr_transaction_id or f"STOCKDIV_{event.event_id}",
             )
             self.lots.append(fallback_lot)
-            self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
+            self.lots.sort(key=_long_lot_sort_key)
             return
 
         if self.asset_category == AssetCategory.OPTION:
@@ -1196,7 +1423,7 @@ class FifoLedger:
             total_cost_basis_eur=new_lot_total_cost, source_transaction_id=source_id
         )
         self.lots.append(new_lot)
-        self.lots.sort(key=lambda lot: (parse_ibkr_date(lot.acquisition_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
+        self.lots.sort(key=_long_lot_sort_key)
         if any((parse_ibkr_date(lot.acquisition_date) is None) for lot in self.lots):
              raise ValueError(f"Unparseable acquisition date found after adding stock dividend lot for asset {self.asset_internal_id}.")
 
