@@ -1055,17 +1055,136 @@ class TestM15ConversionWarning:
         from src.identification.asset_resolver import AssetResolver
         from src.classification.asset_classifier import AssetClassifier
 
+        # Selling USD for koruna: the direction that disposes of a foreign
+        # currency. The reverse (spending koruna to buy USD) realises nothing
+        # and is deliberately not counted — see TestM15ConversionItems.
         conv = CurrencyConversionEvent(
             asset_internal_id=uuid.uuid4(),
             event_date="2024-04-02",
-            from_currency="CZK", from_amount=Decimal("220000"),
-            to_currency="USD", to_amount=Decimal("10000"),
+            from_currency="USD", from_amount=Decimal("10000"),
+            to_currency="CZK", to_amount=Decimal("220000"),
             exchange_rate=Decimal("22"),
         )
         aggregator = CzechTaxAggregator(config=CzTaxConfig())
         result = aggregator.aggregate([], [conv], AssetResolver(AssetClassifier()), 2024)
         notes = result.sections["cz_10_summary"].notes
         assert any("currency conversion" in n for n in notes)
+
+
+class TestM15ConversionItems:
+    """Each conversion is visible and reviewable, and values nothing.
+
+    The note alone told the taxpayer that 17 conversions existed without
+    saying which — they appeared in no item, sheet or page.
+    """
+
+    def _items(self, *conversions):
+        from src.classification.asset_classifier import AssetClassifier
+        from src.countries.cz.item_builder import build_tax_items
+        from src.identification.asset_resolver import AssetResolver
+
+        items, _ = build_tax_items(
+            [], list(conversions), AssetResolver(AssetClassifier()), _fx())
+        return [i for i in items
+                if i.item_type == CzTaxItemType.CURRENCY_CONVERSION]
+
+    @staticmethod
+    def _conv(frm, amount, to, to_amount, rate, date="2024-01-05"):
+        from src.domain.events import CurrencyConversionEvent
+        return CurrencyConversionEvent(
+            asset_internal_id=uuid.uuid4(), event_date=date,
+            from_currency=frm, from_amount=Decimal(amount),
+            to_currency=to, to_amount=Decimal(to_amount),
+            exchange_rate=Decimal(rate),
+        )
+
+    def test_the_disposed_leg_is_what_gets_recorded(self):
+        """A gain would be measured on the currency given up, not received."""
+        [item] = self._items(
+            self._conv("EUR", "1807", "USD", "2129.3", "1.1783"))
+        assert item.original_currency == "EUR"
+        assert item.original_amount == Decimal("1807")
+        assert item.asset_symbol == "EUR.USD"
+        assert item.amount_czk is not None          # CZK volume, not a gain
+
+    def test_it_is_flagged_and_stays_out_of_the_tax_base(self):
+        [item] = self._items(
+            self._conv("EUR", "1807", "USD", "2129.3", "1.1783"))
+        assert item.section == CzTaxSection.CZ_10_CURRENCY
+        assert item.included_in_tax_base is False
+        assert item.is_taxable is False
+        assert item.qualifies_for_annual_limit is False
+        assert item.tax_review_status == CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+        assert "NENÍ spočítán" in item.tax_review_note
+
+    def test_the_time_test_leaves_it_alone(self):
+        """The unknown-type catch-all would mark it taxable and resolved,
+        claiming a figure the engine never computed."""
+        from src.countries.cz.time_test import evaluate_time_test
+
+        items = self._items(self._conv("EUR", "1807", "USD", "2129.3", "1.1783"))
+        evaluate_time_test(items, CzTaxConfig(), 2024)
+        assert items[0].included_in_tax_base is False
+        assert items[0].tax_review_status == CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+
+    def test_the_annual_limit_does_not_count_it(self):
+        from src.countries.cz.annual_limit import evaluate_annual_limit
+
+        items = self._items(self._conv("EUR", "1807", "USD", "2129.3", "1.1783"))
+        evaluate_annual_limit(items, CzTaxConfig(), has_fx=True)
+        assert items[0].qualifies_for_annual_limit is False
+        assert items[0].is_exempt is False
+
+    def test_conversions_do_not_move_the_tax(self):
+        """The whole point: recorded, never valued."""
+        from src.classification.asset_classifier import AssetClassifier
+        from src.countries.cz.plugin import CzechTaxAggregator
+        from src.identification.asset_resolver import AssetResolver
+
+        def _tax(events):
+            agg = CzechTaxAggregator(config=CzTaxConfig())
+            res = agg.aggregate([], events, AssetResolver(AssetClassifier()), 2024)
+            # Suffix follows the working currency (EUR without an FX converter).
+            lines = res.sections["cz_tax_liability"].line_items
+            return next(v for k, v in lines.items()
+                        if k.startswith("final_czech_tax_after_credit_"))
+
+        without = _tax([])
+        with_conv = _tax([
+            self._conv("EUR", "1807", "USD", "2129.3", "1.1783"),
+            self._conv("GBP", "1394", "USD", "1885.8", "1.3528"),
+        ])
+        assert with_conv == without
+
+    def test_one_item_per_conversion(self):
+        assert len(self._items(
+            self._conv("EUR", "1000", "USD", "1100", "1.1"),
+            self._conv("GBP", "500", "CHF", "530", "1.06", date="2024-06-05"),
+        )) == 2
+
+    def test_spending_koruna_to_buy_a_currency_is_not_a_disposal(self):
+        """It only establishes what the foreign currency cost. Flagging it would
+        put rows on the review page with nothing to review."""
+        assert self._items(
+            self._conv("CZK", "11706.87", "USD", "582.91", "20.0835")) == []
+
+    def test_the_note_counts_what_the_review_page_shows(self):
+        from src.classification.asset_classifier import AssetClassifier
+        from src.countries.cz.plugin import CzechTaxAggregator
+        from src.identification.asset_resolver import AssetResolver
+
+        events = [
+            self._conv("CZK", "11706.87", "USD", "582.91", "20.0835"),  # not one
+            self._conv("EUR", "1042", "USD", "1228.41", "1.1789"),      # is one
+        ]
+        agg = CzechTaxAggregator(config=CzTaxConfig(), fx_converter=_fx())
+        res = agg.aggregate([], events, AssetResolver(AssetClassifier()), 2024)
+        note = next(n for n in res.sections["cz_10_summary"].notes
+                    if "currency conversion" in n)
+        assert "1 currency conversion(s)" in note
+        rows = [i for i in res.country_result["items"]
+                if i.item_type == CzTaxItemType.CURRENCY_CONVERSION]
+        assert len(rows) == 1
 
 
 # ---------------------------------------------------------------------------

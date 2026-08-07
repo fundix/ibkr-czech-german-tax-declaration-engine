@@ -184,4 +184,5 @@ class CzTaxConfig:
         "cz_8_interest":   "§8 ZDP – Úroky",
         "cz_10_securities": "§10 ZDP – Cenné papíry",
         "cz_10_options":   "§10 ZDP – Opce a deriváty",
+        "cz_10_currency":  "§10 ZDP – Konverze měn (k ručnímu posouzení)",
     })

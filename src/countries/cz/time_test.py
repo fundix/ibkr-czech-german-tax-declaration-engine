@@ -160,6 +160,14 @@ def evaluate_time_test(
     limit_ref = config.paragraph_4_citation("annual_limit", tax_year)
 
     for item in items:
+        if item.item_type is CzTaxItemType.CURRENCY_CONVERSION:
+            # Recorded, not valued. The item carries the volume of a currency
+            # disposal, never a gain, and item_builder already flagged it for
+            # review. A holding period says nothing about currency, and the
+            # unknown-type catch-all below would mark it taxable and resolved —
+            # claiming a figure the engine has not computed.
+            continue
+
         if getattr(item, "fx_conversion_failed", False):
             # Foreign→CZK conversion failed for this item. Its CZK amounts are
             # None (never the raw foreign amount), so it must not silently enter
