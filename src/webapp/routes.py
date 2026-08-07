@@ -366,13 +366,16 @@ def dividends(request: Request, run_id: str, mode: Optional[str] = None):
     summary = svc.dividend_summary(run_id, active) or {
         "assets": [], "months": [],
         "total_gross_czk": Decimal(0), "total_wht_czk": Decimal(0),
+        "total_creditable_czk": Decimal(0), "total_excess_czk": Decimal(0),
     }
     months = summary["months"]
     max_month = max((v for _, v in months), default=Decimal(0))
     return _tpl(request, "dividends.html", meta=meta, modes=modes, mode=active,
                 assets=summary["assets"], months=months, max_month=max_month,
                 total_czk=summary["total_gross_czk"],
-                total_wht=summary["total_wht_czk"], page="dividends")
+                total_wht=summary["total_wht_czk"],
+                total_creditable=summary["total_creditable_czk"],
+                total_excess=summary["total_excess_czk"], page="dividends")
 
 
 @router.get("/results/{run_id}/download/{mode}.{fmt}")

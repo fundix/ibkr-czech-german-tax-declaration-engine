@@ -720,6 +720,93 @@ class TestDividendSummaryCountry:
         assert summary["assets"][0]["country"] is None
 
 
+class TestDividendWithholdingRates:
+    """Is it worth reclaiming? Answered from the FTC record already on the item."""
+
+    def _run_with(self, svc, items):
+        from src.webapp.serializers import dump_json
+        run_dir = svc.runs_dir / "2025-wht"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        dump_json({"items": items}, run_dir / "result.daily.json")
+        return "2025-wht"
+
+    def _div(self, symbol, gross, wht, creditable, cap="0.15", month="05"):
+        return {
+            "item_type": "DIVIDEND", "asset_symbol": symbol,
+            "asset_description": symbol, "source_country": "XX",
+            "amount_czk": gross, "wht_total_czk": wht,
+            "event_date": f"2025-{month}-15",
+            "ftc": {"actual_creditable_czk": creditable,
+                    "non_creditable_czk": str(Decimal(wht) - Decimal(creditable)),
+                    "configured_cap_rate": cap},
+        }
+
+    def _asset(self, svc, *items):
+        run = self._run_with(svc, list(items))
+        return svc.dividend_summary(run, "daily")
+
+    def test_over_withheld_payer_is_flagged_with_the_reclaimable_amount(
+            self, stub_service):
+        # The real EVO row: 30% taken by Sweden against a 15% treaty cap.
+        s = self._asset(stub_service,
+                        self._div("EVO", "1395.52", "418.66", "209.33"))
+        a = s["assets"][0]
+        assert a["effective_rate"] == Decimal("418.66") / Decimal("1395.52")
+        assert round(a["effective_rate"], 3) == Decimal("0.300")
+        assert a["cap_rate"] == Decimal("0.15")
+        assert a["over_treaty"] is True
+        assert a["excess_czk"] == Decimal("209.33")
+
+    def test_a_payer_at_the_treaty_rate_is_not_flagged(self, stub_service):
+        s = self._asset(stub_service,
+                        self._div("PYPL", "408.54", "61.28", "61.28"))
+        assert s["assets"][0]["over_treaty"] is False
+
+    def test_rounding_noise_does_not_raise_the_flag(self, stub_service):
+        """The real CVS row: three payouts, per-item caps rounded to hellers,
+        so the year lands at 15.03% with nothing actually over-withheld."""
+        s = self._asset(stub_service,
+                        self._div("CVS", "230.07", "34.58", "34.51"))
+        a = s["assets"][0]
+        assert a["effective_rate"] > a["cap_rate"]        # genuinely above...
+        assert a["over_treaty"] is False                  # ...but not by enough
+        assert a["excess_czk"] == Decimal("0.07")         # still reported
+
+    def test_rates_aggregate_over_the_whole_year(self, stub_service):
+        """Several payouts at different rates: what matters for a refund
+        claim is the aggregate, not any single payment."""
+        s = self._asset(
+            stub_service,
+            self._div("X", "100.00", "30.00", "15.00", month="03"),
+            self._div("X", "100.00", "15.00", "15.00", month="09"),
+        )
+        a = s["assets"][0]
+        assert a["count"] == 2
+        assert a["effective_rate"] == Decimal("0.225")    # 45 / 200
+        assert a["over_treaty"] is True
+        assert a["excess_czk"] == Decimal("15.00")
+
+    def test_totals_split_creditable_from_reclaimable(self, stub_service):
+        s = self._asset(stub_service,
+                        self._div("EVO", "1395.52", "418.66", "209.33"),
+                        self._div("PYPL", "408.54", "61.28", "61.28"))
+        assert s["total_wht_czk"] == Decimal("479.94")
+        assert s["total_creditable_czk"] == Decimal("270.61")
+        assert s["total_excess_czk"] == Decimal("209.33")
+
+    def test_a_run_without_ftc_records_still_renders(self, stub_service):
+        """Older runs predate the per-item ftc block."""
+        run = self._run_with(stub_service, [
+            {"item_type": "DIVIDEND", "asset_symbol": "OLD",
+             "amount_czk": "100.00", "wht_total_czk": "15.00",
+             "event_date": "2025-05-15"},
+        ])
+        a = stub_service.dividend_summary(run, "daily")["assets"][0]
+        assert a["cap_rate"] is None
+        assert a["over_treaty"] is False
+        assert a["creditable_czk"] == Decimal("0.00")
+
+
 class TestOptionValuation:
     """An option is quoted per underlying share but held in contracts of 100.
 

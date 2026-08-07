@@ -167,6 +167,14 @@ QUOTE_FETCH_WORKERS = 8
 # 12 keeps the legend readable; the book runs to 36 rows, so the fold matters.
 ALLOCATION_SLICES = 12
 
+# How far a payer's effective withholding rate may sit above its treaty cap
+# before the dividends page calls it over-withheld. Half a point: the per-item
+# cap is rounded to whole hellers, so several small payouts can land a few
+# hundredths over 15% with nothing actually wrong (CVS: 34.58 on 230.07 =
+# 15.03%). Every real gap is an order of magnitude wider — US 30 vs 15,
+# SE 30 vs 15, CH 35 vs 15, IE 25 vs 15.
+TREATY_RATE_TOLERANCE = Decimal("0.005")
+
 # Fuzzy description→symbol matching for the spreadsheet import. Deliberately
 # strict: a WRONG symbol in a sell plan is far worse than an unresolved row the
 # user picks from a dropdown. Measured on the real sheet, 0.72 keeps the good
@@ -2832,6 +2840,8 @@ class RunService:
         by_month: Dict[str, Decimal] = {}
         total_czk = Decimal(0)
         total_wht = Decimal(0)
+        total_creditable = Decimal(0)
+        total_excess = Decimal(0)
         for it in result.get("items", []):
             if it.get("item_type") not in ("DIVIDEND", "FUND_DISTRIBUTION"):
                 continue
@@ -2840,7 +2850,19 @@ class RunService:
                 "symbol": sym, "description": it.get("asset_description"),
                 "country": it.get("source_country"), "count": 0,
                 "gross_czk": Decimal(0), "wht_czk": Decimal(0),
+                "creditable_czk": Decimal(0), "excess_czk": Decimal(0),
+                "cap_rate": None,
             })
+            # The FTC record the engine already attached to the item: how much
+            # of the withholding the treaty lets Czechia credit, and what was
+            # taken above that rate. Nothing here is recomputed.
+            ftc = it.get("ftc") or {}
+            a["creditable_czk"] += Decimal(ftc.get("actual_creditable_czk") or 0)
+            a["excess_czk"] += Decimal(ftc.get("non_creditable_czk") or 0)
+            if ftc.get("configured_cap_rate") is not None:
+                a["cap_rate"] = Decimal(ftc["configured_cap_rate"])
+            total_creditable += Decimal(ftc.get("actual_creditable_czk") or 0)
+            total_excess += Decimal(ftc.get("non_creditable_czk") or 0)
             # Backfill: setdefault only looks at the first payment of the year,
             # so a January payout that carried no country left the symbol blank
             # for all twelve months.
@@ -2857,13 +2879,26 @@ class RunService:
             by_month[month] = by_month.get(month, Decimal(0)) + gross
         TWO = Decimal("0.01")
         for a in by_asset.values():
-            a["gross_czk"] = a["gross_czk"].quantize(TWO)
-            a["wht_czk"] = a["wht_czk"].quantize(TWO)
+            gross = a["gross_czk"]
+            # Effective rate over the whole year for this payer, not per
+            # payment: several payouts can be withheld at different rates and
+            # what matters for a refund claim is the aggregate.
+            a["effective_rate"] = (a["wht_czk"] / gross) if gross else None
+            # Over-withheld: the source state took more than the treaty allows,
+            # so the difference is reclaimable there and never creditable here.
+            a["over_treaty"] = bool(
+                a["cap_rate"] is not None and a["effective_rate"] is not None
+                and a["effective_rate"] > a["cap_rate"] + TREATY_RATE_TOLERANCE
+            )
+            for key in ("gross_czk", "wht_czk", "creditable_czk", "excess_czk"):
+                a[key] = a[key].quantize(TWO)
         return {
             "assets": sorted(by_asset.values(), key=lambda a: a["gross_czk"], reverse=True),
             "months": [(m, v.quantize(TWO)) for m, v in sorted(by_month.items())],
             "total_gross_czk": total_czk.quantize(TWO),
             "total_wht_czk": total_wht.quantize(TWO),
+            "total_creditable_czk": total_creditable.quantize(TWO),
+            "total_excess_czk": total_excess.quantize(TWO),
         }
 
     def time_test_overview(self, run_id: str, symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
