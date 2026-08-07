@@ -175,6 +175,14 @@ ALLOCATION_SLICES = 12
 # SE 30 vs 15, CH 35 vs 15, IE 25 vs 15.
 TREATY_RATE_TOLERANCE = Decimal("0.005")
 
+# Days to expiry at which a written in-the-money contract stops being something
+# to watch and becomes something to act on. An American option can be assigned
+# any day it is in the money, but it clusters at expiry and around ex-dividend
+# dates — which this tool cannot see, so time and moneyness are the whole
+# signal here.
+ASSIGNMENT_URGENT_DAYS = 7
+ASSIGNMENT_NEAR_DAYS = 30
+
 # Fuzzy description→symbol matching for the spreadsheet import. Deliberately
 # strict: a WRONG symbol in a sell plan is far worse than an unresolved row the
 # user picks from a dropdown. Measured on the real sheet, 0.72 keeps the good
@@ -1074,8 +1082,9 @@ class RunService:
         path = self.runs_dir / run_id / "portfolio.json"
         return load_json(path) if path.is_file() else None
 
-    def options_overview(self, run_id: str) -> Dict[str, Any]:
-        """Open option contracts from a run's portfolio, with days-to-expiry.
+    def options_overview(self, run_id: str, with_quotes: bool = True) -> Dict[str, Any]:
+        """Open option contracts from a run's portfolio, with days-to-expiry
+        and — when ``with_quotes`` — how far each one is in the money.
 
         Includes both long (bought) and short (written) contracts — writing
         options is exactly where the expiry matters most — so it reads the raw
@@ -1089,10 +1098,84 @@ class RunService:
         ``min(today, 31 Dec of the tax year)`` — today for the live current
         year, the year-end for closed years. ``options`` is empty for old runs
         whose ``portfolio.json`` predates option metadata (re-run to populate).
+
+        Quote lookups go through the runner: they need its decimal context for
+        the moneyness arithmetic, and the fetch pool must not be scheduled from
+        the worker it would otherwise block. Pass ``with_quotes=False`` for the
+        cheap offline shape.
         """
         pf = self.load_portfolio(run_id)
         if pf is None:
             return {"as_of": None, "tax_year": None, "options": []}
+        if not with_quotes:
+            return self._compute_options_overview(pf, quotes={})
+        rows = self._compute_options_overview(pf, quotes=None)
+        return self.runner.run_sync(self._price_options_overview, rows, timeout=120)
+
+    def _price_options_overview(self, overview: Dict[str, Any]) -> Dict[str, Any]:
+        """Second pass on the runner: one quote per distinct underlying."""
+        wanted = {(r["underlying"], r["currency"] or "USD")
+                  for r in overview["options"]
+                  if r.get("underlying") and r.get("strike_price")}
+        quotes = self._fetch_quote_map(sorted(wanted))
+        for row in overview["options"]:
+            self._annotate_moneyness(row, quotes)
+        overview["quotes_ok"] = sum(1 for r in overview["options"]
+                                    if r.get("underlying_price") is not None)
+        overview["at_risk"] = sum(1 for r in overview["options"]
+                                  if r.get("assignment_risk") in ("high", "elevated"))
+        return overview
+
+    @staticmethod
+    def _annotate_moneyness(row: Dict[str, Any], quotes: Dict[Tuple[str, str], Any]) -> None:
+        """Fill in the underlying price, moneyness and assignment risk.
+
+        The underlying carries no currency of its own, so the contract's stands
+        in — which is what picks the exchange suffix, and is right for the real
+        book (a TUI option in EUR wants TUI1 on Xetra, a US option in USD wants
+        the US listing).
+
+        ``moneyness_pct`` is the intrinsic value as a share of the strike, so
+        positive always means in the money whichever way the option points.
+        Assignment risk is only ever set on a written leg: being long an
+        in-the-money contract is the good case.
+        """
+        row.update({"underlying_price": None, "intrinsic_value": None,
+                    "moneyness_pct": None, "in_the_money": None,
+                    "assignment_risk": None})
+        strike = row.get("strike_price")
+        kind = row.get("option_type")
+        if not strike or kind not in ("C", "P") or not row.get("underlying"):
+            return
+        quote = quotes.get((row["underlying"], row.get("currency") or "USD"))
+        if quote is None:
+            return
+
+        strike_d = Decimal(str(strike))
+        spot = Decimal(str(quote.price))
+        row["underlying_price"] = spot
+        edge = (spot - strike_d) if kind == "C" else (strike_d - spot)
+        row["intrinsic_value"] = max(edge, Decimal(0))
+        row["moneyness_pct"] = (edge / strike_d * 100) if strike_d else None
+        row["in_the_money"] = edge > 0
+
+        if row["net_quantity"] >= 0 or row.get("expired"):
+            return                              # long leg, or already past it
+        days = row.get("days_to_expiry")
+        if edge <= 0:
+            row["assignment_risk"] = "none"
+        elif days is None:
+            row["assignment_risk"] = "watch"
+        elif days <= ASSIGNMENT_URGENT_DAYS:
+            row["assignment_risk"] = "high"
+        elif days <= ASSIGNMENT_NEAR_DAYS:
+            row["assignment_risk"] = "elevated"
+        else:
+            row["assignment_risk"] = "watch"
+
+    def _compute_options_overview(self, pf: Dict[str, Any],
+                                  quotes: Optional[Dict[Tuple[str, str], Any]]
+                                  ) -> Dict[str, Any]:
         today = date.today()
         tax_year = pf.get("tax_year")
         ref = today
@@ -1135,6 +1218,9 @@ class RunService:
                 "net_display": format(net.normalize(), "f"),
             })
         rows.sort(key=lambda r: (r["expiry_date"] is None, r["expiry_date"] or ""))
+        if quotes is not None:
+            for row in rows:
+                self._annotate_moneyness(row, quotes)
         return {"as_of": ref.isoformat(), "tax_year": tax_year, "options": rows}
 
     # ------------------------------------------------------------------
@@ -1227,36 +1313,41 @@ class RunService:
             return Decimal(str(mult))
         return None if pos.get("category") == "OPTION" else Decimal(1)
 
-    def _fetch_quotes(self, pf: Dict[str, Any]) -> Dict[Tuple[str, str], Any]:
-        """Every holding's live quote, fetched concurrently. ``{}`` values may
-        be ``None`` — a missing quote is the caller's EOY-fallback case.
+    def _fetch_quote_map(
+        self, keys: List[Tuple[str, str]]
+    ) -> Dict[Tuple[str, str], Any]:
+        """Fetch these (symbol, currency) quotes concurrently.
 
-        Keyed by (symbol, currency) because the currency is what picks the
-        Yahoo exchange suffix, and deduplicated so one symbol held twice costs
-        one request.
+        Values may be ``None`` — a missing quote is the caller's fallback case.
+        Keyed by the pair because the currency is what picks the Yahoo exchange
+        suffix; pass a deduplicated list and one symbol wanted twice costs one
+        request.
 
-        Its own pool, deliberately NOT ``self.runner``: this method already
-        runs ON the runner's single worker, so scheduling there would deadlock.
-        Threads get the engine's decimal context through ``initializer``, the
-        same way ``jobs.py`` arms its worker.
+        Its own pool, deliberately NOT ``self.runner``: callers already run ON
+        the runner's single worker, so scheduling there would deadlock. Threads
+        get the engine's decimal context through ``initializer``, the same way
+        ``jobs.py`` arms its worker.
         """
-        wanted = {
-            (pos.get("symbol") or "", pos.get("eoy_currency") or "USD")
-            for pos in pf.get("positions", [])
-            if self._needs_quote(pos)
-        }
-        keys = sorted(wanted)
         if not keys:
             return {}
-        if len(keys) == 1:                      # no pool for a single holding
+        if len(keys) == 1:                      # no pool for a single symbol
             return {keys[0]: self.quotes.get_quote(*keys[0])}
         with ThreadPoolExecutor(max_workers=min(QUOTE_FETCH_WORKERS, len(keys)),
                                 thread_name_prefix="quote",
                                 initializer=setup_decimal_context) as pool:
             futures = {key: pool.submit(self.quotes.get_quote, *key) for key in keys}
         # .result() re-raises, so a broken quote service still surfaces here
-        # rather than turning into a silent EOY fallback.
+        # rather than turning into a silent fallback.
         return {key: future.result() for key, future in futures.items()}
+
+    def _fetch_quotes(self, pf: Dict[str, Any]) -> Dict[Tuple[str, str], Any]:
+        """Live quote per holding worth one — see ``_needs_quote``."""
+        wanted = {
+            (pos.get("symbol") or "", pos.get("eoy_currency") or "USD")
+            for pos in pf.get("positions", [])
+            if self._needs_quote(pos)
+        }
+        return self._fetch_quote_map(sorted(wanted))
 
     @staticmethod
     def allocation_slices(positions: List[Dict[str, Any]],

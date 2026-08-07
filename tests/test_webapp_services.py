@@ -1009,7 +1009,7 @@ class TestOptionsOverview:
              "strike_price": "5", "expiry_date": None,
              "quantity_long": "1", "quantity_short": "0"},
         ])
-        overview = service.options_overview("opt-run")
+        overview = service.options_overview("opt-run", with_quotes=False)
         # Days count from the tax-year end (2025-12-31), not today — the FIFO
         # book is a year-end snapshot.
         assert overview["as_of"] == "2025-12-31"
@@ -1043,13 +1043,132 @@ class TestOptionsOverview:
              "option_type": "P", "strike_price": "78", "expiry_date": "2026-01-16",
              "eoy_currency": "USD", "quantity_long": "2", "quantity_short": "0"},
         ])
-        [row] = service.options_overview("opt-run")["options"]
+        [row] = service.options_overview(
+            "opt-run", with_quotes=False)["options"]
         assert row["expired"] is False
         assert row["days_to_expiry"] == 16  # 2025-12-31 -> 2026-01-16
 
     def test_options_overview_missing_run_is_empty(self, service):
         assert service.options_overview("does-not-exist") == {
             "as_of": None, "tax_year": None, "options": []}
+
+
+class TestAssignmentRisk:
+    """A written contract in the money can be assigned; a bought one cannot.
+
+    The old expiry badge was purely time-based and lit up on long contracts
+    too, where there is nothing to act on.
+    """
+
+    def _svc(self, tmp_path, prices):
+        return RunService(data_dir=tmp_path / "data", runs_dir=tmp_path / "runs",
+                          quote_service=StubQuotes(prices),
+                          converter_factory=StubConverter)
+
+    def _contract(self, symbol, kind, strike, qty_short, days, underlying="XYZ",
+                  qty_long="0"):
+        from datetime import date as _date, timedelta as _timedelta
+        # Days are measured from min(today, 31 Dec of the tax year); with the
+        # tax year set to today's, that is today.
+        expiry = (_date.today() + _timedelta(days=days)).isoformat()
+        return {"symbol": symbol, "category": "OPTION", "option_type": kind,
+                "strike_price": strike, "expiry_date": expiry,
+                "eoy_currency": "USD", "multiplier": 100,
+                "quantity_long": qty_long, "quantity_short": qty_short,
+                "underlying_symbol": underlying}
+
+    def _rows(self, tmp_path, positions, prices={"XYZ": (Decimal("20"), "USD")}):
+        from datetime import date as _date
+        from src.webapp.serializers import dump_json
+        svc = self._svc(tmp_path, prices)
+        run_dir = svc.runs_dir / "risk-run"
+        run_dir.mkdir(parents=True)
+        dump_json({"tax_year": _date.today().year, "positions": positions},
+                  run_dir / "portfolio.json")
+        try:
+            overview = svc.options_overview("risk-run")
+        finally:
+            svc.runner.shutdown(wait=False)
+        return overview
+
+    def test_written_itm_put_close_to_expiry_is_urgent(self, tmp_path):
+        # Spot 20, strike 25 → the put is 5 in the money, 20% of strike.
+        ov = self._rows(tmp_path, [
+            self._contract("P25", "P", "25", "1", days=3)])
+        [row] = ov["options"]
+        assert row["underlying_price"] == Decimal("20")
+        assert row["intrinsic_value"] == Decimal("5")
+        assert row["moneyness_pct"] == Decimal("20")
+        assert row["in_the_money"] is True
+        assert row["assignment_risk"] == "high"
+        assert ov["at_risk"] == 1
+
+    def test_written_itm_call_further_out_is_elevated_then_watch(self, tmp_path):
+        # Spot 20, strike 15 → the call is 5 in the money.
+        ov = self._rows(tmp_path, [
+            self._contract("C15a", "C", "15", "1", days=20),
+            self._contract("C15b", "C", "15", "1", days=200),
+        ])
+        by = {r["symbol"]: r for r in ov["options"]}
+        assert by["C15a"]["assignment_risk"] == "elevated"
+        assert by["C15b"]["assignment_risk"] == "watch"
+        assert ov["at_risk"] == 1          # only the near one counts
+
+    def test_written_otm_contract_is_explicitly_safe(self, tmp_path):
+        ov = self._rows(tmp_path, [
+            self._contract("P15", "P", "15", "1", days=3)])
+        [row] = ov["options"]
+        assert row["in_the_money"] is False
+        assert row["moneyness_pct"] == Decimal("-100") / Decimal("3")  # (15-20)/15
+        assert row["assignment_risk"] == "none"
+        assert ov["at_risk"] == 0
+
+    def test_a_bought_contract_carries_no_assignment_risk(self, tmp_path):
+        """Being long an in-the-money option is the good case."""
+        ov = self._rows(tmp_path, [
+            self._contract("C15", "C", "15", "0", days=3, qty_long="1")])
+        [row] = ov["options"]
+        assert row["in_the_money"] is True
+        assert row["assignment_risk"] is None
+
+    def test_an_expired_contract_is_not_re_flagged(self, tmp_path):
+        ov = self._rows(tmp_path, [
+            self._contract("P25", "P", "25", "1", days=-5)])
+        [row] = ov["options"]
+        assert row["expired"] is True
+        assert row["assignment_risk"] is None
+
+    def test_a_missing_quote_leaves_moneyness_unknown(self, tmp_path):
+        """No guessing: an unmapped underlying yields no risk verdict at all."""
+        ov = self._rows(tmp_path, [
+            self._contract("P25", "P", "25", "1", days=3, underlying="NOPE")])
+        [row] = ov["options"]
+        assert row["underlying_price"] is None
+        assert row["in_the_money"] is None
+        assert row["assignment_risk"] is None
+        assert ov["quotes_ok"] == 0
+
+    def test_one_request_per_underlying_not_per_contract(self, tmp_path):
+        quotes = _CountingQuotes(
+            lambda s: SimpleNamespace(ibkr_symbol=s, yahoo_symbol=s,
+                                      price=Decimal("20"), currency="USD",
+                                      fetched_at=0.0))
+        from datetime import date as _date
+        from src.webapp.serializers import dump_json
+        svc = RunService(data_dir=tmp_path / "d", runs_dir=tmp_path / "r",
+                         quote_service=quotes, converter_factory=StubConverter)
+        run_dir = svc.runs_dir / "risk-run"
+        run_dir.mkdir(parents=True)
+        dump_json({"tax_year": _date.today().year, "positions": [
+            self._contract("A", "C", "15", "1", days=10),
+            self._contract("B", "P", "25", "1", days=20),
+            self._contract("C", "C", "30", "1", days=30),
+        ]}, run_dir / "portfolio.json")
+        try:
+            svc.options_overview("risk-run")
+        finally:
+            svc.runner.shutdown(wait=False)
+        assert quotes.calls == [("XYZ", "USD")]     # three contracts, one XYZ
 
 
 class TestDisposalsAndCompare:

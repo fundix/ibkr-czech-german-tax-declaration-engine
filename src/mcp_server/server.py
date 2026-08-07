@@ -164,6 +164,16 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
         return _jsonable({"run_id": run_id, **pf})
 
     @mcp.tool()
+    def get_options(tax_year: int, run_id: Optional[str] = None,
+                    with_quotes: bool = True) -> dict:
+        """Open option contracts and their assignment risk. Per contract: underlying, Call/Put, strike, expiry, days_to_expiry, long vs written quantity, and — with_quotes=True (default, one live quote per distinct underlying) — the underlying price, intrinsic_value, moneyness_pct (intrinsic as % of strike, positive = in the money whichever way the option points) and assignment_risk. assignment_risk is set ONLY on written (short) legs, because being long an in-the-money contract is the good case: 'high' = in the money with a week or less to expiry, 'elevated' = in the money within a month, 'watch' = in the money but further out, 'none' = out of the money, null = not a written leg, already expired, or no quote for the underlying. at_risk counts the high+elevated ones. Answers 'am I about to get assigned?'. days_to_expiry counts from min(today, 31 Dec of the tax year), so contracts in a closed year do not read as expired just because that date has passed. Set with_quotes=false to skip the network entirely."""
+        run_id = _require_run(tax_year, run_id)
+        overview = svc.options_overview(run_id, with_quotes=with_quotes)
+        if overview.get("as_of") is None:
+            raise ValueError(f"Run {run_id} has no portfolio snapshot.")
+        return _jsonable({"run_id": run_id, **overview})
+
+    @mcp.tool()
     def get_time_test_status(tax_year: int, symbol: Optional[str] = None,
                              run_id: Optional[str] = None) -> dict:
         """Per-lot §4/1/u time-test countdown: for each open lot the 'exempt_from' date, days remaining, and status (exempt_now / running / not applicable for derivatives). Optionally filter by symbol."""

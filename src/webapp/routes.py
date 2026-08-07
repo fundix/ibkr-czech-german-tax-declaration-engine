@@ -14,7 +14,8 @@ from starlette.datastructures import UploadFile
 from src.webapp import settings
 from src.webapp.jobs import JobStatus
 from src.webapp.services import (
-    DEFAULT_DISPOSAL_SORT, DISPOSAL_SORTS, item_matches, symbol_matches,
+    ASSIGNMENT_NEAR_DAYS, DEFAULT_DISPOSAL_SORT, DISPOSAL_SORTS, item_matches,
+    symbol_matches,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,10 @@ def dashboard_valuation(request: Request):
     return _tpl(request, "partials/dashboard_valuation.html",
                 run_id=data["run_id"], meta=data["meta"], live=live,
                 allocation=allocation, options=opt["options"],
-                options_as_of=opt["as_of"], snapshots=svc.list_snapshots())
+                options_as_of=opt["as_of"],
+                options_at_risk=opt.get("at_risk"),
+                assignment_near_days=ASSIGNMENT_NEAR_DAYS,
+                snapshots=svc.list_snapshots())
 
 
 @router.get("/runs", response_class=HTMLResponse)
