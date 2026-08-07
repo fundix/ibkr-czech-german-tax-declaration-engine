@@ -27,7 +27,7 @@ from typing import Any, Optional
 from mcp.server.fastmcp import FastMCP
 
 from src.webapp.serializers import json_default
-from src.webapp.services import RunService
+from src.webapp.services import DEFAULT_DISPOSAL_SORT, RunService
 
 logger = logging.getLogger(__name__)
 
@@ -186,11 +186,17 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
     @mcp.tool()
     def get_disposals(tax_year: int, symbol: Optional[str] = None,
                       fx_mode: str = "daily", include_lots: bool = False,
-                      run_id: Optional[str] = None) -> dict:
-        """Realized §10 disposals (movements) for a year: per-symbol totals — quantity sold, proceeds, cost basis, gain/loss CZK, taxable vs time-test-exempt split, first/last sale date. Pass symbol (a stock symbol also matches options on it, including German listings where the tickers differ, e.g. TUI1 ↔ 'C TUI …') or include_lots=true for per-lot pairing detail: which acquisition date each sale consumed, per-lot holding days and exemption. Answers 'why is PYPL a loss this year?' or 'what did I sell in March?'. An fx_warning field appears when some items have a failed FX→CZK conversion — their money legs count as 0, so those gains are unknown rather than zero."""
+                      run_id: Optional[str] = None,
+                      category: Optional[str] = None,
+                      date_from: Optional[str] = None,
+                      date_to: Optional[str] = None,
+                      sort: str = DEFAULT_DISPOSAL_SORT) -> dict:
+        """Realized §10 disposals (movements) for a year: per-symbol totals — quantity sold, proceeds, cost basis, gain/loss CZK, taxable vs time-test-exempt split, first/last sale date. Pass symbol (a stock symbol also matches options on it, including German listings where the tickers differ, e.g. TUI1 ↔ 'C TUI …') or include_lots=true for per-lot pairing detail: which acquisition date each sale consumed, per-lot holding days and exemption. Narrow with category ('STOCK', 'OPTION', 'BOND', 'CFD', 'INVESTMENT_FUND' — the asset class, so CFDs are not lumped in with options) and an inclusive date_from/date_to window of YYYY-MM-DD sale dates. Order the rows with sort: 'gain_desc' (default, what you earned most on), 'gain_asc' (worst losses first), 'abs_desc' (biggest movers), 'proceeds_desc', 'symbol'. Answers 'what did I earn on this year?', 'why is PYPL a loss?' or 'what did I sell in March?'. An fx_warning field appears when some items have a failed FX→CZK conversion — their money legs count as 0, so those gains are unknown rather than zero."""
         run_id = _require_run(tax_year, run_id)
         summary = svc.disposal_summary(run_id, fx_mode, symbol=symbol,
-                                       include_lots=include_lots)
+                                       include_lots=include_lots, sort=sort,
+                                       category=category, date_from=date_from,
+                                       date_to=date_to)
         if summary is None:
             raise ValueError(
                 f"Run {run_id} has no '{fx_mode}' result. Available modes: "

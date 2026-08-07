@@ -69,6 +69,86 @@ PAIRING_METHODS = ("fifo", "lifo", "weighted_average", "optimal")
 # Result items that represent a realized §10 disposal (carry gain/loss legs).
 DISPOSAL_ITEM_TYPES = ("SECURITY_DISPOSAL", "OPTION_CLOSE", "OPTION_EXPIRY_WORTHLESS")
 
+# Initial ordering of the per-symbol disposal rows. "gain_desc" is the default
+# because the question being asked is "what did I earn on" — ordering by
+# magnitude answers a different one, putting the worst loss above every
+# moderate win. The table is click-sortable, so this only sets the first view.
+DISPOSAL_SORTS = {
+    "gain_desc": (lambda a: a["gain_loss_czk"], True),
+    "gain_asc": (lambda a: a["gain_loss_czk"], False),
+    "abs_desc": (lambda a: abs(a["gain_loss_czk"]), True),
+    "proceeds_desc": (lambda a: a["proceeds_czk"], True),
+    "symbol": (lambda a: a["symbol"], False),
+}
+DEFAULT_DISPOSAL_SORT = "gain_desc"
+
+
+def symbol_matches(sym: str, category: Optional[str],
+                   description: Optional[str], want: str) -> bool:
+    """Whether a result row belongs to the ticker the user typed.
+
+    A stock symbol also claims the options written on it, in both key styles
+    (OCC ``PYPL  260731C00061000`` and marker-first ``C TUI  20260619 9 M``),
+    plus a description-prefix fallback for listings whose stock ticker differs
+    from the option key's underlying token (stock ``TUI1`` vs option
+    ``C TUI …`` — IBKR's option description opens with the stock ticker,
+    "TUI1 19DEC25 6.4 C").
+
+    Shared by the disposals ranking and the items list so typing a ticker
+    means the same thing on both.
+    """
+    if not want:
+        return True
+    up = sym.upper()
+    if up == want:
+        return True
+    if category != "OPTION":
+        return False
+    if _OCC_KEY_TAIL.search(up):               # OCC: underlying first
+        return up.startswith(want + " ")
+    if (up[:2] in ("C ", "P ")                 # marker-first key style
+            and up[2:].lstrip().startswith(want + " ")):
+        return True
+    return (description or "").upper().startswith(want + " ")
+
+
+def item_matches(it: Dict[str, Any], *, category: Optional[str] = None,
+                 date_from: Optional[str] = None,
+                 date_to: Optional[str] = None) -> bool:
+    """Category and date-window filter shared by the disposals and items views.
+
+    Category keys on ``asset_category``, never ``item_type``: a CFD is emitted
+    as ``OPTION_CLOSE`` (item_builder), so an item_type filter would silently
+    count CFDs among the options.
+
+    Both date bounds are inclusive and expect a full ISO ``YYYY-MM-DD``, which
+    is what ``<input type="date">`` submits and which compares correctly as a
+    string. A row with no date falls outside any window that is set.
+    """
+    if category and (it.get("asset_category") or "") != category:
+        return False
+    if date_from or date_to:
+        when = it.get("event_date") or ""
+        if date_from and when < date_from:
+            return False
+        if date_to and when > date_to:
+            return False
+    return True
+
+
+def _qty_display(value: Any) -> str:
+    """FIFO quantities carry eight tail zeros; "5.00000000" reads as noise.
+
+    ``format`` rather than a bare ``normalize()``, which renders Decimal("100")
+    as "1E+2".
+    """
+    if value in (None, ""):
+        return ""
+    try:
+        return format(Decimal(str(value)).normalize(), "f")
+    except (InvalidOperation, ValueError):
+        return str(value)
+
 # Sell-target ladder ("prodejní zóny") — user state, not a run artifact.
 SELL_TARGETS_FILE = "sell_targets.json"
 SELL_TARGETS_LOCK = "sell_targets.lock"
@@ -86,6 +166,14 @@ QUOTE_FETCH_WORKERS = 8
 # Slices the allocation doughnut draws before folding the rest into "ostatní".
 # 12 keeps the legend readable; the book runs to 36 rows, so the fold matters.
 ALLOCATION_SLICES = 12
+
+# How far a payer's effective withholding rate may sit above its treaty cap
+# before the dividends page calls it over-withheld. Half a point: the per-item
+# cap is rounded to whole hellers, so several small payouts can land a few
+# hundredths over 15% with nothing actually wrong (CVS: 34.58 on 230.07 =
+# 15.03%). Every real gap is an order of magnitude wider — US 30 vs 15,
+# SE 30 vs 15, CH 35 vs 15, IE 25 vs 15.
+TREATY_RATE_TOLERANCE = Decimal("0.005")
 
 # Fuzzy description→symbol matching for the spreadsheet import. Deliberately
 # strict: a WRONG symbol in a sell plan is far worse than an unresolved row the
@@ -1204,6 +1292,50 @@ class RunService:
             "short_value_czk": sum((v for _, v in shorts), Decimal(0)) or None,
         }
 
+    @staticmethod
+    def portfolio_breakdown(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Long-side split by asset class and by trading currency.
+
+        The denominator is the LONG value alone. A written position is a
+        liability, not a share of what you own, so counting it would push the
+        weights past 100% — and the same reasoning already keeps it out of the
+        allocation doughnut.
+
+        Sets ``weight_pct`` on every row as a side effect, so the table can
+        sort by it. Rows are mutated in place because they are the same dicts
+        the caller is about to render.
+        """
+        long_total = sum((r["value_czk"] for r in rows
+                          if r.get("value_czk") and r["value_czk"] > 0),
+                         Decimal(0))
+        by_category: Dict[str, Decimal] = {}
+        by_currency: Dict[str, Decimal] = {}
+        for r in rows:
+            value = r.get("value_czk")
+            if not value or value <= 0:
+                r["weight_pct"] = None
+                continue
+            r["weight_pct"] = (value / long_total * 100) if long_total else None
+            cat = r.get("category") or "?"
+            cur = r.get("live_currency") or r.get("eoy_currency") or "?"
+            by_category[cat] = by_category.get(cat, Decimal(0)) + value
+            by_currency[cur] = by_currency.get(cur, Decimal(0)) + value
+
+        def _slices(totals: Dict[str, Decimal]) -> List[Dict[str, Any]]:
+            # value stays an exact string, pct is a float: it is a display
+            # share, never summed back into money, and these slices go
+            # through tojson into Chart.js, which has no Decimal.
+            return [{"label": k, "value": str(v),
+                     "pct": float(v / long_total * 100) if long_total else None}
+                    for k, v in sorted(totals.items(), key=lambda kv: kv[1],
+                                       reverse=True)]
+
+        return {
+            "total_czk": long_total or None,
+            "by_category": _slices(by_category),
+            "by_currency": _slices(by_currency),
+        }
+
     def _compute_live_portfolio(self, pf: Dict[str, Any]) -> Dict[str, Any]:
         from datetime import date as _date
         today = _date.today()
@@ -1266,7 +1398,9 @@ class RunService:
             rows.append(row)
 
         rows.sort(key=lambda r: r.get("value_czk") or Decimal(0), reverse=True)
+        breakdown = self.portfolio_breakdown(rows)     # also sets weight_pct
         result = {
+            "breakdown": breakdown,
             "as_of": today.isoformat(),
             "tax_year": pf.get("tax_year"),
             "positions": rows,
@@ -2706,6 +2840,8 @@ class RunService:
         by_month: Dict[str, Decimal] = {}
         total_czk = Decimal(0)
         total_wht = Decimal(0)
+        total_creditable = Decimal(0)
+        total_excess = Decimal(0)
         for it in result.get("items", []):
             if it.get("item_type") not in ("DIVIDEND", "FUND_DISTRIBUTION"):
                 continue
@@ -2714,7 +2850,19 @@ class RunService:
                 "symbol": sym, "description": it.get("asset_description"),
                 "country": it.get("source_country"), "count": 0,
                 "gross_czk": Decimal(0), "wht_czk": Decimal(0),
+                "creditable_czk": Decimal(0), "excess_czk": Decimal(0),
+                "cap_rate": None,
             })
+            # The FTC record the engine already attached to the item: how much
+            # of the withholding the treaty lets Czechia credit, and what was
+            # taken above that rate. Nothing here is recomputed.
+            ftc = it.get("ftc") or {}
+            a["creditable_czk"] += Decimal(ftc.get("actual_creditable_czk") or 0)
+            a["excess_czk"] += Decimal(ftc.get("non_creditable_czk") or 0)
+            if ftc.get("configured_cap_rate") is not None:
+                a["cap_rate"] = Decimal(ftc["configured_cap_rate"])
+            total_creditable += Decimal(ftc.get("actual_creditable_czk") or 0)
+            total_excess += Decimal(ftc.get("non_creditable_czk") or 0)
             # Backfill: setdefault only looks at the first payment of the year,
             # so a January payout that carried no country left the symbol blank
             # for all twelve months.
@@ -2731,13 +2879,26 @@ class RunService:
             by_month[month] = by_month.get(month, Decimal(0)) + gross
         TWO = Decimal("0.01")
         for a in by_asset.values():
-            a["gross_czk"] = a["gross_czk"].quantize(TWO)
-            a["wht_czk"] = a["wht_czk"].quantize(TWO)
+            gross = a["gross_czk"]
+            # Effective rate over the whole year for this payer, not per
+            # payment: several payouts can be withheld at different rates and
+            # what matters for a refund claim is the aggregate.
+            a["effective_rate"] = (a["wht_czk"] / gross) if gross else None
+            # Over-withheld: the source state took more than the treaty allows,
+            # so the difference is reclaimable there and never creditable here.
+            a["over_treaty"] = bool(
+                a["cap_rate"] is not None and a["effective_rate"] is not None
+                and a["effective_rate"] > a["cap_rate"] + TREATY_RATE_TOLERANCE
+            )
+            for key in ("gross_czk", "wht_czk", "creditable_czk", "excess_czk"):
+                a[key] = a[key].quantize(TWO)
         return {
             "assets": sorted(by_asset.values(), key=lambda a: a["gross_czk"], reverse=True),
             "months": [(m, v.quantize(TWO)) for m, v in sorted(by_month.items())],
             "total_gross_czk": total_czk.quantize(TWO),
             "total_wht_czk": total_wht.quantize(TWO),
+            "total_creditable_czk": total_creditable.quantize(TWO),
+            "total_excess_czk": total_excess.quantize(TWO),
         }
 
     def time_test_overview(self, run_id: str, symbol: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -2783,7 +2944,9 @@ class RunService:
 
     def disposal_summary(
         self, run_id: str, mode: str, symbol: Optional[str] = None,
-        include_lots: bool = False,
+        include_lots: bool = False, sort: str = DEFAULT_DISPOSAL_SORT,
+        category: Optional[str] = None, date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Realized §10 disposals from a persisted run.
 
@@ -2791,36 +2954,16 @@ class RunService:
         each sale consumed) when ``symbol`` is given or ``include_lots`` is
         True — kept opt-in so a busy year doesn't flood the MCP client.
 
-        Single source for the MCP tool. ``symbol`` matches the exact asset
-        symbol, and heuristically the options on that underlying: both option
-        key styles (OCC ``PYPL  260731C00061000`` and marker-first
-        ``C TUI  20260619 9 M``), plus a description-prefix fallback for
-        listings whose stock ticker differs from the option key's underlying
-        token (stock ``TUI1`` vs option ``C TUI …`` — IBKR's option
-        description starts with the stock ticker, "TUI1 19DEC25 6.4 C").
-        The per-lot rows always show exact symbols.
+        Single source for the web page AND the MCP tool. ``symbol`` matches
+        the exact asset symbol and the options written on that underlying
+        (see ``symbol_matches``); ``category`` and the date window come from
+        ``item_matches``. The per-lot rows always show exact symbols.
         """
         result = self.load_result(run_id, mode)
         if result is None:
             return None
         TWO = Decimal("0.01")
         want = (symbol or "").strip().upper()
-
-        def _matches(sym: str, category: Optional[str],
-                     description: Optional[str]) -> bool:
-            if not want:
-                return True
-            up = sym.upper()
-            if up == want:
-                return True
-            if category != "OPTION":
-                return False
-            if _OCC_KEY_TAIL.search(up):           # OCC: underlying first
-                return up.startswith(want + " ")
-            if (up[:2] in ("C ", "P ")             # marker-first key style
-                    and up[2:].lstrip().startswith(want + " ")):
-                return True
-            return (description or "").upper().startswith(want + " ")
 
         by_symbol: Dict[str, Dict[str, Any]] = {}
         lots: List[Dict[str, Any]] = []
@@ -2837,8 +2980,11 @@ class RunService:
             if it.get("item_type") not in DISPOSAL_ITEM_TYPES:
                 continue
             sym = it.get("asset_symbol") or "?"
-            if not _matches(sym, it.get("asset_category"),
-                            it.get("asset_description")):
+            if not symbol_matches(sym, it.get("asset_category"),
+                                  it.get("asset_description"), want):
+                continue
+            if not item_matches(it, category=category, date_from=date_from,
+                                date_to=date_to):
                 continue
             gain = Decimal(it.get("gain_loss_czk") or 0)
             proceeds = Decimal(it.get("proceeds_czk") or 0)
@@ -2888,6 +3034,7 @@ class RunService:
                     "acquisition_date": it.get("acquisition_date"),
                     "holding_period_days": it.get("holding_period_days"),
                     "quantity": it.get("quantity"),
+                    "quantity_display": _qty_display(it.get("quantity")),
                     "proceeds_czk": _q2(it.get("proceeds_czk")),
                     "cost_basis_czk": _q2(it.get("cost_basis_czk")),
                     "gain_loss_czk": _q2(it.get("gain_loss_czk")),
@@ -2901,15 +3048,21 @@ class RunService:
             for key in ("proceeds_czk", "cost_basis_czk", "gain_loss_czk",
                         "taxable_gain_loss_czk", "exempt_gain_loss_czk"):
                 a[key] = a[key].quantize(TWO)
+            # FIFO quantities carry eight tail zeros. format() rather than
+            # plain normalize(), which turns Decimal("100") into "1E+2".
+            a["quantity_display"] = _qty_display(a["quantity_sold"])
         for key in ("proceeds_czk", "cost_basis_czk", "gain_loss_czk",
                     "taxable_gain_loss_czk", "exempt_gain_loss_czk"):
             totals[key] = totals[key].quantize(TWO)
 
+        sort_key, descending = DISPOSAL_SORTS.get(
+            sort, DISPOSAL_SORTS[DEFAULT_DISPOSAL_SORT])
         out: Dict[str, Any] = {
-            "symbol_filter": symbol, "totals": totals,
-            "by_symbol": sorted(by_symbol.values(),
-                                key=lambda a: abs(a["gain_loss_czk"]),
-                                reverse=True),
+            "symbol_filter": symbol, "totals": totals, "sort": sort,
+            "filters": {"symbol": symbol or None, "category": category or None,
+                        "date_from": date_from or None, "date_to": date_to or None},
+            "by_symbol": sorted(by_symbol.values(), key=sort_key,
+                                reverse=descending),
             "lots": sorted(lots, key=lambda l: (l["sale_date"] or "",
                                                 l["symbol"])),
             "note": ("Gross per-item aggregation; the §10 taxable netting "

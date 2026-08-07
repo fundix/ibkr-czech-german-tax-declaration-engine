@@ -85,6 +85,86 @@ class TestPages:
         assert "OLDCO" in r.text          # exempt by 3y time test
         assert "ALPHA" not in r.text      # taxable — filtered out
 
+    @staticmethod
+    def _ranking(html):
+        """Symbol order inside the ranking table.
+
+        Sliced past the table marker on purpose: the datalist feeding the
+        filter box repeats every symbol higher up the page.
+        """
+        table = html.split('id="disposals-table"', 1)[1]
+        return sorted(("OLDCO", "ALPHA", "UNDR"), key=table.index)
+
+    @staticmethod
+    def _ranking_present(html):
+        """Which of the golden year's three symbols the table actually lists."""
+        if 'id="disposals-table"' not in html:
+            return []
+        table = html.split('id="disposals-table"', 1)[1]
+        return sorted((s for s in ("OLDCO", "ALPHA", "UNDR") if s in table),
+                      key=table.index)
+
+    def test_disposals_page_ranks_by_gain(self, client):
+        r = client.get("/results/2024-test/disposals")
+        assert r.status_code == 200
+        assert "Realizované prodeje" in r.text
+        # Golden year gains: OLDCO 21 810.98, ALPHA 19 379.40, the put 4 657.74.
+        assert self._ranking(r.text) == ["OLDCO", "ALPHA", "UNDR"]
+        # The table opts into the shared sort/filter JS.
+        assert 'class="items sortable"' in r.text
+
+    def test_disposals_page_sorts_by_proceeds_independently_of_gain(self, client):
+        """ALPHA has the largest proceeds (136 256) but not the largest gain,
+        so this order can only come from the server honouring ?sort=."""
+        r = client.get("/results/2024-test/disposals?sort=proceeds_desc")
+        assert r.status_code == 200
+        assert self._ranking(r.text) == ["ALPHA", "OLDCO", "UNDR"]
+
+    def test_disposals_page_symbol_brings_the_lot_rows(self, client):
+        # Without a symbol the service does not build per-lot rows at all.
+        assert 'id="disposal-lots-table"' not in client.get(
+            "/results/2024-test/disposals").text
+        r = client.get("/results/2024-test/disposals?symbol=ALPHA")
+        assert r.status_code == 200
+        assert 'id="disposal-lots-table"' in r.text
+        assert "OLDCO" not in r.text          # filtered out
+
+    def test_disposals_page_accepts_a_sort_order(self, client):
+        r = client.get("/results/2024-test/disposals?sort=gain_asc")
+        assert r.status_code == 200
+        assert self._ranking(r.text) == ["UNDR", "ALPHA", "OLDCO"]
+
+    def test_shared_filters_are_bookmarkable_on_both_pages(self, client):
+        """Same query names on /items and /disposals, and on the MCP tool."""
+        # The golden year sells ALPHA and OLDCO as stock, the put as an option.
+        r = client.get("/results/2024-test/disposals?category=OPTION")
+        assert r.status_code == 200
+        assert self._ranking_present(r.text) == ["UNDR"]
+
+        r = client.get("/results/2024-test/items?category=STOCK")
+        assert r.status_code == 200
+        assert "UNDR" not in r.text.split('id="items-table"', 1)[1]
+
+    def test_date_window_narrows_both_pages(self, client):
+        # ALPHA sells 2024-09-10, OLDCO 2024-05-20, the put expires 2024-03-15.
+        r = client.get("/results/2024-test/disposals"
+                       "?date_from=2024-06-01&date_to=2024-12-31")
+        assert r.status_code == 200
+        assert self._ranking_present(r.text) == ["ALPHA"]
+
+        r = client.get("/results/2024-test/items"
+                       "?date_from=2024-01-01&date_to=2024-04-01")
+        body = r.text.split('id="items-table"', 1)[1]
+        assert "ALPHA" not in body and "OLDCO" not in body
+
+    def test_items_symbol_filter_pulls_in_the_options_on_it(self, client):
+        """Typing a ticker means the same thing here as on the disposals page."""
+        r = client.get("/results/2024-test/items?symbol=UNDR")
+        assert r.status_code == 200
+        body = r.text.split('id="items-table"', 1)[1]
+        assert "UNDR" in body
+        assert "ALPHA" not in body
+
     def test_form_page_shows_official_line_refs(self, client):
         r = client.get("/results/2024-test/form")
         assert r.status_code == 200

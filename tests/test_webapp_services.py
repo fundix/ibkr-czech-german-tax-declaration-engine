@@ -637,6 +637,57 @@ class TestAllocationSlices:
         assert alloc["folded"] == 0
 
 
+class TestPortfolioBreakdown:
+    """Three groupings of the same long value: class, currency, per-row weight."""
+
+    def _rows(self):
+        return [
+            {"symbol": "A", "category": "STOCK", "live_currency": "USD",
+             "value_czk": Decimal("600")},
+            {"symbol": "B", "category": "STOCK", "live_currency": "EUR",
+             "value_czk": Decimal("300")},
+            {"symbol": "C", "category": "OPTION", "eoy_currency": "USD",
+             "value_czk": Decimal("100")},
+            # A written leg: a liability, so it is not part of what you own.
+            {"symbol": "D", "category": "OPTION", "eoy_currency": "USD",
+             "value_czk": Decimal("-400")},
+            {"symbol": "E", "category": "STOCK", "value_czk": None},
+        ]
+
+    def test_splits_by_asset_class(self):
+        bd = RunService.portfolio_breakdown(self._rows())
+        assert bd["total_czk"] == Decimal("1000")
+        assert [(s["label"], s["value"]) for s in bd["by_category"]] == [
+            ("STOCK", "900"), ("OPTION", "100")]
+
+    def test_splits_by_currency_preferring_the_priced_one(self):
+        bd = RunService.portfolio_breakdown(self._rows())
+        assert [(s["label"], s["value"]) for s in bd["by_currency"]] == [
+            ("USD", "700"), ("EUR", "300")]
+
+    def test_weights_sum_to_100_and_skip_the_liability(self):
+        rows = self._rows()
+        RunService.portfolio_breakdown(rows)
+        weights = {r["symbol"]: r["weight_pct"] for r in rows}
+        assert weights["A"] == Decimal("60")
+        assert weights["D"] is None          # written leg
+        assert weights["E"] is None          # no price
+        assert sum(w for w in weights.values() if w is not None) == Decimal("100")
+
+    def test_percentages_are_json_safe(self):
+        """These slices go through tojson into Chart.js, which has no Decimal."""
+        import json
+        bd = RunService.portfolio_breakdown(self._rows())
+        json.dumps(bd["by_category"])
+        assert all(isinstance(s["pct"], float) for s in bd["by_category"])
+
+    def test_an_empty_book_does_not_divide_by_zero(self):
+        bd = RunService.portfolio_breakdown(
+            [{"symbol": "X", "category": "STOCK", "value_czk": None}])
+        assert bd["total_czk"] is None
+        assert bd["by_category"] == []
+
+
 class TestDividendSummaryCountry:
     """The country must not depend on which payout happens to come first."""
 
@@ -667,6 +718,93 @@ class TestDividendSummaryCountry:
         run_id = self._run_with(stub_service, [self._div("01", None)])
         summary = stub_service.dividend_summary(run_id, "daily")
         assert summary["assets"][0]["country"] is None
+
+
+class TestDividendWithholdingRates:
+    """Is it worth reclaiming? Answered from the FTC record already on the item."""
+
+    def _run_with(self, svc, items):
+        from src.webapp.serializers import dump_json
+        run_dir = svc.runs_dir / "2025-wht"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        dump_json({"items": items}, run_dir / "result.daily.json")
+        return "2025-wht"
+
+    def _div(self, symbol, gross, wht, creditable, cap="0.15", month="05"):
+        return {
+            "item_type": "DIVIDEND", "asset_symbol": symbol,
+            "asset_description": symbol, "source_country": "XX",
+            "amount_czk": gross, "wht_total_czk": wht,
+            "event_date": f"2025-{month}-15",
+            "ftc": {"actual_creditable_czk": creditable,
+                    "non_creditable_czk": str(Decimal(wht) - Decimal(creditable)),
+                    "configured_cap_rate": cap},
+        }
+
+    def _asset(self, svc, *items):
+        run = self._run_with(svc, list(items))
+        return svc.dividend_summary(run, "daily")
+
+    def test_over_withheld_payer_is_flagged_with_the_reclaimable_amount(
+            self, stub_service):
+        # The real EVO row: 30% taken by Sweden against a 15% treaty cap.
+        s = self._asset(stub_service,
+                        self._div("EVO", "1395.52", "418.66", "209.33"))
+        a = s["assets"][0]
+        assert a["effective_rate"] == Decimal("418.66") / Decimal("1395.52")
+        assert round(a["effective_rate"], 3) == Decimal("0.300")
+        assert a["cap_rate"] == Decimal("0.15")
+        assert a["over_treaty"] is True
+        assert a["excess_czk"] == Decimal("209.33")
+
+    def test_a_payer_at_the_treaty_rate_is_not_flagged(self, stub_service):
+        s = self._asset(stub_service,
+                        self._div("PYPL", "408.54", "61.28", "61.28"))
+        assert s["assets"][0]["over_treaty"] is False
+
+    def test_rounding_noise_does_not_raise_the_flag(self, stub_service):
+        """The real CVS row: three payouts, per-item caps rounded to hellers,
+        so the year lands at 15.03% with nothing actually over-withheld."""
+        s = self._asset(stub_service,
+                        self._div("CVS", "230.07", "34.58", "34.51"))
+        a = s["assets"][0]
+        assert a["effective_rate"] > a["cap_rate"]        # genuinely above...
+        assert a["over_treaty"] is False                  # ...but not by enough
+        assert a["excess_czk"] == Decimal("0.07")         # still reported
+
+    def test_rates_aggregate_over_the_whole_year(self, stub_service):
+        """Several payouts at different rates: what matters for a refund
+        claim is the aggregate, not any single payment."""
+        s = self._asset(
+            stub_service,
+            self._div("X", "100.00", "30.00", "15.00", month="03"),
+            self._div("X", "100.00", "15.00", "15.00", month="09"),
+        )
+        a = s["assets"][0]
+        assert a["count"] == 2
+        assert a["effective_rate"] == Decimal("0.225")    # 45 / 200
+        assert a["over_treaty"] is True
+        assert a["excess_czk"] == Decimal("15.00")
+
+    def test_totals_split_creditable_from_reclaimable(self, stub_service):
+        s = self._asset(stub_service,
+                        self._div("EVO", "1395.52", "418.66", "209.33"),
+                        self._div("PYPL", "408.54", "61.28", "61.28"))
+        assert s["total_wht_czk"] == Decimal("479.94")
+        assert s["total_creditable_czk"] == Decimal("270.61")
+        assert s["total_excess_czk"] == Decimal("209.33")
+
+    def test_a_run_without_ftc_records_still_renders(self, stub_service):
+        """Older runs predate the per-item ftc block."""
+        run = self._run_with(stub_service, [
+            {"item_type": "DIVIDEND", "asset_symbol": "OLD",
+             "amount_czk": "100.00", "wht_total_czk": "15.00",
+             "event_date": "2025-05-15"},
+        ])
+        a = stub_service.dividend_summary(run, "daily")["assets"][0]
+        assert a["cap_rate"] is None
+        assert a["over_treaty"] is False
+        assert a["creditable_czk"] == Decimal("0.00")
 
 
 class TestOptionValuation:
@@ -956,6 +1094,99 @@ class TestDisposalsAndCompare:
                 "quantity": "10", "event_date": "2026-03-01",
                 "acquisition_date": "2025-01-01", "holding_period_days": 424,
                 "is_taxable": True, "is_exempt": False, **extra}
+
+    def test_default_sort_ranks_the_biggest_gain_first(self, service):
+        """"What did I earn on" — not "what moved most".
+
+        Ordering by magnitude put a 900 loss above a 400 win, which is the
+        opposite of what the page is asked.
+        """
+        self._write_run(service, "run-s", {}, [
+            self._sale("WIN", "400.00", "1400.00", "1000.00"),
+            self._sale("LOSS", "-900.00", "100.00", "1000.00"),
+            self._sale("MID", "50.00", "150.00", "100.00"),
+        ])
+        data = service.disposal_summary("run-s", "daily")
+        assert [a["symbol"] for a in data["by_symbol"]] == ["WIN", "MID", "LOSS"]
+        assert data["sort"] == "gain_desc"
+
+    def test_other_sort_orders(self, service):
+        self._write_run(service, "run-s2", {}, [
+            self._sale("WIN", "400.00", "1400.00", "1000.00"),
+            self._sale("LOSS", "-900.00", "100.00", "1000.00"),
+            self._sale("MID", "50.00", "150.00", "100.00"),
+        ])
+        order = lambda s: [a["symbol"] for a in                     # noqa: E731
+                           service.disposal_summary("run-s2", "daily", sort=s)["by_symbol"]]
+        assert order("gain_asc") == ["LOSS", "MID", "WIN"]
+        assert order("abs_desc") == ["LOSS", "WIN", "MID"]
+        assert order("proceeds_desc") == ["WIN", "MID", "LOSS"]
+        assert order("symbol") == ["LOSS", "MID", "WIN"]
+
+    def test_unknown_sort_falls_back_to_the_default(self, service):
+        self._write_run(service, "run-s3", {}, [
+            self._sale("WIN", "400.00", "1400.00", "1000.00"),
+            self._sale("LOSS", "-900.00", "100.00", "1000.00"),
+        ])
+        data = service.disposal_summary("run-s3", "daily", sort="nonsense")
+        assert [a["symbol"] for a in data["by_symbol"]] == ["WIN", "LOSS"]
+
+    def test_quantities_lose_their_fifo_tail_zeros(self, service):
+        self._write_run(service, "run-q", {}, [
+            self._sale("ABC", "10.00", "110.00", "100.00", quantity="100.00000000"),
+        ])
+        data = service.disposal_summary("run-q", "daily", include_lots=True)
+        assert data["by_symbol"][0]["quantity_display"] == "100"
+        assert data["lots"][0]["quantity_display"] == "100"
+
+    def _mixed_run(self, service, run_id):
+        self._write_run(service, run_id, {}, [
+            self._sale("ABC", "100.00", "1100.00", "1000.00",
+                       event_date="2026-02-10"),
+            self._sale("XYZ", "200.00", "1200.00", "1000.00",
+                       category="OPTION", item_type="OPTION_CLOSE",
+                       event_date="2026-05-20"),
+            # A CFD is emitted as OPTION_CLOSE too — the whole reason the
+            # filter keys on asset_category and not item_type.
+            self._sale("CFD1", "300.00", "1300.00", "1000.00",
+                       category="CFD", item_type="OPTION_CLOSE",
+                       event_date="2026-08-30"),
+        ])
+        return run_id
+
+    def _symbols(self, service, run_id, **kw):
+        return [a["symbol"] for a in
+                service.disposal_summary(run_id, "daily", **kw)["by_symbol"]]
+
+    def test_category_filter_does_not_confuse_a_cfd_with_an_option(self, service):
+        run = self._mixed_run(service, "run-f1")
+        assert self._symbols(service, run, category="OPTION") == ["XYZ"]
+        assert self._symbols(service, run, category="CFD") == ["CFD1"]
+        assert self._symbols(service, run, category="STOCK") == ["ABC"]
+
+    def test_date_window_is_inclusive_on_both_ends(self, service):
+        run = self._mixed_run(service, "run-f2")
+        assert self._symbols(service, run, date_from="2026-05-20",
+                             date_to="2026-05-20") == ["XYZ"]
+        assert sorted(self._symbols(service, run, date_from="2026-05-20")) == \
+            ["CFD1", "XYZ"]
+        assert sorted(self._symbols(service, run, date_to="2026-05-20")) == \
+            ["ABC", "XYZ"]
+
+    def test_filters_combine(self, service):
+        run = self._mixed_run(service, "run-f3")
+        assert self._symbols(service, run, category="OPTION",
+                             date_from="2026-06-01") == []
+        assert self._symbols(service, run, category="CFD",
+                             date_from="2026-06-01") == ["CFD1"]
+
+    def test_totals_follow_the_filter(self, service):
+        """The headline numbers are of the filtered set, not the whole year."""
+        run = self._mixed_run(service, "run-f4")
+        data = service.disposal_summary(run, "daily", category="STOCK")
+        assert data["totals"]["count"] == 1
+        assert data["totals"]["gain_loss_czk"] == Decimal("100.00")
+        assert data["filters"]["category"] == "STOCK"
 
     def test_compare_runs_decomposes_gain_delta(self, service):
         self._write_run(

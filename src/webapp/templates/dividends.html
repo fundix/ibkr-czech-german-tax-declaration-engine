@@ -12,8 +12,15 @@
   <div class="card stat">
     <h3>Sražená zahraniční daň</h3>
     <p class="big">{{ total_wht | czk }} Kč</p>
-    <p class="muted">podklad pro zápočet §38f</p>
+    <p class="muted">z toho započitatelné {{ total_creditable | czk }} Kč (§38f)</p>
   </div>
+  {% if total_excess %}
+  <div class="card stat">
+    <h3>Nad rámec smlouvy</h3>
+    <p class="big">{{ total_excess | czk }} Kč</p>
+    <p class="muted">v ČR nezapočitatelné — nárok na vrácení ve státě zdroje</p>
+  </div>
+  {% endif %}
 </section>
 
 {% if months %}
@@ -34,20 +41,39 @@
 <section class="card">
   <h2>Po titulech</h2>
   {% if assets %}
-  <table>
-    <thead><tr><th>Symbol</th><th>Země</th><th class="num">Výplat</th><th class="num">Hrubé Kč</th><th class="num">WHT Kč</th></tr></thead>
+  <table class="items sortable" id="dividends-table">
+    <thead>
+      <tr>
+        <th>Symbol</th><th>Země</th><th class="num">Výplat</th>
+        <th class="num">Hrubé Kč</th><th class="num">WHT Kč</th>
+        <th class="num" title="Skutečně sražená daň dělená hrubým příjmem za celý rok.">Sazba</th>
+        <th class="num" title="Maximální sazba, kterou smlouva o zamezení dvojího zdanění dovoluje započítat.">Smlouva</th>
+        <th class="num">Započteno Kč</th>
+        <th class="num" title="Sraženo nad rámec smlouvy — v ČR to nelze započítat.">Nad smlouvu Kč</th>
+      </tr>
+    </thead>
     <tbody>
       {% for a in assets %}
       <tr title="{{ a.description }}">
-        <td><strong>{{ a.symbol }}</strong></td>
+        <td><strong>{{ a.symbol }}</strong>
+          {% if a.over_treaty %}<span class="badge warn"
+            title="Sazba převyšuje smluvní strop — obvykle chybějící formulář u brokera (u US akcií W-8BEN). O rozdíl je nutné žádat ve státě zdroje.">nad smlouvu</span>{% endif %}
+        </td>
         <td>{{ a.country or "–" }}</td>
         <td class="num">{{ a.count }}</td>
         <td class="num">{{ a.gross_czk | czk }}</td>
         <td class="num">{{ a.wht_czk | czk }}</td>
+        <td class="num">{{ "%.1f"|format(a.effective_rate * 100) ~ " %" if a.effective_rate is not none else "–" }}</td>
+        <td class="num">{{ "%.0f"|format(a.cap_rate * 100) ~ " %" if a.cap_rate is not none else "–" }}</td>
+        <td class="num">{{ a.creditable_czk | czk }}</td>
+        <td class="num {{ 'neg' if a.excess_czk > 0 }}">{{ a.excess_czk | czk }}</td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  <p class="note">Sazba nad smluvní strop nejčastěji znamená chybějící formulář u brokera —
+    u amerických akcií W-8BEN. Zařídit ho dopředu je cennější než žádat o vrácení zpětně:
+    o přeplatek se žádá ve státě zdroje, v přiznání ho uplatnit nelze.</p>
   {% else %}
   <p>V roce {{ meta.tax_year }} žádné dividendy.</p>
   {% endif %}

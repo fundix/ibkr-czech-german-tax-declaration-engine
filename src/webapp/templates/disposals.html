@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Realizované prodeje {{ meta.run_id }}{% endblock %}
+{% block content %}
+{% include "partials/run_nav.html" %}
+
+{% set t = summary.totals or {} %}
+<section class="card">
+  <h2>Realizované prodeje §10</h2>
+
+  {% if summary.fx_warning %}
+  <p class="note">⚠ {{ summary.fx_warning }}</p>
+  {% endif %}
+
+  <div class="split">
+    <div class="card stat">
+      <h3>Zisk/ztráta celkem</h3>
+      <p class="big {{ 'neg' if t.gain_loss_czk and t.gain_loss_czk < 0 }}">{{ t.gain_loss_czk | czk if t.gain_loss_czk is not none else "–" }} Kč</p>
+      <p class="muted">{{ t.count or 0 }} prodejů · výnos {{ t.proceeds_czk | czk if t.proceeds_czk is not none else "–" }} Kč
+        · náklady {{ t.cost_basis_czk | czk if t.cost_basis_czk is not none else "–" }} Kč</p>
+    </div>
+    <div class="card stat">
+      <h3>Zdanitelné</h3>
+      <p class="big {{ 'neg' if t.taxable_gain_loss_czk and t.taxable_gain_loss_czk < 0 }}">{{ t.taxable_gain_loss_czk | czk if t.taxable_gain_loss_czk is not none else "–" }} Kč</p>
+      <p class="muted">osvobozeno časovým testem {{ t.exempt_gain_loss_czk | czk if t.exempt_gain_loss_czk is not none else "–" }} Kč</p>
+    </div>
+  </div>
+
+  <form method="get" class="filters">
+    <input type="hidden" name="mode" value="{{ mode }}">
+    {% include "partials/item_filters.html" %}
+    <datalist id="filter-symbols">
+      {% for a in summary.by_symbol or [] %}<option value="{{ a.symbol }}">{% endfor %}
+    </datalist>
+    <label>Řazení
+      <select name="sort" onchange="this.form.submit()">
+        {% set sort_labels = {
+          "gain_desc": "nejvyšší zisk", "gain_asc": "nejvyšší ztráta",
+          "abs_desc": "největší pohyb", "proceeds_desc": "největší výnos",
+          "symbol": "podle symbolu"} %}
+        {% for key in sorts %}
+        <option value="{{ key }}" {{ 'selected' if key == sort }}>{{ sort_labels.get(key, key) }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Použít</button>
+    {% if symbol or category or date_from or date_to %}
+    <a class="muted" href="/results/{{ meta.run_id }}/disposals?mode={{ mode }}&sort={{ sort }}">zrušit filtry</a>
+    {% endif %}
+  </form>
+
+  {% if summary.by_symbol %}
+  <div class="table-toolbar">
+    <span class="table-search">
+      <input type="search" placeholder="Filtr symbolu…" autocomplete="off"
+             data-filter-for="disposals-table" data-filter-col="0" data-filter-count="disposals-count"
+             aria-label="Rychlý filtr podle symbolu">
+    </span>
+    <span class="table-count"><strong id="disposals-count">{{ summary.by_symbol | length }}</strong> z {{ summary.by_symbol | length }} titulů</span>
+  </div>
+
+  <table class="items sortable" id="disposals-table">
+    <thead>
+      <tr>
+        <th>Symbol</th><th>Druh</th><th class="num">Prodejů</th>
+        <th class="num">Množství</th><th class="num">Výnos Kč</th>
+        <th class="num">Náklady Kč</th><th class="num">Zisk/ztráta Kč</th>
+        <th class="num">Zdanitelné Kč</th><th class="num">Osvobozeno Kč</th>
+        <th>Období</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in summary.by_symbol %}
+      <tr title="{{ a.description }}">
+        <td><strong><a href="/results/{{ meta.run_id }}/disposals?mode={{ mode }}&symbol={{ a.symbol | urlencode }}">{{ a.symbol }}</a></strong>
+          {% if a.fx_failed_count %}<span class="badge warn"
+            title="{{ a.fx_failed_count }} položek s neúspěšným přepočtem na Kč — zisk je neznámý, ne nulový.">FX</span>{% endif %}
+        </td>
+        <td>{{ a.category or "–" }}</td>
+        <td class="num">{{ a.count }}</td>
+        <td class="num">{{ a.quantity_display }}</td>
+        <td class="num">{{ a.proceeds_czk | czk }}</td>
+        <td class="num">{{ a.cost_basis_czk | czk }}</td>
+        <td class="num {{ 'neg' if a.gain_loss_czk < 0 }}">{{ a.gain_loss_czk | czk }}</td>
+        <td class="num {{ 'neg' if a.taxable_gain_loss_czk < 0 }}">{{ a.taxable_gain_loss_czk | czk }}</td>
+        <td class="num">{{ a.exempt_gain_loss_czk | czk }}</td>
+        <td>{{ a.first_sale }}{% if a.last_sale != a.first_sale %} – {{ a.last_sale }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>V tomto běhu nejsou žádné realizované prodeje{% if symbol %} pro „{{ symbol }}“{% endif %}.</p>
+  {% endif %}
+
+  {% if summary.lots %}
+  <h3>Spárované loty{% if symbol %} — {{ symbol }}{% endif %}</h3>
+  <table class="items sortable" id="disposal-lots-table">
+    <thead>
+      <tr>
+        <th>Symbol</th><th>Prodáno</th><th>Pořízeno</th><th class="num">Drženo dní</th>
+        <th class="num">Množství</th><th class="num">Výnos Kč</th>
+        <th class="num">Náklady Kč</th><th class="num">Zisk/ztráta Kč</th><th data-no-sort>Stav</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for l in summary.lots %}
+      <tr>
+        <td><strong>{{ l.symbol }}</strong></td>
+        <td>{{ l.sale_date or "–" }}</td>
+        <td>{{ l.acquisition_date or "–" }}</td>
+        <td class="num">{{ l.holding_period_days if l.holding_period_days is not none else "–" }}</td>
+        <td class="num">{{ l.quantity_display }}</td>
+        <td class="num">{{ l.proceeds_czk | czk if l.proceeds_czk is not none else "–" }}</td>
+        <td class="num">{{ l.cost_basis_czk | czk if l.cost_basis_czk is not none else "–" }}</td>
+        <td class="num {{ 'neg' if l.gain_loss_czk is not none and l.gain_loss_czk < 0 }}">{{ l.gain_loss_czk | czk if l.gain_loss_czk is not none else "–" }}</td>
+        <td>
+          {% if l.tax_review_status == "PENDING_MANUAL_REVIEW" %}<span class="badge warn">kontrola</span>
+          {% elif l.is_exempt %}<span class="badge ok">osvobozeno{% if l.exemption_reason %} ({{ l.exemption_reason }}){% endif %}</span>
+          {% elif l.is_taxable %}<span class="badge">zdanitelné</span>
+          {% else %}<span class="badge muted">mimo základ</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif summary.lot_detail %}
+  <p class="note">Vyberte symbol pro zobrazení spárovaných lotů (která pořízení každý prodej spotřeboval).</p>
+  {% endif %}
+
+  <p class="note">{{ summary.note }}</p>
+</section>
+{% endblock %}
