@@ -688,6 +688,85 @@ class TestPortfolioBreakdown:
         assert bd["by_category"] == []
 
 
+class TestCountryBreakdown:
+    """Where a holding is from, and how confident we are about it."""
+
+    def _pos(self, symbol, value, isin=None, issuer=None, sub="COMMON",
+             category="STOCK"):
+        return {"symbol": symbol, "category": category, "isin": isin,
+                "issuer_country": issuer, "ibkr_sub": sub,
+                "value_czk": Decimal(value)}
+
+    def test_ibkr_issuer_code_wins(self):
+        pos = self._pos("BABA", "100", isin="US01609W1027", issuer="cn",
+                        sub="ADR")
+        assert RunService.resolve_country(pos, {"BABA": "HK"}) == ("CN", "ibkr")
+
+    def test_income_event_beats_the_isin_prefix(self):
+        """The real case: BABA's ISIN is American, the issuer is not."""
+        pos = self._pos("BABA", "100", isin="US01609W1027", sub="ADR")
+        assert RunService.resolve_country(pos, {"BABA": "CN"}) == ("CN", "event")
+
+    def test_an_adr_without_an_income_row_stays_unknown(self):
+        """Better a gap than three ADRs silently counted as American.
+
+        BYDDY, DIDIY and NICE all carry US ISINs and paid nothing this year.
+        """
+        pos = self._pos("BYDDY", "100", isin="US05606L1008", sub="ADR")
+        assert RunService.resolve_country(pos, {}) == (None, "unknown")
+
+    def test_isin_prefix_is_used_for_ordinary_shares(self):
+        pos = self._pos("RHM", "100", isin="DE0007030009")
+        assert RunService.resolve_country(pos, {}) == ("DE", "isin")
+
+    def test_no_isin_and_no_event_is_unknown(self):
+        assert RunService.resolve_country(self._pos("X", "100"), {}) == \
+            (None, "unknown")
+
+    def test_breakdown_groups_and_counts_its_sources(self):
+        rows = [
+            self._pos("RHM", "300", isin="DE0007030009"),
+            self._pos("TUI1", "200", isin="DE000TUAG505"),
+            self._pos("BABA", "400", isin="US01609W1027", sub="ADR"),
+            self._pos("NICE", "100", isin="US6536561086", sub="ADR"),
+        ]
+        bd = RunService.country_breakdown(rows, {"BABA": "CN"})
+        assert bd["total_czk"] == Decimal("1000")
+        assert [(s["label"], s["value"]) for s in bd["by_country"]] == [
+            ("DE", "500"), ("CN", "400"), ("neznámé", "100")]
+        assert bd["sources"] == {"isin": 2, "event": 1, "unknown": 1}
+
+    def test_options_are_left_out_of_geography(self):
+        """A contract's country is the underlying's; its notional is not."""
+        rows = [self._pos("RHM", "300", isin="DE0007030009"),
+                self._pos("RHM  280616C00018000", "9000", category="OPTION")]
+        bd = RunService.country_breakdown(rows, {})
+        assert bd["total_czk"] == Decimal("300")
+        assert [s["label"] for s in bd["by_country"]] == ["DE"]
+
+    def test_written_legs_are_left_out_like_everywhere_else(self):
+        rows = [self._pos("RHM", "300", isin="DE0007030009"),
+                self._pos("TUI1", "-500", isin="DE000TUAG505")]
+        bd = RunService.country_breakdown(rows, {})
+        assert bd["total_czk"] == Decimal("300")
+
+    def test_rows_carry_their_own_attribution(self):
+        rows = [self._pos("RHM", "300", isin="DE0007030009")]
+        RunService.country_breakdown(rows, {})
+        assert (rows[0]["country"], rows[0]["country_source"]) == ("DE", "isin")
+
+    def test_event_countries_read_from_the_persisted_result(self, service):
+        from src.webapp.serializers import dump_json
+        run_dir = service.runs_dir / "ec-run"
+        run_dir.mkdir(parents=True)
+        dump_json({"items": [
+            {"asset_symbol": "BABA", "source_country": "CN"},
+            {"asset_symbol": "BABA", "source_country": "HK"},   # first wins
+            {"asset_symbol": "NOCOUNTRY", "source_country": None},
+        ]}, run_dir / "result.daily.json")
+        assert service.event_countries("ec-run", "daily") == {"BABA": "CN"}
+
+
 class TestDividendSummaryCountry:
     """The country must not depend on which payout happens to come first."""
 

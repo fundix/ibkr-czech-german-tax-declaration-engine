@@ -142,6 +142,7 @@ class RawPositionRecord(RawBaseRecord): # For Start and End of Year positions
     model: Optional[str] = Field(None, alias="Model")
     currency_primary: str = Field(alias="CurrencyPrimary") # Renamed for consistency
     asset_class: str = Field(alias="AssetClass")
+    sub_category: Optional[str] = Field(None, alias="SubCategory") # COMMON, ADR, ETF
     symbol: str = Field(alias="Symbol")
     description: str = Field(alias="Description")
     conid: Optional[str] = Field(None, alias="Conid")

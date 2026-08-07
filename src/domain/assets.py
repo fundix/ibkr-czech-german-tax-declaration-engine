@@ -50,7 +50,12 @@ class Asset:
     ibkr_symbol: Optional[str] = None # The symbol as reported by IBKR
     ibkr_isin: Optional[str] = None
     ibkr_asset_class_raw: Optional[str] = None # e.g., "STK", "OPT", "FUND", "CASH"
-    ibkr_sub_category_raw: Optional[str] = None # e.g. "COMMON", "ETF"
+    ibkr_sub_category_raw: Optional[str] = None # e.g. "COMMON", "ETF", "ADR"
+    # IBKR's IssuerCountryCode from the positions statement. Authoritative when
+    # present — it beats an ISIN prefix, which for an ADR names the depositary's
+    # country (US) rather than the issuer's. Absent unless the positions Flex
+    # query exports the column.
+    ibkr_issuer_country: Optional[str] = None
 
     # Start of Year (SOY) position data (from IBKR positions_start_file)
     soy_quantity: Optional[Decimal] = None # Renamed from initial_quantity_soy

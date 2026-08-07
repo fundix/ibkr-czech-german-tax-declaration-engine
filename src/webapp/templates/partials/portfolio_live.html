@@ -55,6 +55,31 @@
           </tbody>
         </table>
       </div>
+      {% set cb = bd.country %}
+      {% if cb and cb.total_czk %}
+      <div class="chart-box">
+        <h2>Podle země</h2>
+        <canvas id="country-chart" width="230" height="230"></canvas>
+        <table class="items">
+          <tbody>
+            {% for s in cb.by_country %}
+            <tr><td>{{ s.label }}</td><td class="num">{{ s.value | czk }}</td>
+              <td class="num">{{ "%.1f"|format(s.pct) }} %</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% set src = cb.sources %}
+        <p class="note">Zdroj údaje:
+          {%- set labels = {"ibkr": "z IBKR", "event": "z výplaty příjmu",
+                            "isin": "odvozeno z ISIN", "unknown": "neznámé"} %}
+          {%- for key, count in src.items() %} {{ labels.get(key, key) }} {{ count }}{% if not loop.last %},{% endif %}{% endfor %}.
+          Opce v rozpadu nejsou — zeměpis kontraktu je zeměpis podkladu.
+          {% if src.isin %}Prefix ISIN je jen odhad; u ADR se nepoužívá, protože
+          označuje zemi depozitáře, ne emitenta.{% endif %}
+          {% if not src.ibkr %}Přesnou zemi dodá IBKR, když v Flex query pozic
+          zapnete sloupec <code>IssuerCountryCode</code> a rok přepočítáte.{% endif %}</p>
+      </div>
+      {% endif %}
     </div>
     <p class="note">Podíly z dlouhé strany portfolia ({{ bd.total_czk | czk }} Kč) — vypsané pozice
       jsou závazek a nezapočítávají se. Měnový rozpad je jen za cenné papíry: hotovostní zůstatky
@@ -160,6 +185,7 @@
     };
     doughnut('category-chart', {{ (live.breakdown.by_category if live.breakdown else []) | tojson }});
     doughnut('currency-chart', {{ (live.breakdown.by_currency if live.breakdown else []) | tojson }});
+    doughnut('country-chart', {{ (live.breakdown.country.by_country if live.breakdown else []) | tojson }});
     const snaps = {{ snapshots | tojson }};
     const el = document.getElementById('value-chart');
     if (el && snaps.length > 1 && window.Chart) {

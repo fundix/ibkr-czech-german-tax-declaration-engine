@@ -1093,6 +1093,12 @@ class RunService:
                 "isin": getattr(asset, "ibkr_isin", None),
                 "description": asset.description,
                 "category": category,
+                # Geography inputs, kept raw so the view can say where a
+                # country came from: IBKR's own issuer code when the positions
+                # query exports it, and the sub-category that tells an ADR
+                # (whose ISIN is American whatever the issuer) from a share.
+                "issuer_country": getattr(asset, "ibkr_issuer_country", None),
+                "ibkr_sub": getattr(asset, "ibkr_sub_category_raw", None),
                 "account": single_account,
                 "time_test_applicable": time_test_applies,
                 "quantity_long": sum((l.quantity for l in lots), Decimal(0)),
@@ -1410,7 +1416,13 @@ class RunService:
         pf = self.load_portfolio(run_id)
         if pf is None:
             return None
-        return self.runner.run_sync(self._compute_live_portfolio, pf, timeout=120)
+        # Income rows answer for the country of any payer the positions
+        # statement did not label — read here, where the run_id is known.
+        meta = self.get_run(run_id) or {}
+        mode = (meta.get("modes") or ["daily"])[0]
+        return self.runner.run_sync(self._compute_live_portfolio, pf,
+                                    self.event_countries(run_id, mode),
+                                    timeout=120)
 
     @staticmethod
     def _net_quantity(pos: Dict[str, Any]) -> Decimal:
@@ -1539,6 +1551,84 @@ class RunService:
         }
 
     @staticmethod
+    def resolve_country(pos: Dict[str, Any],
+                        event_countries: Dict[str, str]) -> Tuple[Optional[str], str]:
+        """Issuer country of a holding, plus where the answer came from.
+
+        Four layers, most trustworthy first:
+
+        1. ``ibkr`` — IssuerCountryCode on the positions statement. Absent
+           unless that Flex query exports the column.
+        2. ``event`` — the country IBKR put on an income row for the same
+           symbol this year. Covers every dividend payer, ADRs included.
+        3. ``isin`` — the ISIN's country prefix. **Skipped for ADRs**, where it
+           names the depositary's country: all five ADRs in the real book carry
+           a US ISIN while none of the issuers is American. Labelled as derived
+           so nobody mistakes it for IBKR's own answer.
+        4. ``unknown`` — refused rather than guessed.
+        """
+        issuer = (pos.get("issuer_country") or "").strip().upper()
+        if issuer:
+            return issuer, "ibkr"
+        from_event = (event_countries.get(pos.get("symbol") or "")
+                      or "").strip().upper()
+        if from_event:
+            return from_event, "event"
+        isin = (pos.get("isin") or "").strip().upper()
+        is_adr = (pos.get("ibkr_sub") or "").strip().upper() == "ADR"
+        if len(isin) >= 2 and isin[:2].isalpha() and not is_adr:
+            return isin[:2], "isin"
+        return None, "unknown"
+
+    @classmethod
+    def country_breakdown(cls, rows: List[Dict[str, Any]],
+                          event_countries: Dict[str, str]) -> Dict[str, Any]:
+        """Long-side split by issuer country, with each source counted.
+
+        Same denominator as the other breakdowns — the long side, because a
+        written contract is a liability rather than a share of what you own.
+        Options are left out entirely: a contract's geography is the
+        underlying's, and folding derivative notional into a country weight
+        would overstate it.
+
+        Annotates each row with ``country`` and ``country_source`` so the table
+        can show the provenance next to the value.
+        """
+        by_country: Dict[str, Decimal] = {}
+        sources: Dict[str, int] = {}
+        total = Decimal(0)
+        for r in rows:
+            value = r.get("value_czk")
+            if not value or value <= 0 or r.get("category") == "OPTION":
+                continue
+            country, source = cls.resolve_country(r, event_countries)
+            r["country"], r["country_source"] = country, source
+            label = country or "neznámé"
+            by_country[label] = by_country.get(label, Decimal(0)) + value
+            sources[source] = sources.get(source, 0) + 1
+            total += value
+        slices = [{"label": k, "value": str(v),
+                   "pct": float(v / total * 100) if total else None}
+                  for k, v in sorted(by_country.items(), key=lambda kv: kv[1],
+                                     reverse=True)]
+        return {"total_czk": total or None, "by_country": slices,
+                "sources": sources}
+
+    def event_countries(self, run_id: str, mode: str) -> Dict[str, str]:
+        """symbol → country, from this year's income rows.
+
+        IBKR sends IssuerCountryCode on dividend and interest rows, so a payer
+        answers for itself even when the positions query exports no column.
+        """
+        result = self.load_result(run_id, mode) or {}
+        out: Dict[str, str] = {}
+        for it in result.get("items", []):
+            symbol, country = it.get("asset_symbol"), it.get("source_country")
+            if symbol and country and symbol not in out:
+                out[symbol] = country
+        return out
+
+    @staticmethod
     def portfolio_breakdown(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Long-side split by asset class and by trading currency.
 
@@ -1582,7 +1672,10 @@ class RunService:
             "by_currency": _slices(by_currency),
         }
 
-    def _compute_live_portfolio(self, pf: Dict[str, Any]) -> Dict[str, Any]:
+    def _compute_live_portfolio(
+        self, pf: Dict[str, Any],
+        event_countries: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         from datetime import date as _date
         today = _date.today()
         converter = self._converter_factory()
@@ -1645,6 +1738,7 @@ class RunService:
 
         rows.sort(key=lambda r: r.get("value_czk") or Decimal(0), reverse=True)
         breakdown = self.portfolio_breakdown(rows)     # also sets weight_pct
+        breakdown["country"] = self.country_breakdown(rows, event_countries or {})
         result = {
             "breakdown": breakdown,
             "as_of": today.isoformat(),

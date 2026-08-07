@@ -116,11 +116,14 @@ class ParsingOrchestrator:
                 raw_currency=raw_pos.currency_primary, raw_ibkr_asset_class=raw_pos.asset_class,
                 raw_description=raw_pos.description,
                 description_source_type="position",
+                raw_ibkr_sub_category=raw_pos.sub_category,
                 raw_multiplier=raw_pos.multiplier, raw_strike=raw_pos.strike,
                 raw_expiry=raw_pos.expiry, raw_put_call=raw_pos.put_call,
                 raw_underlying_conid=raw_pos.underlying_conid,
                 raw_underlying_symbol=raw_pos.underlying_symbol
             )
+            if raw_pos.issuer_country_code and not asset.ibkr_issuer_country:
+                asset.ibkr_issuer_country = raw_pos.issuer_country_code.strip().upper()
             if self._is_lot_row(raw_pos):
                 # Lot-level detail row: collect the real acquisition date for
                 # the SOY FIFO seeding; totals come from the SUMMARY row.
@@ -171,6 +174,7 @@ class ParsingOrchestrator:
                 raw_currency=raw_pos.currency_primary, raw_ibkr_asset_class=raw_pos.asset_class,
                 raw_description=raw_pos.description,
                 description_source_type="position",
+                raw_ibkr_sub_category=raw_pos.sub_category,
                 raw_multiplier=raw_pos.multiplier, raw_strike=raw_pos.strike,
                 raw_expiry=raw_pos.expiry, raw_put_call=raw_pos.put_call,
                 raw_underlying_conid=raw_pos.underlying_conid,
@@ -180,6 +184,8 @@ class ParsingOrchestrator:
             asset.eoy_market_price = safe_decimal(raw_pos.mark_price) # Changed from eoy_mark_price
             asset.eoy_position_value = safe_decimal(raw_pos.position_value)
             asset.eoy_mark_price_currency = raw_pos.currency_primary
+            if raw_pos.issuer_country_code and not asset.ibkr_issuer_country:
+                asset.ibkr_issuer_country = raw_pos.issuer_country_code.strip().upper()
             logger.debug(f"Asset {asset.get_classification_key()} EOY: Qty={asset.eoy_quantity}, Val={asset.eoy_position_value} {asset.currency}")
 
     def discover_assets_from_transactions(self):
