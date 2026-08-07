@@ -153,6 +153,12 @@ class CzTaxItem:
     # --- Withholding tax link ---
     wht_records: List[CzWhtRecord] = field(default_factory=list)
 
+    # --- Source country (ISO code, e.g. "US") ---
+    # IBKR's IssuerCountryCode, carried on the income event itself. Deriving it
+    # from the withholding record instead loses the country whenever a payer
+    # withheld nothing — BABA pays from CN with no WHT row at all.
+    source_country: Optional[str] = None
+
     # --- Quantity (for disposals) ---
     quantity: Optional[Decimal] = None
 
@@ -240,12 +246,13 @@ class CzTaxItem:
         d["qualifies_for_annual_limit"] = self.qualifies_for_annual_limit
         d["exempt_due_to_annual_limit"] = self.exempt_due_to_annual_limit
         d["fx_conversion_failed"] = self.fx_conversion_failed
-        # --- Source country (from first WHT record) ---
-        src_country = None
-        for r in self.wht_records:
-            if r.source_country:
-                src_country = r.source_country
-                break
+        # --- Source country: the event's own, else the first WHT record ---
+        src_country = self.source_country
+        if not src_country:
+            for r in self.wht_records:
+                if r.source_country:
+                    src_country = r.source_country
+                    break
         d["source_country"] = src_country
         # --- FX ---
         if self.fx is not None:

@@ -10,11 +10,11 @@
     <label>Pozice
       <select name="symbol">
         {% for p in positions %}
-        <option value="{{ p.symbol }}" {{ 'selected' if p.symbol == selected }}>{{ p.symbol }} — {{ p.quantity_long }} ks ({{ p.description | truncate(40) }})</option>
+        <option value="{{ p.symbol }}" {{ 'selected' if p.symbol == selected }}>{{ p.symbol }} — {{ p.quantity_long }}{{ ' kontraktů' if p.category == 'OPTION' else ' ks' }} ({{ p.description | truncate(40) }})</option>
         {% endfor %}
       </select>
     </label>
-    <label>Počet kusů
+    <label>Počet kusů (u opcí kontraktů)
       <input type="text" name="quantity" required placeholder="např. 50">
     </label>
     <label>Cena za kus (prázdné = živá cena / cena k 31.12.)
@@ -29,5 +29,8 @@
   <p class="note">Orientační simulace — přepočty dnešním kurzem ČNB (skutečné zdanění používá
     kurzy jednotlivých dnů), sazba 15 % (23% pásmo dle celkových příjmů zohledněte sami).
     Ztráty lze kompenzovat jen v rámci druhu příjmů §10. Nejde o daňové poradenství.</p>
+  <p class="note">U opcí se zadává cena za jednu akcii podkladu; výtěžek se násobí velikostí
+    kontraktu. Živé kotace pro opce nejsou k dispozici, takže bez ruční ceny se počítá
+    s markem k 31.12. — u starší pozice tedy zadejte cenu ručně.</p>
 </section>
 {% endblock %}

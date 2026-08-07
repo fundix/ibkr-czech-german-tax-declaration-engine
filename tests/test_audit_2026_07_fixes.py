@@ -216,6 +216,73 @@ class TestH3ParserWhtSign:
         assert evt.gross_amount_foreign_currency == Decimal("-10")
 
 
+class TestParserCommissionSign:
+    """IBKR signs IBCommission from the cash side; we store it as a cost.
+
+    Taking the magnitude booked the occasional rebate as another fee, so it
+    raised a basis and lowered proceeds by the amount IBKR had paid back.
+    Six such rows sit in the real 2025/2026 books.
+    """
+
+    def _trade_event(self, commission: Decimal, buy_sell: str = "BUY"):
+        from src.classification.asset_classifier import AssetClassifier
+        from src.domain.events import TradeEvent
+        from src.identification.asset_resolver import AssetResolver
+        from src.parsers.domain_event_factory import DomainEventFactory
+        from src.parsers.raw_models import RawTradeRecord
+
+        factory = DomainEventFactory(AssetResolver(AssetClassifier()))
+        # The real SPLG 260116P00078000 rebate row, trades.csv 2025.
+        rt = RawTradeRecord(**{
+            "ClientAccountID": "U1", "CurrencyPrimary": "USD",
+            "AssetClass": "OPT", "Symbol": "SPLG  260116P00078000",
+            "Description": "SPLG 16JAN26 78.0 P", "Multiplier": "100",
+            "Strike": "78", "Expiry": "2026-01-16", "Put/Call": "P",
+            "UnderlyingSymbol": "SPLG", "TradeDate": "2025-10-03",
+            "Quantity": "2" if buy_sell == "BUY" else "-2",
+            "TradePrice": "1.95", "IBCommission": commission,
+            "IBCommissionCurrency": "USD", "Buy/Sell": buy_sell,
+            "TransactionID": "9001", "Open/CloseIndicator": "O",
+        })
+        all_events, _, _ = factory.create_events_from_trades([rt])
+        trades = [e for e in all_events if isinstance(e, TradeEvent)]
+        assert len(trades) == 1
+        return trades[0]
+
+    def test_charged_commission_stored_as_a_positive_cost(self):
+        evt = self._trade_event(Decimal("-1.00"))
+        assert evt.commission_foreign_currency == Decimal("1.00")
+
+    def test_rebate_stored_as_a_negative_cost(self):
+        evt = self._trade_event(Decimal("0.6082"))
+        assert evt.commission_foreign_currency == Decimal("-0.6082")
+
+    def test_absent_commission_is_a_clean_zero(self):
+        evt = self._trade_event(None)
+        assert evt.commission_foreign_currency == Decimal("0")
+
+    def _net_eur(self, commission: Decimal, buy_sell: str = "BUY") -> Decimal:
+        """Parser -> enrichment, with EUR as the trade currency so the net is
+        readable without an FX table."""
+        from src.processing.enrichment import enrich_financial_events
+
+        evt = self._trade_event(commission, buy_sell)
+        evt.local_currency = "EUR"
+        evt.commission_currency = "EUR"
+        enrich_financial_events([evt], _fx(), 28, "ROUND_HALF_UP")
+        return evt.net_proceeds_or_cost_basis_eur
+
+    def test_rebate_lowers_the_cost_basis(self):
+        # 2 x 1.95 x 100 = 390 gross; the 0.6082 credit comes OFF the basis.
+        assert self._net_eur(Decimal("0.6082")) == Decimal("389.3918")
+
+    def test_charged_commission_still_raises_the_cost_basis(self):
+        assert self._net_eur(Decimal("-1.00")) == Decimal("391.00")
+
+    def test_rebate_raises_the_proceeds_on_a_sale(self):
+        assert self._net_eur(Decimal("0.6082"), "SELL") == Decimal("390.6082")
+
+
 class TestH3RefundLinking:
     def _events(self, refund_amount=Decimal("-15"), refund_date="2024-05-20"):
         from src.domain.events import CashFlowEvent, WithholdingTaxEvent

@@ -351,7 +351,13 @@ class DomainEventFactory:
                     logger.debug(f"Trade {tx_id_primary}: Using provided gross amount from TradeMoney/Proceeds: {calculated_gross_amount} (Source: '{calculated_gross_amount_raw_source}')")
 
 
-                commission_val = safe_decimal(rt.ib_commission, default=Decimal('0.0')).copy_abs()
+                # IBKR signs IBCommission from the cash side: negative when it
+                # charged you, positive on the occasional rebate. Downstream
+                # wants a COST, so flip it. Taking the magnitude instead would
+                # book a rebate as another fee -- raising a basis and lowering
+                # proceeds by the very amount IBKR paid back.
+                commission_val = Decimal('0.0') - safe_decimal(
+                    rt.ib_commission, default=Decimal('0.0'))
 
                 trade_event = TradeEvent(
                     asset_internal_id=asset.internal_asset_id,

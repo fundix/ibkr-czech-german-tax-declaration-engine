@@ -383,12 +383,27 @@ def build_form_mapping(
             value=q(liability.final_creditable_ftc),
             official_line_ref="Příloha 3, ř. 328",
         ))
+        # ř. 329 is defined as ř. 323 − ř. 328, i.e. only the treaty-eligible
+        # credit the §38f caps took away. The excess withheld ABOVE the treaty
+        # rate never entered ř. 323, so it cannot leave through ř. 329 either
+        # — it is reclaimed from the source state, not deducted here.
         sec_ftc.lines.append(CzFormLine(
             code="CZ_DAP_FTC_NON_CREDITABLE",
-            label="Nezapočitatelná zahraniční daň",
-            value=q(liability.non_creditable_ftc),
+            label="Nezapočtená daň (nad limit §38f)",
+            value=q(liability.uncredited_ftc),
             official_line_ref="Příloha 3, ř. 329",
+            note="Rozdíl ř. 323 − ř. 328; lze uplatnit jako výdaj dle §24 odst. 2 "
+                 "písm. ch) v následujícím období",
         ))
+        if liability.treaty_excess_ftc > ZERO:
+            sec_ftc.lines.append(CzFormLine(
+                code="CZ_DAP_FTC_TREATY_EXCESS",
+                label="Sraženo nad rámec smluvní sazby",
+                value=q(liability.treaty_excess_ftc),
+                note="Nepatří do přiznání — o vrácení je nutné požádat ve státě "
+                     "zdroje. Sazba nad smlouvu bývá důsledkem chybějícího "
+                     "formuláře (např. W-8BEN u US).",
+            ))
 
     # Per-country breakdown
     if ftc_summary and ftc_summary.per_country:
@@ -398,7 +413,11 @@ def build_form_mapping(
                 label=f"Země {code} – zaplaceno / započteno",
                 value=q(agg.creditable_czk),
                 official_line_ref=f"Příloha 3 – samostatný list za stát {code} (§38f odst. 8)",
-                note=f"Zaplaceno {q(agg.foreign_tax_paid_czk)}, nezapočitatelné {q(agg.non_creditable_czk)}",
+                # Per-country non_creditable is paid - per-item cap, i.e. the
+                # treaty excess for this state. Named accordingly so it is not
+                # read as the §38f shortfall on ř. 329.
+                note=f"Zaplaceno {q(agg.foreign_tax_paid_czk)}, "
+                     f"nad smluvní sazbu {q(agg.non_creditable_czk)}",
             ))
 
     result.sections.append(sec_ftc)

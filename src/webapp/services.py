@@ -83,6 +83,10 @@ MAX_IMPORT_LINES = 500
 # roughly one round trip; kept modest because it is all one host.
 QUOTE_FETCH_WORKERS = 8
 
+# Slices the allocation doughnut draws before folding the rest into "ostatní".
+# 12 keeps the legend readable; the book runs to 36 rows, so the fold matters.
+ALLOCATION_SLICES = 12
+
 # Fuzzy description→symbol matching for the spreadsheet import. Deliberately
 # strict: a WRONG symbol in a sell plan is far worse than an unresolved row the
 # user picks from a dropdown. Measured on the real sheet, 0.72 keeps the good
@@ -1079,6 +1083,62 @@ class RunService:
             return None
         return self.runner.run_sync(self._compute_live_portfolio, pf, timeout=120)
 
+    @staticmethod
+    def _net_quantity(pos: Dict[str, Any]) -> Decimal:
+        """Signed size of a holding: long lots minus written (short) ones.
+
+        A written option is a liability — IBKR reports it as a negative
+        ``PositionValue`` — so a short-only row belongs in the net worth just
+        as much as a long one, with the opposite sign.
+        """
+        return (Decimal(str(pos.get("quantity_long") or 0))
+                - Decimal(str(pos.get("quantity_short") or 0)))
+
+    @staticmethod
+    def _short_premium_eur(pos: Dict[str, Any]) -> Decimal:
+        """Premium already received for the written lots.
+
+        This is a short leg's cost side with the sign flipped — a credit, not
+        an outlay — which is what makes ``value - cost`` the P/L for long and
+        short legs alike: buying back cheaper than you sold is a gain.
+        """
+        return sum((Decimal(str(s.get("total_proceeds_eur") or 0))
+                    for s in pos.get("short_lots") or []), Decimal(0))
+
+    @staticmethod
+    def _is_quotable(pos: Dict[str, Any]) -> bool:
+        """Whether a live price exists for this instrument at all.
+
+        Not for options: there is no option chain behind ``QuoteService``,
+        only a last price per plain ticker, so a contract always falls back to
+        its year-end mark.
+        """
+        return pos.get("category") != "OPTION"
+
+    def _needs_quote(self, pos: Dict[str, Any]) -> bool:
+        """Whether this row is worth an HTTP round trip — quotable and not flat.
+
+        Both the prefetch and the valuation loop ask through here. They used to
+        carry the same condition twice, and once they drifted apart a row would
+        silently land on the EOY fallback with no way to tell.
+        """
+        return self._is_quotable(pos) and self._net_quantity(pos) != 0
+
+    @staticmethod
+    def _contract_size(pos: Dict[str, Any]) -> Optional[Decimal]:
+        """Shares per unit held: 1 for stock, ``multiplier`` for an option.
+
+        An option is quoted per underlying share but held in contracts of 100,
+        and its FIFO cost is already per contract — so leaving this out puts
+        the two legs 100x apart. ``None`` means an option whose run never
+        recorded the multiplier: refuse it rather than publish a number that
+        is 100x light (re-run the year to populate the metadata).
+        """
+        mult = pos.get("multiplier")
+        if mult:
+            return Decimal(str(mult))
+        return None if pos.get("category") == "OPTION" else Decimal(1)
+
     def _fetch_quotes(self, pf: Dict[str, Any]) -> Dict[Tuple[str, str], Any]:
         """Every holding's live quote, fetched concurrently. ``{}`` values may
         be ``None`` — a missing quote is the caller's EOY-fallback case.
@@ -1095,10 +1155,7 @@ class RunService:
         wanted = {
             (pos.get("symbol") or "", pos.get("eoy_currency") or "USD")
             for pos in pf.get("positions", [])
-            # Mirror the valuation loop's own skips: options are never quoted
-            # and a closed position is not worth a round trip.
-            if pos.get("category") != "OPTION"
-            and Decimal(str(pos.get("quantity_long") or 0)) != 0
+            if self._needs_quote(pos)
         }
         keys = sorted(wanted)
         if not keys:
@@ -1113,48 +1170,94 @@ class RunService:
         # rather than turning into a silent EOY fallback.
         return {key: future.result() for key, future in futures.items()}
 
+    @staticmethod
+    def allocation_slices(positions: List[Dict[str, Any]],
+                         limit: int = ALLOCATION_SLICES) -> Dict[str, Any]:
+        """Doughnut slices: the biggest ``limit`` holdings plus one "ostatní".
+
+        Chart.js normalises whatever it is handed to a full circle, so handing
+        it a bare top-N drew the tail as if it did not exist and inflated every
+        slice that survived — a real 5% holding rendered as 6-7% of the ring
+        with nothing to say the picture was partial.
+
+        Written positions are a liability, not a share of the portfolio, and a
+        negative wedge renders broken; they are left out and counted, so the
+        caller can disclose both what was folded and what was dropped.
+        """
+        priced = [(p.get("symbol") or "?", Decimal(str(p["value_czk"])))
+                  for p in positions if p.get("value_czk") is not None]
+        longs = sorted(((s, v) for s, v in priced if v > 0),
+                       key=lambda sv: sv[1], reverse=True)
+        shorts = [(s, v) for s, v in priced if v < 0]
+
+        head, tail = longs[:limit], longs[limit:]
+        slices = [{"label": s, "value": str(v)} for s, v in head]
+        if tail:
+            slices.append({
+                "label": f"ostatní ({len(tail)})",
+                "value": str(sum((v for _, v in tail), Decimal(0))),
+            })
+        return {
+            "slices": slices,
+            "folded": len(tail),
+            "short_excluded": len(shorts),
+            "short_value_czk": sum((v for _, v in shorts), Decimal(0)) or None,
+        }
+
     def _compute_live_portfolio(self, pf: Dict[str, Any]) -> Dict[str, Any]:
         from datetime import date as _date
         today = _date.today()
         converter = self._converter_factory()
         quotes = self._fetch_quotes(pf)
         quotes_ok = 0
+        options_at_eoy = 0
         total_value_czk = Decimal(0)
         total_cost_czk = Decimal(0)
         rows = []
         for pos in pf.get("positions", []):
-            qty = Decimal(str(pos.get("quantity_long") or 0))
+            qty = self._net_quantity(pos)
             if qty == 0:
                 continue
             row = dict(pos)
             quote = None
-            if pos.get("category") != "OPTION":
+            if self._needs_quote(pos):
                 quote = quotes.get((pos.get("symbol") or "",
                                     pos.get("eoy_currency") or "USD"))
+            size = self._contract_size(pos)
             if quote is not None:
                 price, currency, price_source = quote.price, quote.currency, "live"
                 quotes_ok += 1
-            elif pos.get("eoy_market_price"):
+            elif pos.get("eoy_market_price") and size is not None:
                 price = Decimal(str(pos["eoy_market_price"]))
                 currency = pos.get("eoy_currency") or "USD"
                 price_source = "eoy"
+                if pos.get("category") == "OPTION":
+                    options_at_eoy += 1
             else:
                 price, currency, price_source = None, None, "none"
 
             value_czk = cost_czk = unrealized = pct = None
             value_ccy = None
             if price is not None:
-                value_ccy = qty * price
+                value_ccy = qty * price * size
                 value_czk = self._to_czk(converter, value_ccy, currency, today)
                 cost_czk = self._to_czk(
-                    converter, Decimal(str(pos.get("total_cost_eur") or 0)), "EUR", today
+                    converter,
+                    Decimal(str(pos.get("total_cost_eur") or 0))
+                    - self._short_premium_eur(pos),
+                    "EUR", today,
                 )
                 if value_czk is not None and cost_czk is not None:
                     unrealized = value_czk - cost_czk
-                    pct = (unrealized / cost_czk * 100) if cost_czk else None
+                    # abs(): a written leg's "cost" is the premium received, a
+                    # credit, so a plain ratio would flip the sign of a win.
+                    pct = (unrealized / abs(cost_czk) * 100) if cost_czk else None
                     total_value_czk += value_czk
                     total_cost_czk += cost_czk
             row.update({
+                "net_quantity": qty,
+                # Contract counts are whole numbers — drop the FIFO tail zeros.
+                "net_display": format(qty.normalize(), "f"),
                 "live_price": price, "live_currency": currency,
                 "price_source": price_source, "value_ccy": value_ccy,
                 "value_czk": value_czk, "cost_czk": cost_czk,
@@ -1169,6 +1272,10 @@ class RunService:
             "positions": rows,
             "quotes_ok": quotes_ok,
             "quotes_total": sum(1 for r in rows if r.get("category") != "OPTION"),
+            # Options are absent from the ratio above because they are never
+            # quotable; without this count the header would read "5/5 live"
+            # while a book of contracts sits on year-end marks.
+            "options_at_eoy": options_at_eoy,
             "total_value_czk": total_value_czk if total_value_czk else None,
             "total_cost_czk": total_cost_czk if total_cost_czk else None,
             "total_unrealized_czk": (total_value_czk - total_cost_czk) if total_value_czk else None,
@@ -1241,10 +1348,17 @@ class RunService:
         converter = self._converter_factory()
         currency = pos.get("eoy_currency") or "USD"
 
+        size = self._contract_size(pos)
+        if size is None:
+            raise ValueError(
+                "U tohoto kontraktu chybí velikost kontraktu (multiplier) — "
+                "přepočítejte rok."
+            )
+
         price_source = "manual"
         if price is None:
             quote = None
-            if pos.get("category") != "OPTION":
+            if self._is_quotable(pos):
                 quote = self.quotes.get_quote(pos.get("symbol") or "", currency)
             if quote is not None:
                 price, currency, price_source = quote.price, quote.currency, "live"
@@ -1275,7 +1389,9 @@ class RunService:
             take = min(lot_qty, remaining)
             remaining -= take
 
-            proceeds_czk = self._to_czk(converter, take * price, currency, today)
+            # ``size`` on the proceeds only: a lot's unit cost is already per
+            # contract, the quoted price is per underlying share.
+            proceeds_czk = self._to_czk(converter, take * price * size, currency, today)
             cost_czk = self._to_czk(
                 converter, take * Decimal(str(lot["unit_cost_eur"])), "EUR", today
             )
@@ -1310,7 +1426,7 @@ class RunService:
                 ),
             })
 
-        proceeds_total_czk = self._to_czk(converter, qty * price, currency, today)
+        proceeds_total_czk = self._to_czk(converter, qty * price * size, currency, today)
 
         # 100k annual limit interplay: simulated proceeds add to this year's
         # already-realized eligible proceeds.
@@ -2599,6 +2715,11 @@ class RunService:
                 "country": it.get("source_country"), "count": 0,
                 "gross_czk": Decimal(0), "wht_czk": Decimal(0),
             })
+            # Backfill: setdefault only looks at the first payment of the year,
+            # so a January payout that carried no country left the symbol blank
+            # for all twelve months.
+            if not a["country"] and it.get("source_country"):
+                a["country"] = it["source_country"]
             gross = Decimal(it.get("amount_czk") or 0)
             wht = Decimal(it.get("wht_total_czk") or 0)
             a["count"] += 1

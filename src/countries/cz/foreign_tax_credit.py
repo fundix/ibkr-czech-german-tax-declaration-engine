@@ -221,12 +221,18 @@ def evaluate_foreign_tax_credit(
                 for r in it.wht_records
             )
 
-        # Determine source country (from first WHT record, or item itself)
+        # Source country: the income event's own IssuerCountryCode first, then
+        # the first WHT record. WHT alone is not enough — a payer that withheld
+        # nothing still has a source state, and pooling those into UNKNOWN also
+        # costs them their treaty cap rate.
         source_country: Optional[str] = None
-        for r in it.wht_records:
-            if r.source_country:
-                source_country = r.source_country.upper()
-                break
+        if it.source_country:
+            source_country = it.source_country.upper()
+        else:
+            for r in it.wht_records:
+                if r.source_country:
+                    source_country = r.source_country.upper()
+                    break
 
         # Determine cap rate
         if source_country and source_country in config.country_credit_caps:
@@ -286,6 +292,21 @@ def evaluate_foreign_tax_credit(
 
         # Attach to item as dynamic attribute
         it.ftc_record = record  # type: ignore[attr-defined]
+
+        # Escalate onto the item itself. Every review surface — the web review
+        # page, the MCP pending-items tool, the JSON export, the form-mapping
+        # warning count, the PDF pending block — filters on
+        # item.tax_review_status, so a status left only on the record was
+        # invisible everywhere except one XLSX column. Both branches above can
+        # raise it: a missing source country, and a foreign-currency WHT that
+        # EUR mode had to drop from the cap.
+        if review_status == "PENDING_MANUAL_REVIEW":
+            it.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+            if review_note and review_note not in (it.tax_review_note or ""):
+                it.tax_review_note = (
+                    f"{it.tax_review_note}; {review_note}"
+                    if it.tax_review_note else review_note
+                )
 
         # Update summary
         summary.records.append(record)

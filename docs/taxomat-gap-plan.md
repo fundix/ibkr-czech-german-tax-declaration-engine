@@ -1,0 +1,208 @@
+# Gap analýza vs. Taxomat — nálezy a plán prací
+
+> **Ověřeno proti `main` @ `4340b1f`, 2026-08-07.** Každé tvrzení a každý odkaz soubor:řádek byl znovu zkontrolován proti aktuálnímu HEAD (po merge PR #44). Původ analýzy: uživatelská zpětná vazba srovnávající tento nástroj s Taxomatem (poplatky v nákladech, riziko přiřazení opcí, přehledy s filtrováním, portfolio tracker, dividendy/reclaim).
+
+**Korekce po ověření** (věci, které v původním reportu neplatily nebo mezitím vypršely — nic z toho není potichu zachováno):
+
+- ❌ **„Kniha 2025 má 19 akcií + 12 otevřených opcí"** — špatně: otevřených opčních kontraktů je v knize 2025 jen **6** (číslo 12 dublovalo SUMMARY+LOT řádky CSV). Závěr chyby #3 to nemění — live smyčka 2025 iteruje 24 pozic a poslední běh 2026 dokonce 36, ořez na 12 je reálný a horší.
+- ⌛ **„`positions_end.csv` je o den novější než běh"** — už neplatí: refresh 2026-08-07 ráno vygeneroval CSV i běh `2026-20260807-095350` současně. Strukturální pointa (positions slot jde stáhnout a parsovat bez enginu) platí dál.
+- ✏️ **„12 long kontraktů"** u chyby #1 → správně **12 long pozic (42 kontraktů)**; chybí přesně 12 029,57 USD (počítá se 121,51 z 12 151,08). Jedna z pozic (TUI call) je v EUR, ne USD.
+- ✏️ **`options_overview` „jen short řádky"** → vrací **long i short** řádky (docstring [services.py:988-990](src/webapp/services.py:988) to říká explicitně).
+- ✏️ **„~1,3 USD ≈ 30 Kč"** u chyby #6 je součet rebate samotných; skutečné zkreslení basis/výtěžku je **2×**, tedy ~2,6 USD (~55–60 Kč).
+- ✏️ Všechny odkazy do `docs/cz-tax-policy.md` byly posunuté o +1 řádek (invariant je na :193, „placeholder values" na :189, „NOT IMPLEMENTED" na :197). Odkazy níže jsou opravené.
+- ✏️ Drobné posuny: [OPTIONS_TEST_PLAN.md:32-35](tests/docs/OPTIONS_TEST_PLAN.md), simulátor/zóny u chyby #6 jsou :1278/:1313 a :2136-2139, poznámka k daňovým rokům v `compare_runs` je :2974-2979, SOY seeding čte snapshot na [fifo_manager.py:662](src/engine/fifo_manager.py:662) (fallback short :796).
+- ✏️ Grep `date_from|date_to` vrací ve skutečnosti **0 hitů** (Flex parametry se jmenují `from_date`/`to_date`, [services.py:817-818](src/webapp/services.py:817)); závěr — žádná podpora časového filtru — platí beze změny. Grep `moneyness|itm|intrinsic` = 0 hitů **ve vlastních zdrojích** (substring hity ve vendorovaném `htmx.min.js` nepočítaje).
+
+---
+
+## 1. Poplatky — odpověď na původní otázku
+
+**ANO, brokerské poplatky se započítávají**: u nákupu se přičítají k pořizovací ceně, u prodeje odečítají od výtěžku, shodně u akcií, opcí i shortů, a je to zapečetěné golden testy.
+
+- Jediné místo vzniku: [enrichment.py:121-127](src/processing/enrichment.py:121) — `BUY → net = gross + |commission|`, `SELL → net = gross − |commission|`. Odtud `net_proceeds_or_cost_basis_eur` do všech čtyř vstupů FIFO: [fifo_manager.py:1064](src/engine/fifo_manager.py:1064) (long buy), [:1096](src/engine/fifo_manager.py:1096) (short open), [:1132](src/engine/fifo_manager.py:1132) (sell), [:1266](src/engine/fifo_manager.py:1266) (cover).
+- Důkaz až do CZK: [test_golden_e2e_cz.py:147-149](tests/test_golden_e2e_cz.py:147) — ALPHA cost 116 877,46 Kč = 5001 USD (100×50 + 1 USD komise); komise přispívá 23,37 Kč do nákladů a 22,71 Kč do výtěžku. Opční prémie netto: [test_golden_scenarios_cz.py:91-94](tests/test_golden_scenarios_cz.py:91) (599 = 600 − 1).
+- Záporný výtěžek (komise > hrubý) je záměrně zachován ([fifo_manager.py:1130-1132](src/engine/fifo_manager.py:1130)); flip „C;O" komisi rozpočítá pro-rata ([fifo_manager.py:184-187](src/engine/fifo_manager.py:184)); prémie u exercise/assignment jde do základu akcie netto z opčních FIFO lotů ([option_processor.py:77-88](src/engine/event_processors/option_processor.py:77) → [trade_processor.py:136-173](src/engine/event_processors/trade_processor.py:136)).
+
+**Tři výhrady:**
+
+1. **SOY carry-in** seedovaný ze snapshotu jde přímo z IBKR `CostBasisMoney` ([fifo_manager.py:662](src/engine/fifo_manager.py:662)→:703/:717, [:738](src/engine/fifo_manager.py:738)→:762/:796; [parsing_orchestrator.py:153](src/parsers/parsing_orchestrator.py:153)) a nákladově se křížově neověřuje (kvantitativní kontrola množství existuje, [:638-644](src/engine/fifo_manager.py:638)). **Nuance z ověření:** pokud trades CSV obsahuje historické nákupy a FIFO rekonstrukce uspěje (golden OLDCO), carry-in basis komisní aritmetikou **prochází** — seeding nastupuje až při nedostatečné rekonstrukci ([:586-603](src/engine/fifo_manager.py:586)). Loty mimo TradeEvent vznikají ještě u stock dividendy ([:1522-1568](src/engine/fifo_manager.py:1522)) a zdanitelné fúze ([:1036-1045](src/engine/fifo_manager.py:1036)).
+2. **Sloupec `Taxes`** (stamp duty, FTT, ADR pass-through) se parsuje ([raw_models.py:64](src/parsers/raw_models.py:64)) a nikdo ho nečte; uživatelův Flex query ho ani neexportuje (23 sloupců, `Taxes` chybí i v `input_data_spec.md`). `net_cash` dtto. → **D5**.
+3. **Neobchodní poplatky** (custody, market data) jsou z §10 vyloučené — obhajitelné dle §10/4 a dokumentované ([PRD.md:708](PRD.md:708)) — ale bez viditelné poznámky; u debetního úroku poznámka existuje ([plugin.py:239-256](src/countries/cz/plugin.py:239)). → **D7**.
+
+---
+
+## 2. Nalezené chyby
+
+Šest přežilo fact-check i re-verifikaci proti `4340b1f`. (Dvě dřívější podezření neobstála a nejsou zde: FX selhání na nákladové noze živého ocenění — obě nohy sdílí konvertor a datum; sloučení států do `UNKNOWN` — pooled i split dávají stejný zápočet, sweep 4000 případů, max rozdíl 13,74 Kč ze zaokrouhlení.)
+
+### #1 — Opce oceněné na 1/100 skutečné hodnoty (live ocenění + simulátor) → **A1**
+
+**Co je špatně:** `value_ccy = qty * price` na [services.py:1147](src/webapp/services.py:1147), kde `qty` = počet kontraktů a `price` = mark za akcii; totéž v simulátoru [:1278](src/webapp/services.py:1278) (per-lot) a [:1313](src/webapp/services.py:1313) (total → 100k limit + odhad 15% daně). `multiplier` se ukládá ([:967](src/webapp/services.py:967)) a nikde se nepočítá s ním; nákladová strana ho přitom nese ([domain_event_factory.py:329-330](src/parsers/domain_event_factory.py:329)) → nohy jsou 100× od sebe. Simulate form ([routes.py:297-298](src/webapp/routes.py:297)) opce nevylučuje, na rozdíl od `_sellable_positions` ([services.py:2228-2233](src/webapp/services.py:2228)).
+
+**Důkaz (reálný běh `2026-20260806-085319`):** NU `280121C00013000`: 10 kontraktů, mark 4,2793, `eoy_position_value` 4279,3, cost 3853,46 EUR → kód spočítá 42,79 USD = fantomová ztráta ~−3,8k EUR na ploché pozici. Přes 12 long pozic (42 kontraktů) se z 12 151 USD počítá 121,51 (1 %). Simulátor: SOFI `280616C00018000`, 1 kontrakt, mark 6,7047, basis 467,04 EUR → hlásí ~−460 EUR místo ~+110 EUR zisku.
+
+**Dopad:** `total_value_czk`, doughnut i řazení ([:1165](src/webapp/services.py:1165) — NU call se řadí jako 43 USD a vypadne z top-12), každý snapshot v `portfolio.db`, simulátor. Statická tabulka nad tím ukazuje správné číslo ([portfolio.html:64](src/webapp/templates/portfolio.html:64)). **Žádný test** — jediný OPTION řádek v testu live portfolia ([test_webapp_services.py:600-601](tests/test_webapp_services.py:600)) záměrně nemá `eoy_market_price`.
+
+**Nálezy z re-verifikace:** opce **nikdy** nedostávají live kotaci ([:1131](src/webapp/services.py:1131) v live smyčce, [:1247](src/webapp/services.py:1247) v simulátoru, [:1100](src/webapp/services.py:1100) v prefetchi z PR #44) — chyba se projevuje výhradně přes EOY fallback a i po opravě budou opční „live" ceny staré EOY marky; `quotes_total` ([:1171](src/webapp/services.py:1171)) počítá jen ne-opční řádky, takže freshness ukazatel bude po opravě lhát o stáří opčních cen.
+
+### #2 — Short-only pozice mizí z live ocenění → **A1**
+
+**Co je špatně:** smyčka přeskočí každý řádek s `quantity_long == 0` ([services.py:1126-1128](src/webapp/services.py:1126)); IBKR přitom závazek reportuje jako záporný `PositionValue` a ten se ukládá ([raw_models.py:165](src/parsers/raw_models.py:165) → [services.py:961](src/webapp/services.py:961)).
+
+**Důkaz:** šest vypsaných putů v snapshotu 2026: −358,46 / −570,02 / −12 (EUR) / −729,89 / −197,50 / −1390,24 ≈ −3258. Nic z toho v `total_value_czk` → čistá hodnota nadhodnocená. `total_unrealized_czk` zkreslené není (`total_cost_eur` těchto řádků je 0).
+
+**Dopad:** ne „jen" `/portfolio/live` — `get_live_portfolio` krmí i dashboardovou net-worth kartu ([services.py:2552](src/webapp/services.py:2552)) a uložené snapshoty ([:1181](src/webapp/services.py:1181)). Statická stránka short opce ukazuje správně ([portfolio.html:61,64](src/webapp/templates/portfolio.html:61)). **Nález z re-verifikace:** po PR #44 je skip zakódovaný **dvakrát** — smyčka [:1126-1128](src/webapp/services.py:1126) a prefetch `_fetch_quotes` [:1101](src/webapp/services.py:1101) („Mirror the valuation loop's own skips") — oprava musí synchronizovat obě místa. Feature na riziko přiřazení musí číst `portfolio.json` přímo (jako `options_overview`), ne přes `get_live_portfolio`.
+
+### #3 — Alokační koláč oříznutý na top 12 bez výseče „ostatní" → **A5**
+
+**Co je špatně:** `[:12]` na [routes.py:273-276](src/webapp/routes.py:273), doslovný duplikát [routes.py:73-76](src/webapp/routes.py:73); Chart.js zbylé výseče znormalizuje na plný kruh ([portfolio_live.html:88-99](src/webapp/templates/partials/portfolio_live.html:88), duplicitní blok [dashboard_valuation.html:127-134](src/webapp/templates/partials/dashboard_valuation.html:127)).
+
+**Důkaz:** kniha 2025 = 24 long pozic s hodnotou; poslední běh 2026 (`2026-20260807-095350`) = **36 pozic, koláč zahodí 24 z nich (2/3)**. Pozice s reálnými 5 % se vykreslí jako ~6–7 % a ocas je neviditelný, bez popisku. Jediný test ([test_webapp_routes.py:161-166](tests/test_webapp_routes.py:161)) ověřuje jen výskyt řetězce `alloc-chart`.
+
+**Dopad:** graf lže identicky na dvou stránkách. **Oprava = 4 místa** (2 routes + 2 šablony), ideálně helper ve `services.py`. Filtr `if p.get("value_czk")` navíc zahazuje nuly/None; po opravě #2 nutno rozhodnout reprezentaci záporných hodnot (Chart.js je v doughnutu kreslí rozbité). Test na bucket „ostatní" psát **až po A1**, jinak pinne špatné hodnoty.
+
+### #4 — Ř. 329 přiznání nadhodnocený o smluvní přebytek → **A3** (+ vedlejší nález → **A6**)
+
+**Co je špatně:** `non_creditable_ftc = paid_total − final_creditable` ([tax_liability.py:384-386](src/countries/cz/tax_liability.py:384)) počítá z **plné** sražené daně, zatímco ř. 323 mapuje smluvně stropovaný `preliminary_ftc` ([form_mapping.py:365-370](src/countries/cz/form_mapping.py:365)); dle definice formuláře ř. 329 = ř. 323 − ř. 328. Mapováno bez poznámky na [form_mapping.py:386-391](src/countries/cz/form_mapping.py:386). Ironie: [form_mapping.py:363](src/countries/cz/form_mapping.py:363) sám píše, že nad rámec smluvní sazby nelze uvést na ř. 323 — a pak přesně ten přebytek pošle na ř. 329.
+
+**Důkaz (syntetický i živý):** NL dividenda 1000 Kč hrubá, sraženo 150 (smlouva 10 %): ř. 323 = 100, ř. 325 = 150, ř. 328 = 100, **ř. 329 hlášeno 50, ale ř.323−ř.328 = 0** — těch 50 Kč je nizozemský přeplatek k vrácení, ne ztracený zápočet (§38f/5). **Živě:** `2026-20260806-085319/form.daily.json` má ř. 329 = 18,94, ale ř. 323 − ř. 328 = 217,43 − 216,18 = **1,25** — rozdíl 17,69 Kč je smluvní přebytek (hlavně IE úroky nad 15% cap).
+
+**Dopad:** špatné číslo na podávaném formuláři; poplatník si přebytek může chybně odečíst dle §24/2/ch. Blast radius: jediný value-pin [test_cz_tax_liability.py:222](tests/test_cz_tax_liability.py:222); test na :250 i golden ([test_golden_e2e_cz.py:190-206](tests/test_golden_e2e_cz.py:190)) dávají oběma vzorci totéž. **Pozor:** pokud fix rozdělí i record-level `non_creditable_czk`, přibudou do blast radiusu tři invariantové testy ([test_cz_ftc_boundaries.py:229-251](tests/test_cz_ftc_boundaries.py:229), [test_cz_invariants.py:128-145](tests/test_cz_invariants.py:128), [test_audit_2026_07_fixes.py:328-329](tests/test_audit_2026_07_fixes.py:328)). Per-country listy ([form_mapping.py:394-402](src/countries/cz/form_mapping.py:394)) uvádějí v note ještě **třetí, jiné** číslo o téže dani (record-level přebytek před §38f capem) — sjednotit terminologii.
+
+**Vedlejší nález:** `PENDING_MANUAL_REVIEW` u FTC se píše na `CzForeignTaxCreditRecord.review_status` ([foreign_tax_credit.py:84,252](src/countries/cz/foreign_tax_credit.py:84)), nikdy na `item.tax_review_status` — a všechny kontrolní plochy filtrují to druhé ([routes.py:215-216](src/webapp/routes.py:215), [server.py:146-147](src/mcp_server/server.py:146), [json_exporter.py:119-120](src/countries/cz/exporters/json_exporter.py:119), [form_mapping.py:151-154](src/countries/cz/form_mapping.py:151), plus badge „k revizi", PDF pending blok, XLSX PendingReview list). FTC-pending položky jsou tedy vidět jen jako sloupec v XLSX ([xlsx_exporter.py:51,97-104](src/countries/cz/exporters/xlsx_exporter.py:51)). **Re-verifikace našla druhý zapisovač** téhož statusu: [foreign_tax_credit.py:263-269](src/countries/cz/foreign_tax_credit.py:263) (EUR-mode, cizoměnová WHT bez FX konvertoru) — oprava musí pokrýt obě větve.
+
+### #5 — Země dividendy se ztrácí u plátců bez WHT řádku → **A4**
+
+**Co je špatně:** `source_country` položky se odvozuje **výhradně** z prvního WHT záznamu ([tax_items.py:243-249](src/countries/cz/tax_items.py:243); zemi plní jen `CzWhtRecord`, [item_builder.py:414,469](src/countries/cz/item_builder.py:414)) — dividendová událost svou zemi nese ([domain_event_factory.py:483](src/parsers/domain_event_factory.py:483)), ale na položku se nepropíše. Na webu se země zachytí `setdefault` na prvním itemu symbolu a nikdy nedoplní ([services.py:2596-2601](src/webapp/services.py:2596)); [dividends.html:43](src/webapp/templates/dividends.html:43) pak renderuje „–". Tentýž dict krmí MCP `get_dividends` ([server.py:176-184](src/mcp_server/server.py:176)).
+
+**Důkaz (reálný běh `2025-20260703-154426`):** `{('CVS','US'):3, ('GOOG','US'):2, ('BABA',None):2, ('RYAAY','IE'):1, ('EVO','SE'):1, ('HAL','US'):1, ('PYPL','US'):1}` — BABA je None, ačkoli CSV má `IssuerCountryCode=CN`; BABA má Dividends + Other Fees, ale žádný Withholding Tax řádek.
+
+**Dopad:** backfill geografie přes daňové položky pokryje z 19 držených akcií jen 2 (PYPL, EVO); přes **události** všech 7 plátců včetně BABA — přesně té ADR, kde IBKR poráží ISIN prefix. **Související latentní díra:** nelinkovaná WHT dostane `item_type=OTHER` ([item_builder.py:486](src/countries/cz/item_builder.py:486)), které není v `_FTC_ELIGIBLE_TYPES` ([foreign_tax_credit.py:43-47](src/countries/cz/foreign_tax_credit.py:43)) → není v `ftc_summary`, ale do §8 `wht_paid` se započítá ([plugin.py:180-196](src/countries/cz/plugin.py:180)) — dvě čísla o téže dani si odporují. V reálném běhu 2025 žádný OTHER item není (vše se slinkovalo), díra je čistě latentní. Analogická větev existuje pro úrokovou sekci ([item_builder.py:477-484](src/countries/cz/item_builder.py:477)) — fix musí pokrýt obě. **Pozor na symbol:** CSV má `EVOs` (raw švédský listing), run výstup `EVO` — backfill mapy symbol→země musí jít přes asset resolver / `internal_asset_id`, ne raw CSV symbol.
+
+### #6 — Kladná komise (IBKR rebate) se účtuje jako náklad → **A2**
+
+**Co je špatně:** `.copy_abs()` na [domain_event_factory.py:354](src/parsers/domain_event_factory.py:354), posíleno [enrichment.py:124](src/processing/enrichment.py:124) a [:127](src/processing/enrichment.py:127) — rebate nikdy nemůže snížit náklad ani zvýšit výtěžek.
+
+**Důkaz (reálná data):** [trades.csv 2025, ř. 198](data/webapp/2025/trades.csv): SPLG `260116P00078000`, BUY 2 @ 1,95, `IBCommission = +0,6082` → náklad 390,6082 místo 389,3918 (nadhodnoceno o 2× rebate). Zrcadlově SELL WBD `261218C00012000` (+0,03656, ř. 207). Celkem 6 kladných řádků (2025: 3, 2026: 3), suma rebate 1,30 USD → **zkreslení ~2,6 USD** (~55–60 Kč). Rozložení znamének 2025: 221 záporných / 47 nul / 3 kladné; [input_data_spec.md:30](input_data_spec.md:30) sám píše „Usually negative".
+
+**Dopad:** peněžně nevýznamné, logicky špatně, škáluje s každým budoucím rebate. **Latentní sourozenci** (dnes nic nestojí):
+
+- Komise na exercise/assignment/expiration řádku se zahodí úplně: `OptionLifecycleEvent` nemá pole ([events.py:275-289](src/domain/events.py:275)), `_process_option_trade` staví `common_args` bez ní ([domain_event_factory.py:149-158](src/parsers/domain_event_factory.py:149), guard [:224](src/parsers/domain_event_factory.py:224)). Všech 13 lifecycle řádků v datech má komisi 0; kousne při prvním fee. ([OPTIONS_TEST_PLAN.md:32-35](tests/docs/OPTIONS_TEST_PLAN.md) řešil akciovou nohu, ne opční řádek.) → **D4**
+- `Taxes`/`net_cash` parsované a nečtené ([raw_models.py:64,67](src/parsers/raw_models.py:64)); Flex query je neexportuje. → **D5**
+- Simulovaný výtěžek bez výstupní komise na dvou místech: `_compute_simulation` [services.py:1278](src/webapp/services.py:1278)/[:1313](src/webapp/services.py:1313) a `_zone_view` [services.py:2136-2139](src/webapp/services.py:2136). → **D6**
+- Robustnost: FX selhání *samotné komise* (může být v jiné měně, [domain_event_factory.py:363](src/parsers/domain_event_factory.py:363)) → `net = None` → celý obchod vypadne z FIFO. Guard existuje na **čtyřech** místech, ne dvou: [fifo_manager.py:1052-1060](src/engine/fifo_manager.py:1052), [:1086-1089](src/engine/fifo_manager.py:1086), [:1119-1127](src/engine/fifo_manager.py:1119), [:1255-1258](src/engine/fifo_manager.py:1255). Fail-loud (`dropped_unenriched_events`), ale u SELL to znamená zdanitelné pozbytí chybějící v přiznání.
+
+**Nesouvisející doc rozpor:** [cz-tax-policy.md:189](docs/cz-tax-policy.md) a [:197](docs/cz-tax-policy.md) stále tvrdí „placeholder values, not treaty-verified" / „NOT IMPLEMENTED" — v rozporu s [config.py:155](src/countries/cz/config.py:155) („Verified 2026-07-03") a [future-work.md:58-61](docs/future-work.md:58). → řešeno v A3.
+
+---
+
+## 3. Co už máme (inventář před plánem)
+
+### Opce
+- Otevřené opční pozice s plnými metadaty (strike, expirace, typ, multiplier, underlying) v snapshotu — [services.py:948-971](src/webapp/services.py:948), zápis [:707-710](src/webapp/services.py:707). Všech 18 otevřených kontraktů v posledním běhu 2026 metadata má.
+- `options_overview`: OPTION filtr, **long i short** řádky odděleně (`quantity_long`/`quantity_short`, [:1039-1041](src/webapp/services.py:1039)), `days_to_expiry`, `expired`, řazení podle expirace — [services.py:985-1046](src/webapp/services.py:985). Čte snapshot přímo (záměrně, protože live valuation short-only řádky zahazuje).
+- Dashboardová tabulka „Opce — expirace" s odznaky — [dashboard_valuation.html:68-123](src/webapp/templates/partials/dashboard_valuation.html:68); dnešní warn odznak je čistě časový a hoří i na long kontraktech ([:104-109](src/webapp/templates/partials/dashboard_valuation.html:104)).
+- Retrospektivní přiřazení/uplatnění plně funguje: [domain_event_factory.py:114-176](src/parsers/domain_event_factory.py:114) → [option_trade_linker.py:16-153](src/processing/option_trade_linker.py:16).
+- Kotace na libovolný ticker vč. holého underlyingu, IBKR→Yahoo mapa + overridy — [quotes.py:79-122](src/webapp/quotes.py:79); **nově** concurrent prefetch pool `_fetch_quotes` z PR #44 ([services.py:1082-1114](src/webapp/services.py:1082)) k znovupoužití.
+- Vzor latch-alertu: sell-target zóny — [services.py:1823-1912](src/webapp/services.py:1823), [targets_alerts.html](src/webapp/templates/partials/targets_alerts.html). Evaluátor opce explicitně vylučuje ([:1880](src/webapp/services.py:1880)), UI to píše ([targets_alerts.html:46](src/webapp/templates/partials/targets_alerts.html)). Není background poller — vyhodnocení jen při načtení stránky ([:1832-1835](src/webapp/services.py:1832)).
+- Positions je vlastní Flex slot ([ibkr_flex.py:40](src/webapp/ibkr_flex.py:40)), stahuje se samostatně ([services.py:822-834](src/webapp/services.py:822)), [positions_parser.py:8](src/parsers/positions_parser.py:8) čte standalone. Repo mezeru samo eviduje: [future-work.md:241-242](docs/future-work.md:241).
+
+### Přehledy s filtrováním
+- **P/L ranking per pozice existuje a je otestovaný**: `disposal_summary()` [services.py:2663-2808](src/webapp/services.py:2663), filtr na ticker vč. párování opcí na underlying ([:2688-2702](src/webapp/services.py:2688), regex [:174](src/webapp/services.py:174)), řádky nesou `category` ([:2733](src/webapp/services.py:2733)). Jediný konzument je MCP `get_disposals` ([server.py:186-199](src/mcp_server/server.py:186)) — web nemá route. Testy: [test_webapp_services.py:706-1025](tests/test_webapp_services.py:706).
+- Klientský sort + live filtr + česká čísla: [table-enhance.js](src/webapp/static/table-enhance.js); plně napojeno na 5 tabulek (šestá, „Největší pozice", má jen sort bez toolbaru).
+- Items: serverové filtry `?section=` a `?status=` ([routes.py:171-192](src/webapp/routes.py:171)); XLSX multi-view (Securities/Options/Dividends/Interest/WithholdingTax/PendingReview + Summary + Metadata, 34 sloupců, [xlsx_exporter.py:33-148](src/countries/cz/exporters/xlsx_exporter.py:33)); `compare_runs` s fx_mode konzistencí ([services.py:2818-3000](src/webapp/services.py:2818)); SQLite snapshoty cross-year ([:1358-1417](src/webapp/services.py:1358)); CLI `--report-stock-trades-details SYMBOL` s AssetResolver alias rozlišením ([cli.py:42](src/cli.py:42) → [console_reporter.py:230-401](src/reporting/console_reporter.py:230)). Všechny runové stránky pod `/results/{run_id}/` ([routes.py:159-344](src/webapp/routes.py:159)).
+
+### Portfolio tracker
+- Portfolio stránka s kategorií, ISIN tooltipem, EOY hodnotou, time-test odznaky, loty — [portfolio.html:42-105](src/webapp/templates/portfolio.html:42). Live CZK ocenění + totals — [services.py:1116-1182](src/webapp/services.py:1116). Chart.js vendorovaný, na každé stránce ([base.html:14](src/webapp/templates/base.html:14)).
+- Země teče systémem jen na příjmové straně: `IssuerCountryCode` → `CashFlowEvent.source_country_code` ([domain_event_factory.py:483](src/parsers/domain_event_factory.py:483)) → per-country FTC ([foreign_tax_credit.py:306-320](src/countries/cz/foreign_tax_credit.py:306)). `Asset` žádné pole země nemá.
+- ADR příznak `Asset.ibkr_sub_category_raw` naplněný pro 4/4 ADR v knize 2025 z trades/cash. **Nálezy z ověření:** (a) v knize 2026 má BYDDY nula trade/cash řádků → 2026-only běh nechá příznak prázdný; (b) `positions_end.csv` sloupec `SubCategory` **exportuje** (sloupec 4 z 18) — `RawPositionRecord` ho jen nedeklaruje, takže jde doplnit jedním polem bez změny Flexu; (c) `RawPositionRecord` už parsuje `IssuerCountryCode` ([raw_models.py:157](src/parsers/raw_models.py:157)) — datový blocker geografie (b) je jen Flex export, parser je hotový.
+- `PercentOfNAV`: parsovaný a nepoužitý ([raw_models.py:168](src/parsers/raw_models.py:168)) — **a uživatelův Flex query ho ani neexportuje** (18 sloupců bez něj), takže by stejně vyžadoval změnu Flexu; navíc IBKR NAV zahrnuje hotovost.
+
+### Dividendy / reclaim
+- Smluvní sazby správně a ověřené: 12 SZDZ stropů s citacemi Sb., default 15 %, „Verified 2026-07-03" — [config.py:145-176](src/countries/cz/config.py:145); test provenience [test_cz_foreign_tax_credit.py:396-417](tests/test_cz_foreign_tax_credit.py:396).
+- Zápočet stropován smluvní sazbou ([foreign_tax_credit.py:231-245](src/countries/cz/foreign_tax_credit.py:231)); §38f finalizace vč. per-state stropu §38f/8 ([tax_liability.py:207-251](src/countries/cz/tax_liability.py:207), [:364-394](src/countries/cz/tax_liability.py:364)); mapování na DAP ř. 323/325/328/329 + per-stát listy ([form_mapping.py:353-404](src/countries/cz/form_mapping.py:353)), vidět ve `/form` i MCP.
+- `result.{mode}.json` už obsahuje `ftc_summary.per_country` i per-item `ftc` (`source_country`, `configured_cap_rate`, `non_creditable_czk`) — ověřeno na reálném běhu. Per-country agregát cap-rate **neobsahuje** (jen per-item).
+- Efektivní sazba srážky se **počítá** ve [withholding_tax_linker.py:506](src/processing/withholding_tax_linker.py:506) a ukládá na `WithholdingTaxEvent.effective_tax_rate` ([events.py:128](src/domain/events.py:128)) — CZ web ji jen nikde nečte (renderovaná je zatím jen v německém PDF, [pdf_generator.py:1148-1271](src/reporting/pdf_generator.py:1148)). Přímější cesta než kopírovat PDF kód.
+
+---
+
+## 4. Plán prací
+
+Legenda: effort **S** (hodiny) / **M** (den–dva) / **L** (více). „Hotovo, když" = akceptační kritérium.
+
+### Fáze A — opravy, na kterých se staví ✅ HOTOVO
+
+> Dokončeno na větvi `fix/gap-plan-phase-a` (6 commitů, 1168 testů zeleně, +32 nových).
+> **Dvě odchylky od původního zadání:**
+> - **A1** — opce zůstávají ve výběru simulátoru, nejsou vyloučené. Po opravě multiplieru počítají správně (SOFI call: +107,65 EUR místo −460), takže vyloučení by odebralo funkčnost a odporovalo by vlastnímu akceptačnímu kritériu. Místo toho je v UI napsáno, že u opcí není živá kotace a bez ruční ceny se počítá s markem k 31.12.
+> - **A3** — `non_creditable_ftc` zůstal zachovaný (= zaplaceno − započteno) a rozdělil se na `treaty_excess_ftc` + `uncredited_ftc`, které se k němu sčítají. Původní invariant tak platí dál a blast radius byl **nulový** — žádný existující test se nemusel měnit.
+>
+> **Nálezy při implementaci:** oprava #2 musela synchronizovat skip na dvou místech (smyčka + prefetch z PR #44) — vyřešeno predikátem `_needs_quote`. Koláč (A5) byl na **4 místech**, ne dvou. Ř. 329 se ověřilo naživo: reálný běh 2026 hlásil 18,94, správně 1,25.
+
+- [x] **A1 (M)** — **100× multiplier u opcí + započíst short nohy.** Ocenit OPTION řádky přes `eoy_position_value` (znaménkový, multiplier v sobě), nebo `qty × price × multiplier`; pustit short-only řádky do smyčky.
+  Soubory: [services.py:1147](src/webapp/services.py:1147) (live), [:1278](src/webapp/services.py:1278) + [:1313](src/webapp/services.py:1313) (simulátor), [:1126-1128](src/webapp/services.py:1126) (skip smyčky) **a synchronně** [:1101](src/webapp/services.py:1101) (duplicitní skip v `_fetch_quotes` — jinak short ne-opční pozice tiše spadne na EOY fallback), [routes.py:297-298](src/webapp/routes.py:297) (vyloučit OPTION z výběru v simulate, vzor `_sellable_positions` [:2228-2233](src/webapp/services.py:2228)), [:1171](src/webapp/services.py:1171) (`quotes_total` — nezapočítávat EOY-oceněné opce jako „fresh"), [tests/test_webapp_services.py](tests/test_webapp_services.py) (OPTION řádek **s** `eoy_market_price`).
+  Hotovo, když: na snapshotu běhu `2026-20260806-085319` vyjde NU call ~4279 USD (ne 42,79), čistá hodnota zahrnuje −3258 short závazku, simulátor SOFI hlásí zisk ~+110 EUR, a nový test pokrývá oceňovací větev OPTION vč. short nohy. Do UI poznamenat, že opční ceny jsou EOY marky (live kotace pro opce neexistují).
+- [x] **A2 (S)** — **Znaménko kladné komise (rebate).** Odstranit `.copy_abs()` v parseru a v obou enrichment větvích, zachovat znaménkovou konvenci.
+  Soubory: [domain_event_factory.py:354](src/parsers/domain_event_factory.py:354), [enrichment.py:124](src/processing/enrichment.py:124), [:127](src/processing/enrichment.py:127); golden scénář podle reálného SPLG řádku ([trades.csv 2025 ř. 198](data/webapp/2025/trades.csv)).
+  Hotovo, když: BUY 2 @ 1,95 s komisí +0,6082 dá basis 389,3918 (ne 390,6082) a zrcadlový SELL test projde; stávající golden testy (záporné komise) beze změny.
+- [x] **A3 (M)** — **Rozdělit `non_creditable` a opravit ř. 329.** Oddělit (a) přebytek nad smlouvu (nárokovat ve zdrojovém státě, nepatří na ř. 329 ani do §24/2/ch) od (b) zápočtu ztraceného §38f/1//8 (skutečně ř. 329). Explicitně rozhodnout invariant (dnešní `paid = creditable + non_creditable` vs. formulářový ř.329 = ř.323 − ř.328).
+  Soubory: [tax_liability.py:384-386](src/countries/cz/tax_liability.py:384), [form_mapping.py:386-391](src/countries/cz/form_mapping.py:386) (+ sjednotit terminologii per-country notes [:394-402](src/countries/cz/form_mapping.py:394)), [docs/cz-tax-policy.md:193](docs/cz-tax-policy.md) (invariant) + smazat zastaralé řádky :189/:197, [test_cz_tax_liability.py:222](tests/test_cz_tax_liability.py:222) (jediný pin dnešního vzorce; při zásahu do record-level čísel navíc [test_cz_ftc_boundaries.py:229-251](tests/test_cz_ftc_boundaries.py:229), [test_cz_invariants.py:128-145](tests/test_cz_invariants.py:128), [test_audit_2026_07_fixes.py:328-329](tests/test_audit_2026_07_fixes.py:328)).
+  Hotovo, když: na reálném běhu 2026 vyjde ř. 329 = 1,25 (= 217,43 − 216,18), přebytek 17,69 Kč je reportovaný odděleně jako „k vrácení v zahraničí", a NL syntetický případ dá ř. 329 = 0 s přebytkem 50.
+- [x] **A4 (S)** — **Země dividendy z události, ne jen z WHT.** Přenést `ev.source_country_code` na `CzTaxItem` (nové pole nebo fallback v `to_dict`), backfillovat `country` v `dividend_summary` místo `setdefault`.
+  Soubory: [tax_items.py:243-249](src/countries/cz/tax_items.py:243), [item_builder.py](src/countries/cz/item_builder.py), [services.py:2596-2601](src/webapp/services.py:2596). Párování přes asset resolver / `internal_asset_id`, ne raw symbol (EVOs≠EVO).
+  Hotovo, když: běh nad daty 2025 ukáže BABA = CN na `/dividends` i v MCP `get_dividends`; symbol s lednovou výplatou bez WHT má zemi doplněnou z pozdějších itemů/události.
+- [x] **A5 (S)** — **Výseč „ostatní" v alokačním koláči + poznámka.** Agregovat top-N + zbytek v jedné helper funkci ve `services.py` (comprehension v routes jsou doslovné duplikáty), routes nechat tenké.
+  Soubory: [routes.py:73-76](src/webapp/routes.py:73), [:273-276](src/webapp/routes.py:273), [portfolio_live.html:88-99](src/webapp/templates/partials/portfolio_live.html:88), [dashboard_valuation.html:127-134](src/webapp/templates/partials/dashboard_valuation.html:127) — **4 místa, ne 2**. Rozhodnout reprezentaci záporných/nulových hodnot (dnešní filtr `if p.get("value_czk")` je zahazuje; Chart.js záporné výseče kreslí rozbité). Dělat **po A1** (jinak test pinne špatné složení).
+  Hotovo, když: součet výsečí = 100 % všech pozic (bucket „ostatní" viditelný a otestovaný na obou stránkách) a u grafu je popisek.
+- [x] **A6 (S)** — **Zviditelnit FTC `PENDING_MANUAL_REVIEW`.** Propsat review status z FTC recordu na `item.tax_review_status` (nebo kontrolní plochy naučit číst i FTC pole) — **obě** zapisovací větve.
+  Soubory: [foreign_tax_credit.py:252](src/countries/cz/foreign_tax_credit.py:252) (chybějící země) a [:263-269](src/countries/cz/foreign_tax_credit.py:263) (EUR-mode bez FX), konzumenti [routes.py:215-216](src/webapp/routes.py:215), [server.py:146-147](src/mcp_server/server.py:146), [json_exporter.py:119-120](src/countries/cz/exporters/json_exporter.py:119), [form_mapping.py:151-154](src/countries/cz/form_mapping.py:151).
+  Hotovo, když: položka s FTC-pending statusem se objeví na review stránce, v MCP `get_pending_review_items` i v badge „k revizi".
+
+### Fáze B — data existují, chybí jen UI (nejlepší poměr hodnota/cena)
+
+- [ ] **B1 (S)** — **Stránka `/results/{run_id}/disposals`** nad hotovým `disposal_summary()`. Tenký route + Jinja tabulka s `class="sortable"` + toolbar → P/L ranking, klikací sort a live filtr zdarma (table-enhance.js). Přidat parametr řazení — dnešní `abs(gain_loss)` desc ([services.py:2789-2791](src/webapp/services.py:2789)) řadí velkou ztrátu nad střední zisk.
+  Soubory: [routes.py](src/webapp/routes.py) (pod `/results/{run_id}/`), nová šablona, [services.py:2789-2791](src/webapp/services.py:2789).
+  Hotovo, když: stránka existuje, defaultně řadí zisky sestupně (ne |P/L|), route test ověří obsah řádků.
+- [ ] **B2 (M)** — **Sdílené filtry `?symbol=`, `?category=`, `?date_from=`, `?date_to=`** jako parametry služby (kontrakt „services first"), použité routem i MCP. Časová dimenze má dnes nulovou podporu (jediné from/to v repu jsou Flex download parametry `from_date`/`to_date`, [services.py:817-818](src/webapp/services.py:817)). Kategorii keyovat na `asset_category`, **nikdy na `item_type`** — CFD se emituje jako `OPTION_CLOSE` ([item_builder.py:533-539](src/countries/cz/item_builder.py:533)) a `OPTION_EXERCISE_ASSIGNMENT` nemá producenta.
+  Soubory: [services.py](src/webapp/services.py) (`disposal_summary`, items), [routes.py:171-192](src/webapp/routes.py:171), [server.py](src/mcp_server/server.py).
+  Hotovo, když: `?symbol=&category=&date_from=&date_to=` fungují bookmarkovatelně na Items i disposals a MCP nástroje berou tytéž parametry.
+- [ ] **B3 (S)** — **Rozpad podle třídy aktiva + měny + sloupec váhy v %.** Tři groupby nad `portfolio.json`; váhový sloupec automaticky řaditelný. Závisí na **A1** (jmenovatel). K měnovému koláči napsat, že neobsahuje hotovost (`CASH_BALANCE` nikdy nedostane FIFO knihu, [calculation_engine.py:328](src/engine/calculation_engine.py:328)) a že `eoy_currency` u pozic bez EOY řádku tiše defaultuje na „USD" ([services.py:1096](src/webapp/services.py:1096), [:1133](src/webapp/services.py:1133), [:1139](src/webapp/services.py:1139)). `PercentOfNAV` nepoužívat (neexportovaný, NAV zahrnuje hotovost).
+  Soubory: [services.py](src/webapp/services.py), šablony portfolio/dashboard.
+  Hotovo, když: obě stránky ukazují rozpad kategorie+měny s poznámkou o hotovosti a portfolio tabulka má sloupec weight %.
+- [ ] **B4 (S)** — **Sloupce efektivní sazba / smluvní sazba / přebytek na stránce dividend.** Nulová změna pipeline — per-item `ftc` v `result.{mode}.json` má `paid/gross/configured_cap_rate/non_creditable_czk`. Efektivní sazbu nepočítat znovu: buď dopočet z per-item ftc, nebo přenést hotové `WithholdingTaxEvent.effective_tax_rate` ([withholding_tax_linker.py:506](src/processing/withholding_tax_linker.py:506), [events.py:128](src/domain/events.py:128)) přes `CzWhtRecord`. Per-country agregát cap-rate nenese — číst z configu nebo prvního itemu. Přidat varování „sazba nad smlouvu obvykle = chybějící W-8BEN".
+  Soubory: [services.py:2585-](src/webapp/services.py:2585) (`dividend_summary`), [dividends.html](src/webapp/templates/dividends.html), příp. [item_builder.py](src/countries/cz/item_builder.py).
+  Hotovo, když: `/dividends` ukazuje per-symbol efektivní sazbu, smluvní cap a přebytek, s W-8BEN hintem u sazeb nad cap.
+
+### Fáze C — reálná práce, bez externího zdroje
+
+- [ ] **C1 (M)** — **Riziko přiřazení opcí (moneyness).** Dávkově dotáhnout kotace distinktních underlyingů (znovupoužít `_fetch_quotes` pool z PR #44, [services.py:1082-1114](src/webapp/services.py:1082) — pozor, OPTION-skip žije na dvou místech a moneyness ho nesmí rozbít), rozdělit long/short nohu v UI ([dashboard_valuation.html:111-112](src/webapp/templates/partials/dashboard_valuation.html:111) — služba obě nohy už vrací), spočíst vnitřní hodnotu a označit short ∧ ITM ∧ ≤N dní se stupni závažnosti. K párování underlying→kontrakt použít otestovanou heuristiku [:2688-2702](src/webapp/services.py:2688). Číst `portfolio.json` přímo (jako `options_overview`), ne přes `get_live_portfolio`. Závisí na **A1**. Měkkost: underlying nemá vlastní měnu, zastupuje `eoy_currency` (pro reálná data správně).
+  Soubory: [services.py:985-1046](src/webapp/services.py:985), [dashboard_valuation.html:68-123](src/webapp/templates/partials/dashboard_valuation.html:68), [targets.html:207](src/webapp/templates/targets.html:207) (navázání), testy. Volitelně nový MCP nástroj (žádný z 12 dnešních opce nepokrývá).
+  Hotovo, když: dashboard rozlišuje long/short nohy a short ITM kontrakt ≤30 dní má odznak „hrozí přiřazení" (dnešní odznak hoří i na long pozicích).
+- [ ] **C2 (M)** — **Positions-only refresh** (čerstvá data pod C1). Slot `positions` se stahuje samostatně a `parse_positions_csv` běží bez pipeline — kapacita existuje. Háček: uložený Flex query neexportuje Strike/Expiry/Put-Call → dopočítat z OCC klíče ([`_OCC_KEY_TAIL`, services.py:173-174](src/webapp/services.py:173)). Minimálně nechat `options_overview` vypsat stáří dat přímo v tabulce.
+  Soubory: [services.py:822-834](src/webapp/services.py:822), [:985-1046](src/webapp/services.py:985), šablona.
+  Hotovo, když: opční tabulka jde obnovit z čerstvého positions CSV bez plného pipeline běhu a ukazuje stáří dat.
+- [ ] **C3 (M)** — **Geografie, dvoufázově.** (a) Hned: mapa symbol→země z `CashFlowEvent.source_country_code` (po A4 triviální; pokrývá 7 plátců vč. BABA=CN) + ADR příznak jako negativní signál — **nově**: `SubCategory` v `positions_end.csv` už je (sloupec 4/18), stačí přidat pole do `RawPositionRecord` ([raw_models.py:139-173](src/parsers/raw_models.py:139)), žádná změna Flexu; řeší i BYDDY v knize 2026 (nula trade řádků). (b) Pořádně: zapnout `IssuerCountryCode` na positions Flex query v Client Portalu — **parser už sloupec umí** ([raw_models.py:157](src/parsers/raw_models.py:157)), zbývá pole na `Asset` + resolver + persistence do `portfolio.json`; existující běhy potřebují re-run. ISIN prefix jen jako poslední vrstva s poznámkou „odvozeno z ISIN" a bucketem „neznámé" — v knize by sám byl špatně u **6 z 19** jmen (BABA/JD/BYDDY/KSPI = ADR s US ISIN, NU = KY holdco, WIZZ = JE), zrovna u EM expozice. Obchodní měna není proxy (BY6 = CN v EUR, WIX = IL v USD).
+  Soubory: [raw_models.py](src/parsers/raw_models.py), [domain/assets.py](src/domain/assets.py), [asset_resolver.py](src/identification/asset_resolver.py), [services.py](src/webapp/services.py), Flex query (mimo repo).
+  Hotovo, když: portfolio má koláč podle země s explicitním zdrojem každé hodnoty (IBKR / událost / ISIN-odvozeno / neznámé) a BABA je CN.
+
+### Fáze D — drahé nebo externě blokované
+
+- [ ] **D1 (L)** — **Poradce „vyplatí se žádat o vrácení?"** Potřebuje per-country tabulku procedur (lhůty, formulář/portál, relief-at-source, poplatky, de-minimis) — externí právní data, mění se ročně, v repu nejsou. Sourcovat a datovat člověkem, se stejnou disciplínou jako `country_credit_caps` ([config.py:155](src/countries/cz/config.py:155): citace + datum + test na hodnoty, vzor [test_cz_foreign_tax_credit.py:396-417](tests/test_cz_foreign_tax_credit.py:396)). Součástí klasifikace, kde vratka **nejde** (level-1 WHT v irském ETF, ADR pass-through) — vyžaduje domicil aktiva, který `Asset` nemá (částečně odvoditelný z `InvestmentFund` klasifikace). A3+B4 dodají 80 % užitku za 10 % ceny — dělat až po nich, pokud vůbec.
+  Hotovo, když: každé doporučení „žádej/nežádej" má citovaný zdroj s datem ověření a test.
+- [ ] **D2 (M)** — **Sektorový rozpad.** Externí zdroj, žádná varianta čistá (Yahoo `quoteSummary` neoficiální s cookie/crumb historií; OpenFIGI `marketSector` příliš hrubý). Pro ~19 pozic: ručně udržovaný `data/webapp/sector_map.json` po vzoru [symbol_map.json](data/webapp/symbol_map.json), deterministický, bez sítě; Yahoo max. jako volitelný auto-fill.
+  Hotovo, když: koláč podle sektoru s bucketem „nezařazeno" a dokumentovaným ručním zdrojem.
+- [ ] **D3 (L)** — **Cross-year P/L součet.** `compare_runs` ([services.py:2818-3000](src/webapp/services.py:2818)) je diff (b−a), ne součet; pravidlo konzistence fx_mode existuje ([:2836-2849](src/webapp/services.py:2836)), poznámka k různým rokům na [:2974-2979](src/webapp/services.py:2974). Nutná nová agregace + explicitní rozhodnutí o sčítání roků s různým `fx_mode`/`pairing_method`.
+  Hotovo, když: existuje pohled „součet realizovaných P/L přes roky" s vynuceným nebo explicitně odsouhlaseným fx_mode.
+- [ ] **D4 (S)** — **Komise na exercise/assignment/expiration řádcích.** Přidat pole na `OptionLifecycleEvent` ([events.py:275-289](src/domain/events.py:275)) a protáhnout `_process_option_trade` ([domain_event_factory.py:149-158](src/parsers/domain_event_factory.py:149)) + enrichment. Dnes neškodné (13/13 řádků v datech má 0), kousne prvním fee.
+  Hotovo, když: lifecycle řádek s nenulovou komisí ji promítne do P/L a test to pinuje.
+- [ ] **D5 (M)** — **Sloupec `Taxes` (stamp duty/FTT/ADR).** Nejdřív Flex query (sloupec se dnes neexportuje), pak kód: číst [raw_models.py:64](src/parsers/raw_models.py:64) v enrichmentu do basis/výtěžku; zvážit i `net_cash` (:67) jako křížovou kontrolu. Doplnit do `input_data_spec.md`. Nejpravděpodobnější budoucí překvapení — spustí se prvním UK/FR/IT obchodem.
+  Hotovo, když: syntetický UK nákup s 0,5% stamp duty má daň v pořizovací ceně.
+- [ ] **D6 (S)** — **Výstupní komise v simulátoru a žebříku zón.** Dvě místa: `_compute_simulation` ([services.py:1278](src/webapp/services.py:1278), [:1313](src/webapp/services.py:1313)) a `_zone_view` ([services.py:2136-2139](src/webapp/services.py:2136)); vstupní komise už je (z FIFO lotu). Stačí konfigurovatelný odhad.
+  Hotovo, když: simulovaný výtěžek odečítá odhad výstupní komise a UI to přiznává.
+- [ ] **D7 (S)** — **Poznámka o vyloučených neobchodních poplatcích** po vzoru debetního úroku ([plugin.py:239-256](src/countries/cz/plugin.py:239)); dnes CZ vrstva poplatky ignoruje bez zmínky, ačkoli je to dokumentované rozhodnutí ([PRD.md:708](PRD.md:708)).
+  Hotovo, když: report/form mapping obsahuje informativní řádek „neobchodní poplatky nejsou daňově uplatněny (§10/4)" se součtem.
+
+### Poznámky k robustnosti (bez vlastního work-itemu, vědět o nich)
+
+- FX-drop guard (`net = None` → obchod vypadne z FIFO) je na **čtyřech** místech: [fifo_manager.py:1052-1060](src/engine/fifo_manager.py:1052), [:1086-1089](src/engine/fifo_manager.py:1086), [:1119-1127](src/engine/fifo_manager.py:1119), [:1255-1258](src/engine/fifo_manager.py:1255). Fail-loud (`dropped_unenriched_events` + `logger.error`), ale u SELL jde o zdanitelné pozbytí chybějící v přiznání — případný warning-surface musí pokrýt všechna čtyři.
+- Rozpor `ftc_summary` vs. §8 `wht_paid` u nelinkované WHT (`item_type=OTHER`) je dnes **čistě latentní** (reálný běh 2025 žádný OTHER item nemá) — spustí ho první nelinkovaná srážka; fix musí pokrýt dividendovou i úrokovou sekci ([plugin.py:180-196](src/countries/cz/plugin.py:180), [item_builder.py:477-484](src/countries/cz/item_builder.py:477)).

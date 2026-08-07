@@ -240,6 +240,47 @@ class TestFtcMapping:
         assert us_line is not None
         assert us_line.value == Decimal("1000.00")
 
+    def test_line_329_is_the_capped_credit_not_the_treaty_excess(self):
+        """ř. 329 is ř. 323 − ř. 328 by definition.
+
+        Tax withheld above the treaty rate never entered ř. 323, so it must
+        not leave through ř. 329 — it is reclaimed from the source state, not
+        carried forward under §24 odst. 2 písm. ch).
+        """
+        # 1500 withheld, only 1000 within the treaty rate, and all of that
+        # credits (income is entirely foreign) → ř. 329 is zero, not 500.
+        ftc = _ftc(paid=Decimal("1500"), creditable=Decimal("1000"),
+                   foreign_income=Decimal("10000"))
+        liability = _liability(div=Decimal("10000"), ftc=ftc)
+        mapping = build_form_mapping(
+            liability=liability, netting=_netting(), ftc_summary=ftc,
+            taxable_dividends=Decimal("10000"), taxable_interest=ZERO,
+            currency="CZK",
+        )
+
+        line_323 = mapping.get_line("CZ_DAP_FTC_PRELIMINARY").value
+        line_328 = mapping.get_line("CZ_DAP_FTC_FINAL").value
+        line_329 = mapping.get_line("CZ_DAP_FTC_NON_CREDITABLE").value
+        assert line_329 == line_323 - line_328
+        assert line_329 == ZERO
+
+        excess = mapping.get_line("CZ_DAP_FTC_TREATY_EXCESS")
+        assert excess is not None
+        assert excess.value == Decimal("500.00")
+        # Deliberately no official_line_ref — it does not belong on the return.
+        assert excess.official_line_ref is None
+
+    def test_no_treaty_excess_line_when_nothing_was_over_withheld(self):
+        ftc = _ftc(paid=Decimal("1000"), creditable=Decimal("1000"),
+                   foreign_income=Decimal("10000"))
+        liability = _liability(div=Decimal("10000"), ftc=ftc)
+        mapping = build_form_mapping(
+            liability=liability, netting=_netting(), ftc_summary=ftc,
+            taxable_dividends=Decimal("10000"), taxable_interest=ZERO,
+            currency="CZK",
+        )
+        assert mapping.get_line("CZ_DAP_FTC_TREATY_EXCESS") is None
+
 
 # =========================================================================
 # Test 4: Warnings includes pending items

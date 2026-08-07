@@ -72,7 +72,15 @@ class CzTaxLiabilitySummary:
     preliminary_ftc: Decimal = ZERO
     czech_tax_on_foreign_income: Decimal = ZERO
     final_creditable_ftc: Decimal = ZERO
+    # Everything not credited here, for any reason: treaty_excess + uncredited.
     non_creditable_ftc: Decimal = ZERO
+    # Withheld above the treaty rate. §38f odst. 5 counts foreign tax only up
+    # to that rate, so this is never a Czech deduction — the source state has
+    # to refund it. Must stay off ř. 329 and out of §24 odst. 2 písm. ch).
+    treaty_excess_ftc: Decimal = ZERO
+    # Treaty-eligible credit lost to the §38f/1 or §38f/8 caps. This is the
+    # real ř. 329, and the part that §24 odst. 2 písm. ch) can carry.
+    uncredited_ftc: Decimal = ZERO
 
     # --- Final ---
     final_czech_tax_after_credit: Decimal = ZERO
@@ -113,6 +121,8 @@ class CzTaxLiabilitySummary:
             f"czech_tax_on_foreign_income_{c}": self.czech_tax_on_foreign_income.quantize(TWO),
             f"final_creditable_ftc_{c}": self.final_creditable_ftc.quantize(TWO),
             f"non_creditable_ftc_{c}": self.non_creditable_ftc.quantize(TWO),
+            f"treaty_excess_ftc_{c}": self.treaty_excess_ftc.quantize(TWO),
+            f"uncredited_ftc_{c}": self.uncredited_ftc.quantize(TWO),
             f"final_czech_tax_after_credit_{c}": self.final_czech_tax_after_credit.quantize(TWO),
         }
         if self.dividend_separate_base is not None and self.dividend_separate_base.available:
@@ -384,6 +394,16 @@ def compute_tax_liability(
     result.non_creditable_ftc = (
         ftc_summary.foreign_tax_paid_total_czk - result.final_creditable_ftc
     )
+    # Two unrelated reasons hide inside that total and only one is a Czech
+    # matter. Splitting them exactly (the two parts still sum back to it) is
+    # what keeps the treaty excess off ř. 329, where it would look like a
+    # credit the taxpayer may carry forward instead of money to reclaim
+    # abroad. Both are non-negative by construction: the per-item cap makes
+    # preliminary <= paid, and the §38f caps make final <= preliminary.
+    result.treaty_excess_ftc = (
+        ftc_summary.foreign_tax_paid_total_czk - result.preliminary_ftc
+    )
+    result.uncredited_ftc = result.preliminary_ftc - result.final_creditable_ftc
 
     if result.preliminary_ftc > result.czech_tax_on_foreign_income:
         notes.append(
