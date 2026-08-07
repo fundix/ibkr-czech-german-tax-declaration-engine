@@ -221,12 +221,18 @@ def evaluate_foreign_tax_credit(
                 for r in it.wht_records
             )
 
-        # Determine source country (from first WHT record, or item itself)
+        # Source country: the income event's own IssuerCountryCode first, then
+        # the first WHT record. WHT alone is not enough — a payer that withheld
+        # nothing still has a source state, and pooling those into UNKNOWN also
+        # costs them their treaty cap rate.
         source_country: Optional[str] = None
-        for r in it.wht_records:
-            if r.source_country:
-                source_country = r.source_country.upper()
-                break
+        if it.source_country:
+            source_country = it.source_country.upper()
+        else:
+            for r in it.wht_records:
+                if r.source_country:
+                    source_country = r.source_country.upper()
+                    break
 
         # Determine cap rate
         if source_country and source_country in config.country_credit_caps:

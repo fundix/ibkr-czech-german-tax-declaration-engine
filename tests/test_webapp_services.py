@@ -598,6 +598,38 @@ class TestLivePortfolio:
         assert Decimal(snaps[0]["total_value_czk"]) == Decimal("8200")
 
 
+class TestDividendSummaryCountry:
+    """The country must not depend on which payout happens to come first."""
+
+    def _run_with(self, svc, items):
+        from src.webapp.serializers import dump_json
+        run_dir = svc.runs_dir / "2025-test"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        dump_json({"items": items}, run_dir / "result.daily.json")
+        return "2025-test"
+
+    def _div(self, month, country, gross="100"):
+        return {"item_type": "DIVIDEND", "asset_symbol": "PYPL",
+                "asset_description": "PayPal", "source_country": country,
+                "amount_czk": gross, "wht_total_czk": "0",
+                "event_date": f"2025-{month}-15"}
+
+    def test_country_backfilled_from_a_later_payout(self, stub_service):
+        # January withheld nothing, so that row carries no country; the three
+        # later US payouts do. setdefault only ever saw the January one.
+        run_id = self._run_with(stub_service, [
+            self._div("01", None), self._div("04", "US"),
+            self._div("07", "US"), self._div("10", "US"),
+        ])
+        summary = stub_service.dividend_summary(run_id, "daily")
+        assert summary["assets"][0]["country"] == "US"
+
+    def test_country_stays_none_when_no_payout_knows_it(self, stub_service):
+        run_id = self._run_with(stub_service, [self._div("01", None)])
+        summary = stub_service.dividend_summary(run_id, "daily")
+        assert summary["assets"][0]["country"] is None
+
+
 class TestOptionValuation:
     """An option is quoted per underlying share but held in contracts of 100.
 

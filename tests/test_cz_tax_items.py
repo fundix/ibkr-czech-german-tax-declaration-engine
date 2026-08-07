@@ -135,7 +135,7 @@ def _make_rgl(
 
 def _make_dividend(
     asset_id: uuid.UUID, amount: Decimal, currency: str = "USD",
-    event_date: str = "2025-03-25",
+    event_date: str = "2025-03-25", source_country: Optional[str] = None,
 ) -> CashFlowEvent:
     eur = amount / Decimal("1.1") if currency != "EUR" else amount
     return CashFlowEvent(
@@ -145,6 +145,7 @@ def _make_dividend(
         gross_amount_foreign_currency=amount,
         local_currency=currency,
         gross_amount_eur=eur,
+        source_country_code=source_country,
     )
 
 
@@ -179,6 +180,54 @@ def _make_wht(
         taxed_income_event_id=taxed_income_event_id,
         source_country_code=source_country,
     )
+
+
+class TestDividendSourceCountry:
+    """The country rides on the income event, not only on the WHT record.
+
+    BABA pays out of CN and withholds nothing, so deriving the country from
+    the withholding record alone lost it — the item landed in the UNKNOWN
+    country pool and forfeited its treaty cap rate.
+    """
+
+    def test_country_survives_a_payer_that_withheld_nothing(self):
+        resolver = _resolver()
+        _register_stock(resolver)
+        div = _make_dividend(_STOCK_ID, Decimal("10"), "USD", source_country="CN")
+
+        items, _ = build_tax_items([], [div], resolver, _fx())
+        item = [i for i in items if i.item_type == CzTaxItemType.DIVIDEND][0]
+
+        assert item.wht_records == []
+        assert item.source_country == "CN"
+        assert item.to_dict()["source_country"] == "CN"
+
+    def test_wht_record_still_answers_when_the_event_has_no_country(self):
+        resolver = _resolver()
+        _register_stock(resolver)
+        div = _make_dividend(_STOCK_ID, Decimal("100"), "USD")
+        wht = _make_wht(_STOCK_ID, Decimal("15"), "USD",
+                        taxed_income_event_id=div.event_id, source_country="US")
+
+        items, _ = build_tax_items([], [div, wht], resolver, _fx())
+        item = [i for i in items if i.item_type == CzTaxItemType.DIVIDEND][0]
+
+        assert item.source_country is None
+        assert item.to_dict()["source_country"] == "US"
+
+    def test_ftc_aggregates_it_under_the_real_country(self):
+        """Without this the payer pooled into UNKNOWN, losing its treaty cap."""
+        from src.countries.cz.config import CzTaxConfig
+        from src.countries.cz.foreign_tax_credit import evaluate_foreign_tax_credit
+
+        resolver = _resolver()
+        _register_stock(resolver)
+        div = _make_dividend(_STOCK_ID, Decimal("10"), "USD", source_country="CN")
+        items, _ = build_tax_items([], [div], resolver, _fx())
+
+        summary = evaluate_foreign_tax_credit(items, CzTaxConfig(), has_fx=True)
+        assert "CN" in summary.per_country
+        assert "UNKNOWN" not in summary.per_country
 
 
 # =========================================================================

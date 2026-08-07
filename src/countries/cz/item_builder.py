@@ -245,6 +245,7 @@ def _build_income_items(
             amount_eur=amount_eur,
             amount_czk=czk,
             fx=fx_rec,
+            source_country=getattr(ev, "source_country_code", None),
             **meta,
         )
         if fx is not None and czk is None:

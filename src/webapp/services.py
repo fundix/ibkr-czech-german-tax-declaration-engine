@@ -2677,6 +2677,11 @@ class RunService:
                 "country": it.get("source_country"), "count": 0,
                 "gross_czk": Decimal(0), "wht_czk": Decimal(0),
             })
+            # Backfill: setdefault only looks at the first payment of the year,
+            # so a January payout that carried no country left the symbol blank
+            # for all twelve months.
+            if not a["country"] and it.get("source_country"):
+                a["country"] = it["source_country"]
             gross = Decimal(it.get("amount_czk") or 0)
             wht = Decimal(it.get("wht_total_czk") or 0)
             a["count"] += 1
