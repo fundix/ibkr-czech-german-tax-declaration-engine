@@ -43,6 +43,7 @@ from src.countries.cz.aggregation_service import run_cz_aggregation, run_cz_comp
 from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.time_test import time_test_deadline
 from src.engine.pairing import PairingMethod, coerce as coerce_pairing_method
+from src.parsers.positions_parser import parse_positions_csv
 from src.pipeline_runner import run_core_processing_pipeline
 from src.utils.decimal_context import setup_decimal_context
 from src.utils.type_utils import parse_ibkr_date
@@ -272,6 +273,48 @@ def _parse_decimal_cz(text: Any, field: str) -> Decimal:
 
 # OCC option keys end with yymmdd + C/P + 8-digit strike ("SOFI  260417P00020000").
 _OCC_KEY_TAIL = re.compile(r"\d{6}[CP]\d{8}$")
+
+# The same two key styles, captured. IBKR's positions statement exports neither
+# Strike, Expiry nor Put/Call, so a positions-only refresh has to read them back
+# out of the contract key itself.
+_OCC_KEY = re.compile(r"(?P<ymd>\d{6})(?P<kind>[CP])(?P<strike>\d{8})$")
+_MARKER_KEY = re.compile(
+    r"^(?P<kind>[CP])\s+\S+\s+(?P<ymd>\d{8})\s+(?P<strike>\d+(?:\.\d+)?)")
+
+
+def parse_option_key(symbol: str) -> Dict[str, Any]:
+    """Recover strike, expiry and Call/Put from an option's contract key.
+
+    Handles both styles IBKR emits — OCC with the underlying first
+    ("NU    280121C00013000" → 2028-01-21 call, strike 13) and the
+    marker-first European form ("C TUI  20260918 8 M" → 2026-09-18 call,
+    strike 8). Unknown shapes come back all ``None`` rather than guessed.
+    """
+    blank = {"option_type": None, "strike_price": None, "expiry_date": None}
+    key = (symbol or "").strip().upper()
+    if not key:
+        return blank
+
+    occ = _OCC_KEY.search(key)
+    if occ:
+        try:
+            expiry = datetime.strptime(occ["ymd"], "%y%m%d").date()
+        except ValueError:
+            return blank
+        # OCC pads the strike to eight digits in thousandths of a unit.
+        strike = Decimal(occ["strike"]) / Decimal(1000)
+        return {"option_type": occ["kind"], "expiry_date": expiry.isoformat(),
+                "strike_price": strike}
+
+    marker = _MARKER_KEY.match(key)
+    if marker:
+        try:
+            expiry = datetime.strptime(marker["ymd"], "%Y%m%d").date()
+        except ValueError:
+            return blank
+        return {"option_type": marker["kind"], "expiry_date": expiry.isoformat(),
+                "strike_price": Decimal(marker["strike"])}
+    return blank
 
 # Placeholder account label until real multi-account support lands. Runs are
 # tagged with the IBKR account id(s) found in their inputs; a run with no
@@ -1226,6 +1269,118 @@ class RunService:
     # ------------------------------------------------------------------
     # Live valuation (quotes + today's CZK), sale simulator, snapshots
     # ------------------------------------------------------------------
+
+    # ---- positions-only refresh (no engine run) -----------------------
+
+    def positions_csv_age_hours(self, tax_year: int) -> Optional[float]:
+        """Hours since the positions statement was written; None if absent."""
+        path = self.data_dir / str(tax_year) / self._FLEX_SLOT_FILES["positions"]
+        if not path.is_file():
+            return None
+        return (time.time() - path.stat().st_mtime) / 3600
+
+    def refresh_positions_sync(self, tax_year: int) -> Dict[str, Any]:
+        """Download only the positions statement — no engine run.
+
+        Positions is its own Flex slot and ``parse_positions_csv`` reads it
+        standalone, so today's open contracts are one request away. Running the
+        whole pipeline just to see whether a written put has gone in the money
+        is slow and beside the point.
+
+        On the runner so it cannot write the CSV from under a running engine.
+        """
+        cfg = self.get_flex_config()
+        query_id = cfg.queries.get("positions")
+        if not cfg.token or not query_id:
+            raise ValueError(
+                "IBKR Flex Web Service není nastavená pro pozice — vyplňte "
+                "token a query ID slotu „positions“ na stránce Soubory."
+            )
+        return self.runner.run_sync(self._download_positions, tax_year,
+                                    cfg.token, query_id, timeout=300)
+
+    def _download_positions(self, tax_year: int, token: str, query_id: str,
+                            fetch=None) -> Dict[str, Any]:
+        # Resolved at call time, not bound as a default: a default argument
+        # freezes the module attribute at import and cannot be patched, which
+        # is how a test ends up talking to the real IBKR endpoint.
+        fetch = fetch or fetch_statement
+        year_dir = self.data_dir / str(tax_year)
+        year_dir.mkdir(parents=True, exist_ok=True)
+        content = fetch(token, query_id)
+        path = year_dir / self._FLEX_SLOT_FILES["positions"]
+        path.write_bytes(content)
+        logger.info(f"IBKR Flex: refreshed positions for {tax_year} "
+                    f"({len(content)} bytes).")
+        return {"tax_year": tax_year, "bytes": len(content)}
+
+    def options_from_positions(self, tax_year: int,
+                               with_quotes: bool = True) -> Dict[str, Any]:
+        """Open option contracts straight from the positions statement.
+
+        Independent of any engine run, so the table can be refreshed on its
+        own. Two differences from ``options_overview`` worth knowing:
+
+        * The statement reports ONE signed quantity per contract, so a
+          simultaneous long and short in the same contract cannot be shown —
+          only the net. Assignment risk only needs the net.
+        * It exports neither Strike, Expiry nor Put/Call, so those are read
+          back out of the contract key (``parse_option_key``).
+
+        ``days_to_expiry`` counts from today, not a year-end: this file is a
+        snapshot of right now, which is the whole reason to refresh it.
+        """
+        path = self.data_dir / str(tax_year) / self._FLEX_SLOT_FILES["positions"]
+        if not path.is_file():
+            return {"as_of": None, "tax_year": tax_year, "options": [],
+                    "source": "positions_csv", "age_hours": None}
+        records = parse_positions_csv(str(path))
+        # SUMMARY rows are the position; LOT rows repeat it per acquisition and
+        # would double every quantity. Fall back to whatever is there when a
+        # query is configured lot-only.
+        opts = [r for r in records if (r.asset_class or "").upper() == "OPT"]
+        summary = [r for r in opts if (r.level_of_detail or "").upper() == "SUMMARY"]
+        rows_src = summary or opts
+
+        today = date.today()
+        rows: List[Dict[str, Any]] = []
+        for rec in rows_src:
+            net = Decimal(str(rec.position or 0))
+            if net == 0:
+                continue
+            key = parse_option_key(rec.symbol)
+            expiry = rec.expiry or key["expiry_date"]
+            days = None
+            if expiry:
+                try:
+                    days = (date.fromisoformat(expiry) - today).days
+                except ValueError:
+                    days = None
+            rows.append({
+                "symbol": rec.symbol,
+                "description": rec.description,
+                "underlying": rec.underlying_symbol,
+                "option_type": rec.put_call or key["option_type"],
+                "strike_price": rec.strike if rec.strike is not None
+                                else key["strike_price"],
+                "multiplier": rec.multiplier,
+                "currency": rec.currency_primary,
+                "expiry_date": expiry,
+                "days_to_expiry": days,
+                "expired": days is not None and days < 0,
+                "quantity_long": max(net, Decimal(0)),
+                "quantity_short": max(-net, Decimal(0)),
+                "net_quantity": net,
+                "net_display": _qty_display(net),
+            })
+        rows.sort(key=lambda r: (r["expiry_date"] is None, r["expiry_date"] or ""))
+        overview = {"as_of": today.isoformat(), "tax_year": tax_year,
+                    "options": rows, "source": "positions_csv",
+                    "age_hours": self.positions_csv_age_hours(tax_year)}
+        if not with_quotes:
+            return overview
+        return self.runner.run_sync(self._price_options_overview, overview,
+                                    timeout=120)
 
     def _cz_converter(self):
         """Daily-ČNB converter for 'today' valuations (network-backed cache)."""

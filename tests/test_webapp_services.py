@@ -1053,6 +1053,145 @@ class TestOptionsOverview:
             "as_of": None, "tax_year": None, "options": []}
 
 
+class TestOptionKeyParsing:
+    """The positions statement exports no Strike, Expiry or Put/Call, so a
+    positions-only refresh reads them back out of the contract key."""
+
+    def test_occ_key_underlying_first(self):
+        from src.webapp.services import parse_option_key
+        assert parse_option_key("NU    280121C00013000") == {
+            "option_type": "C", "expiry_date": "2028-01-21",
+            "strike_price": Decimal("13")}
+
+    def test_occ_strike_is_in_thousandths(self):
+        from src.webapp.services import parse_option_key
+        assert parse_option_key("SPYM  270115P00080500")["strike_price"] == \
+            Decimal("80.5")
+
+    def test_marker_first_european_key(self):
+        from src.webapp.services import parse_option_key
+        assert parse_option_key("P TUI  20260918 6.8 M") == {
+            "option_type": "P", "expiry_date": "2026-09-18",
+            "strike_price": Decimal("6.8")}
+
+    @pytest.mark.parametrize("key", ["", "PLAINSTOCK", "NU 999999C00013000",
+                                     "C TUI  20261340 8 M"])
+    def test_unparseable_keys_are_not_guessed(self, key):
+        from src.webapp.services import parse_option_key
+        assert parse_option_key(key) == {
+            "option_type": None, "strike_price": None, "expiry_date": None}
+
+
+class TestOptionsFromPositions:
+    """Today's contracts without a pipeline run."""
+
+    HEADER = ("ClientAccountID,CurrencyPrimary,AssetClass,SubCategory,Symbol,"
+              "Description,Conid,ISIN,UnderlyingSymbol,Multiplier,Quantity,"
+              "MarkPrice,PositionValue,CostBasisMoney,UnderlyingConid,"
+              "LevelOfDetail,OpenDateTime,HoldingPeriodDateTime")
+
+    def _write(self, svc, rows, year=2026):
+        year_dir = svc.data_dir / str(year)
+        year_dir.mkdir(parents=True, exist_ok=True)
+        (year_dir / "positions_end.csv").write_text(
+            "\n".join([self.HEADER, *rows]) + "\n", encoding="utf-8")
+
+    def _row(self, symbol, qty, under="SOFI", detail="SUMMARY", cls="OPT"):
+        return (f"U1,USD,{cls},,{symbol},{symbol} DESC,1,,{under},100,{qty},"
+                f"1.5,150,100,2,{detail},,")
+
+    def test_signed_quantity_becomes_a_long_or_written_leg(self, service):
+        self._write(service, [
+            self._row("SOFI  280616C00018000", "2"),
+            self._row("SOFI  280616P00015000", "-4"),
+        ])
+        rows = {r["symbol"]: r for r in service.options_from_positions(
+            2026, with_quotes=False)["options"]}
+
+        long_leg = rows["SOFI  280616C00018000"]
+        assert (long_leg["quantity_long"], long_leg["quantity_short"]) == \
+            (Decimal("2"), Decimal("0"))
+        written = rows["SOFI  280616P00015000"]
+        assert (written["quantity_long"], written["quantity_short"]) == \
+            (Decimal("0"), Decimal("4"))
+        assert written["net_display"] == "-4"
+
+    def test_strike_expiry_and_type_come_from_the_key(self, service):
+        self._write(service, [self._row("SOFI  280616P00015000", "-1")])
+        [row] = service.options_from_positions(2026, with_quotes=False)["options"]
+        assert row["option_type"] == "P"
+        assert row["strike_price"] == Decimal("15")
+        assert row["expiry_date"] == "2028-06-16"
+
+    def test_lot_rows_do_not_double_the_position(self, service):
+        """SUMMARY is the position; LOT repeats it per acquisition."""
+        self._write(service, [
+            self._row("SOFI  280616C00018000", "3", detail="SUMMARY"),
+            self._row("SOFI  280616C00018000", "1", detail="LOT"),
+            self._row("SOFI  280616C00018000", "2", detail="LOT"),
+        ])
+        [row] = service.options_from_positions(2026, with_quotes=False)["options"]
+        assert row["net_quantity"] == Decimal("3")
+
+    def test_lot_only_files_still_work(self, service):
+        self._write(service, [
+            self._row("SOFI  280616C00018000", "1", detail="LOT"),
+            self._row("SOFI  280616C00018000", "2", detail="LOT"),
+        ])
+        rows = service.options_from_positions(2026, with_quotes=False)["options"]
+        assert [r["net_quantity"] for r in rows] == [Decimal("1"), Decimal("2")]
+
+    def test_non_options_and_closed_rows_are_dropped(self, service):
+        self._write(service, [
+            self._row("SOFI", "100", cls="STK"),
+            self._row("SOFI  280616C00018000", "0"),
+        ])
+        assert service.options_from_positions(
+            2026, with_quotes=False)["options"] == []
+
+    def test_days_count_from_today_not_a_year_end(self, service):
+        """This file is a snapshot of right now — that is the point of it."""
+        from datetime import date as _date, timedelta as _timedelta
+        expiry = _date.today() + _timedelta(days=10)
+        key = f"SOFI  {expiry:%y%m%d}C00018000"
+        self._write(service, [self._row(key, "1")], year=2026)
+        [row] = service.options_from_positions(2026, with_quotes=False)["options"]
+        assert row["days_to_expiry"] == 10
+        assert row["expired"] is False
+
+    def test_a_missing_statement_is_empty_not_an_error(self, service):
+        out = service.options_from_positions(2099, with_quotes=False)
+        assert out["options"] == [] and out["age_hours"] is None
+
+    def test_refresh_writes_the_statement_without_running_the_engine(
+            self, service, monkeypatch):
+        from src.webapp import services as services_mod
+        from src.webapp.ibkr_flex import FlexConfig, save_flex_config
+
+        save_flex_config(service.flex_config_path,
+                         FlexConfig(token="tok", queries={"positions": "42"}))
+        calls = []
+
+        def fake_fetch(token, query_id, from_date=None, to_date=None):
+            calls.append((token, query_id))
+            return (self.HEADER + "\n"
+                    + self._row("SOFI  280616P00015000", "-1")
+                    + "\n").encode()
+
+        monkeypatch.setattr(services_mod, "fetch_statement", fake_fetch)
+        service.refresh_positions_sync(2026)
+
+        assert calls == [("tok", "42")]
+        [row] = service.options_from_positions(2026, with_quotes=False)["options"]
+        assert row["quantity_short"] == Decimal("1")
+        # No run was created — the tax figures are untouched.
+        assert service.list_runs() == []
+
+    def test_refresh_without_a_positions_query_explains_itself(self, service):
+        with pytest.raises(ValueError, match="positions"):
+            service.refresh_positions_sync(2026)
+
+
 class TestAssignmentRisk:
     """A written contract in the money can be assigned; a bought one cannot.
 

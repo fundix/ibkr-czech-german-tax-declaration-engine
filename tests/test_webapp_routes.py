@@ -165,6 +165,44 @@ class TestPages:
         assert "UNDR" in body
         assert "ALPHA" not in body
 
+    def test_positions_refresh_renders_the_options_table_alone(
+            self, client, monkeypatch):
+        """No engine run: one Flex slot, then just the fragment re-rendered."""
+        from src.webapp import services as services_mod
+        from src.webapp.ibkr_flex import FlexConfig, save_flex_config
+
+        svc = client.app.state.services
+        save_flex_config(svc.flex_config_path,
+                         FlexConfig(token="tok", queries={"positions": "42"}))
+        header = ("ClientAccountID,CurrencyPrimary,AssetClass,SubCategory,Symbol,"
+                  "Description,Conid,ISIN,UnderlyingSymbol,Multiplier,Quantity,"
+                  "MarkPrice,PositionValue,CostBasisMoney,UnderlyingConid,"
+                  "LevelOfDetail,OpenDateTime,HoldingPeriodDateTime")
+        row = ("U1,USD,OPT,,SOFI  280616P00015000,SOFI PUT,1,,SOFI,100,-4,"
+               "3.5,-1400,0,2,SUMMARY,,")
+        monkeypatch.setattr(
+            services_mod, "fetch_statement",
+            lambda token, query_id, from_date=None, to_date=None:
+                (header + "\n" + row + "\n").encode())
+
+        runs_before = len(svc.list_runs())
+        r = client.post("/dashboard/options/refresh", data={"tax_year": 2026})
+        assert r.status_code == 200
+        assert 'id="dash-options"' in r.text
+        assert "SOFI  280616P00015000" in r.text
+        assert "výpisu pozic" in r.text          # says where the numbers came from
+        assert len(svc.list_runs()) == runs_before
+
+    def test_positions_refresh_surfaces_a_failure_as_a_card(
+            self, client, monkeypatch):
+        from src.webapp.ibkr_flex import FlexConfig, save_flex_config
+
+        svc = client.app.state.services
+        save_flex_config(svc.flex_config_path, FlexConfig(token="", queries={}))
+        r = client.post("/dashboard/options/refresh", data={"tax_year": 2026})
+        assert r.status_code == 200
+        assert "Načtení pozic selhalo" in r.text
+
     def test_form_page_shows_official_line_refs(self, client):
         r = client.get("/results/2024-test/form")
         assert r.status_code == 200
