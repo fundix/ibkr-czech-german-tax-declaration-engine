@@ -86,15 +86,63 @@ jen chybějící pole.
 
 ## Query 3: `TaxEngine-Positions`
 
-- Sekce: **Open Positions**, Options: **Summary** (ne Lot)
-- Pole (15):
+- Sekce: **Open Positions**, Options: **Summary i Lot** (obojí zaškrtnuté)
+- Pole (19):
 
   Account ID · Currency · Asset Class · Sub Category · Symbol ·
-  Description · Conid · ISIN · Underlying Conid · Underlying Symbol ·
-  Multiplier · Quantity · Mark Price · Position Value · Cost Basis Money
+  Description · Conid · ISIN · Issuer Country Code · Underlying Conid ·
+  Underlying Symbol · Multiplier · Quantity · Mark Price · Position Value ·
+  Cost Basis Money · Level Of Detail · Open Date Time ·
+  Holding Period Date Time
+
+> **Kde jsou jednotlivá pole:** v seznamu sekcí se „Open Positions" jen
+> vybere. Na pole se klikne až **na název sekce**, což rozbalí panel se
+> zaškrtávátky — `Issuer Country Code` tedy není sekce, ale položka uvnitř
+> Open Positions.
 
 > Kdyby seznam nabízel „Position" i „Quantity", zvolte **Quantity** —
 > tak se jmenuje sloupec, který parser čeká.
+
+### Proč Summary *i* Lot
+
+Parser čte oba druhy řádků a každý k něčemu jinému:
+
+- **SUMMARY** = jedna pozice na titul. Odtud jdou množství, EOY cena a hodnota.
+  Řádky LOT se pro totály záměrně přeskakují, jinak by se pozice sečetla
+  několikrát.
+- **LOT** = jeden řádek na pořízení, s `OpenDateTime`. Odtud se plní
+  `Asset.soy_lots`, tedy skutečná data nákupu jednotlivých lotů.
+
+Bez LOT řádků nemá engine u pozic nesených z minulých let čím rekonstruovat
+datum pořízení a spadne na náhradní 31. 12. předchozího roku. Ten lot se
+označí `acquisition_date_estimated` a časový test §4 odst. 1 písm. u) se pak
+**vůbec nevyhodnotí**: položka zůstane zdanitelná jako konzervativní default
+a jde k ruční kontrole ([time_test.py:242-262](src/countries/cz/time_test.py:242)).
+Summary sám o sobě tedy funguje, ale u starších nákupů vás připraví
+o automatické osvobození.
+
+### `Issuer Country Code` a zeměpis portfolia
+
+`IssuerCountryCode` je autoritativní zdroj země emitenta. Pořadí zdrojů,
+které engine používá, je: IBKR → země z výplaty příjmu → prefix ISIN →
+„neznámé" (radši mezera než dohad).
+
+Prefix ISIN je jen odhad a na reálné knize se od IBKR **lišil u 8 z 24**
+titulů:
+
+| Titul | IBKR | Prefix ISIN | Proč |
+|---|---|---|---|
+| BABA, BYDDY, DIDIY, JD, NICE | HK, CN, CN, CN, IL | US | ADR — ISIN označuje zemi depozitáře |
+| NU | BR | KY | holdingová společnost na Kajmanech |
+| GRAB | SG | KY | totéž |
+| COPN | IE | NL | emitent jinde než registrace ISIN |
+
+`Sub Category` rozlišuje ADR od běžné akcie; u ADR se proto z prefixu ISIN
+země záměrně neodhaduje vůbec.
+
+> Po zapnutí sloupce je nutné data **znovu stáhnout a rok přepočítat** —
+> země se ukládá do `portfolio.json` při běhu, ne při zobrazení. Starší CSV
+> IBKR zpětně nedoplní.
 
 ## Query 4: `TaxEngine-CorpActions`
 
