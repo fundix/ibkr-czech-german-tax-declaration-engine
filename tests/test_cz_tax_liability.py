@@ -223,6 +223,117 @@ class TestFtcCapped:
 
 
 # =========================================================================
+# Test 5b: what "not credited" is made of — ř. 329 vs. money to reclaim
+# =========================================================================
+
+class TestNonCreditableSplit:
+    """§38f odst. 5 counts foreign tax only up to the treaty rate.
+
+    Anything withheld above it never enters ř. 323, so it cannot leave
+    through ř. 329 either — it is a refund claim against the source state,
+    not a Czech carry-forward under §24 odst. 2 písm. ch).
+    """
+
+    def test_treaty_excess_is_not_line_329(self):
+        cfg = CzTaxConfig()
+        # NL dividend 1000 gross, 150 withheld, treaty rate 10% → 100 eligible.
+        # Czech tax is 150 and all income is foreign, so the whole 100 credits:
+        # nothing is lost to §38f, and ř. 329 must be zero.
+        ftc = _ftc(paid=Decimal("150"), creditable=Decimal("100"),
+                   foreign_income=Decimal("1000"))
+        result = compute_tax_liability(
+            taxable_dividends=Decimal("1000"), taxable_interest=ZERO,
+            netting=_netting(), ftc_summary=ftc, config=cfg,
+        )
+
+        assert result.preliminary_ftc == Decimal("100")       # ř. 323
+        assert result.final_creditable_ftc == Decimal("100")  # ř. 328
+        assert result.uncredited_ftc == ZERO                  # ř. 329 = 323 - 328
+        # The 50 over the treaty rate is the Dutch tax office's to refund.
+        assert result.treaty_excess_ftc == Decimal("50")
+
+    def test_capped_credit_is_line_329(self):
+        cfg = CzTaxConfig()
+        # Same 150 withheld, but domestic income dominates, so §38f/1 lets
+        # only part of the treaty-eligible 100 through. That shortfall IS 329.
+        ftc = _ftc(paid=Decimal("150"), creditable=Decimal("100"),
+                   foreign_income=Decimal("1000"))
+        result = compute_tax_liability(
+            taxable_dividends=Decimal("1000"), taxable_interest=ZERO,
+            netting=_netting(sec_gains=Decimal("9000")), ftc_summary=ftc,
+            config=cfg,
+        )
+
+        # CZ tax 1500, foreign ratio 0.1 → 150 head-room, credit = min(100,150)
+        assert result.final_creditable_ftc == Decimal("100")
+        assert result.uncredited_ftc == ZERO
+        assert result.treaty_excess_ftc == Decimal("50")
+
+    def test_zero_czech_tax_loses_the_whole_credit(self):
+        cfg = CzTaxConfig()
+        ftc = _ftc(paid=Decimal("150"), creditable=Decimal("100"),
+                   foreign_income=ZERO)
+        result = compute_tax_liability(ZERO, ZERO, _netting(), ftc, cfg)
+
+        # No Czech tax to credit against: the full treaty-eligible 100 is lost
+        # to §38f and belongs on ř. 329; the 50 excess still does not.
+        assert result.final_creditable_ftc == ZERO
+        assert result.uncredited_ftc == Decimal("100")
+        assert result.treaty_excess_ftc == Decimal("50")
+
+    def test_the_two_parts_still_add_up_to_the_total(self):
+        cfg = CzTaxConfig()
+        ftc = _ftc(paid=Decimal("3000"), creditable=Decimal("1500"),
+                   foreign_income=Decimal("10000"))
+        result = compute_tax_liability(
+            taxable_dividends=Decimal("10000"), taxable_interest=ZERO,
+            netting=_netting(sec_gains=Decimal("90000")), ftc_summary=ftc,
+            config=cfg,
+        )
+        assert (result.treaty_excess_ftc + result.uncredited_ftc
+                == result.non_creditable_ftc)
+
+    def test_both_causes_at_once(self):
+        """The shape the real 2026 run hit, where ř. 329 read 18.94.
+
+        There ř. 323 was 217.43 and ř. 328 was 216.18, so the line overstated
+        itself by the 17.69 withheld above treaty rates. Both causes act here
+        too: a per-state §38f/8 cap eats part of the eligible credit, and
+        17.69 was over-withheld. Only the first belongs on ř. 329.
+        """
+        from src.countries.cz.foreign_tax_credit import CzCountryCreditAggregate
+
+        cfg = CzTaxConfig()
+        ftc = _ftc(paid=Decimal("235.12"), creditable=Decimal("217.43"),
+                   foreign_income=Decimal("3311.40"))
+        ftc.per_country = {
+            # Head-room to spare: cap 450, so all of it credits.
+            "US": CzCountryCreditAggregate(
+                country="US", gross_income_czk=Decimal("3000"),
+                foreign_tax_paid_czk=Decimal("187.16"),
+                creditable_czk=Decimal("169.47")),
+            # Little income, lots of tax: cap 46.71 bites into 47.96.
+            "IE": CzCountryCreditAggregate(
+                country="IE", gross_income_czk=Decimal("311.40"),
+                foreign_tax_paid_czk=Decimal("47.96"),
+                creditable_czk=Decimal("47.96")),
+        }
+        result = compute_tax_liability(
+            taxable_dividends=Decimal("3311.40"), taxable_interest=ZERO,
+            netting=_netting(), ftc_summary=ftc, config=cfg,
+        )
+        # Base rounds to 3300 (§16 odst. 2), so gross tax is 495.00 and the IE
+        # per-state cap lands at 46.55, taking 1.41 off the eligible 217.43.
+        assert result.preliminary_ftc == Decimal("217.43")      # ř. 323
+        assert result.final_creditable_ftc == Decimal("216.02")  # ř. 328
+        assert result.uncredited_ftc == Decimal("1.41")          # ř. 329 = 323 - 328
+        # The old formula would have put 235.12 - 216.02 = 19.10 on ř. 329,
+        # smuggling the over-withheld 17.69 into a Czech carry-forward.
+        assert result.treaty_excess_ftc == Decimal("17.69")      # reclaim abroad
+        assert result.non_creditable_ftc == Decimal("19.10")
+
+
+# =========================================================================
 # Test 6: Zero taxable base
 # =========================================================================
 

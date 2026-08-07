@@ -186,15 +186,31 @@ date is read.
 |------|--------|
 | Per-item preliminary cap: `min(wht_paid, cap_rate × gross_income)` | **IMPLEMENTED** |
 | Default cap rate: 15% (`default_max_credit_rate`) | **IMPLEMENTED** |
-| Per-country treaty cap: `country_credit_caps` dict | **PARTIAL** — placeholder values, not treaty-verified |
+| Per-country treaty cap: `country_credit_caps` dict | **IMPLEMENTED** — 12 treaties with Sb. citations, verified 2026-07-03 (`config.py`) |
 | Missing source_country → PENDING_MANUAL_REVIEW, default cap applied | **IMPLEMENTED** |
 | No linked WHT → zero credit record, no crash | **IMPLEMENTED** |
 | Multiple WHT records on one item: first source_country used for cap | **IMPLEMENTED** |
 | FTC invariant: `paid = creditable + non_creditable` | **IMPLEMENTED** |
+| Split of `non_creditable` into `treaty_excess_ftc` + `uncredited_ftc` | **IMPLEMENTED** — see below |
 | Final FTC = `min(preliminary, czech_tax_on_foreign_income)` | **IMPLEMENTED** |
 | Czech tax on foreign income: proportional method `gross_tax × (foreign_income / combined_base)` | **IMPLEMENTED** |
 | Per-country FTC aggregation in summary | **IMPLEMENTED** |
-| Treaty-by-treaty verification of cap rates | **NOT IMPLEMENTED** |
+| Treaty-by-treaty verification of cap rates | **IMPLEMENTED** for the 12 treaties in `country_credit_caps`; others fall back to the 15% default |
+
+### What "not creditable" is made of
+
+`non_creditable_ftc` (`paid − final_creditable`) holds two amounts with
+completely different consequences, so it is reported as both:
+
+| Field | Meaning | Where it goes |
+|-------|---------|---------------|
+| `treaty_excess_ftc` | `paid − preliminary` — withheld **above** the treaty rate | **Not on the return.** §38f odst. 5 counts foreign tax only up to the treaty rate, so this is a refund claim against the source state. Usually signals a missing form (e.g. W-8BEN for US). |
+| `uncredited_ftc` | `preliminary − final_creditable` — treaty-eligible credit lost to the §38f/1 proportional cap or the §38f/8 per-state cap | **Příloha 3, ř. 329** (defined as ř. 323 − ř. 328). Deductible as an expense under §24 odst. 2 písm. ch) in the following period. |
+
+The two always sum back to `non_creditable_ftc`. Mapping the *total* onto
+ř. 329 — as the engine did before — contradicts that line's own definition
+and would let over-withheld foreign tax be carried forward as if it were a
+Czech credit.
 
 ---
 
