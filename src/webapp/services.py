@@ -29,6 +29,7 @@ import re
 import shutil
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 import uuid
@@ -43,6 +44,7 @@ from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.time_test import time_test_deadline
 from src.engine.pairing import PairingMethod, coerce as coerce_pairing_method
 from src.pipeline_runner import run_core_processing_pipeline
+from src.utils.decimal_context import setup_decimal_context
 from src.utils.type_utils import parse_ibkr_date
 from src.webapp import settings
 from src.webapp.ibkr_flex import (
@@ -74,6 +76,12 @@ SELL_TARGETS_VERSION = 1
 MAX_ZONES_PER_SYMBOL = 10
 MAX_TARGET_SYMBOLS = 200
 MAX_IMPORT_LINES = 500
+
+# Live quotes are one HTTP round trip per symbol (~200 ms), fetched inline by
+# the sell-zone ladder before it can render. Measured on the real portfolio:
+# 24 holdings took 4.5 s serially. Pure I/O, so a small pool collapses that to
+# roughly one round trip; kept modest because it is all one host.
+QUOTE_FETCH_WORKERS = 8
 
 # Fuzzy description→symbol matching for the spreadsheet import. Deliberately
 # strict: a WRONG symbol in a sell plan is far worse than an unresolved row the
@@ -1071,10 +1079,45 @@ class RunService:
             return None
         return self.runner.run_sync(self._compute_live_portfolio, pf, timeout=120)
 
+    def _fetch_quotes(self, pf: Dict[str, Any]) -> Dict[Tuple[str, str], Any]:
+        """Every holding's live quote, fetched concurrently. ``{}`` values may
+        be ``None`` — a missing quote is the caller's EOY-fallback case.
+
+        Keyed by (symbol, currency) because the currency is what picks the
+        Yahoo exchange suffix, and deduplicated so one symbol held twice costs
+        one request.
+
+        Its own pool, deliberately NOT ``self.runner``: this method already
+        runs ON the runner's single worker, so scheduling there would deadlock.
+        Threads get the engine's decimal context through ``initializer``, the
+        same way ``jobs.py`` arms its worker.
+        """
+        wanted = {
+            (pos.get("symbol") or "", pos.get("eoy_currency") or "USD")
+            for pos in pf.get("positions", [])
+            # Mirror the valuation loop's own skips: options are never quoted
+            # and a closed position is not worth a round trip.
+            if pos.get("category") != "OPTION"
+            and Decimal(str(pos.get("quantity_long") or 0)) != 0
+        }
+        keys = sorted(wanted)
+        if not keys:
+            return {}
+        if len(keys) == 1:                      # no pool for a single holding
+            return {keys[0]: self.quotes.get_quote(*keys[0])}
+        with ThreadPoolExecutor(max_workers=min(QUOTE_FETCH_WORKERS, len(keys)),
+                                thread_name_prefix="quote",
+                                initializer=setup_decimal_context) as pool:
+            futures = {key: pool.submit(self.quotes.get_quote, *key) for key in keys}
+        # .result() re-raises, so a broken quote service still surfaces here
+        # rather than turning into a silent EOY fallback.
+        return {key: future.result() for key, future in futures.items()}
+
     def _compute_live_portfolio(self, pf: Dict[str, Any]) -> Dict[str, Any]:
         from datetime import date as _date
         today = _date.today()
         converter = self._converter_factory()
+        quotes = self._fetch_quotes(pf)
         quotes_ok = 0
         total_value_czk = Decimal(0)
         total_cost_czk = Decimal(0)
@@ -1086,7 +1129,8 @@ class RunService:
             row = dict(pos)
             quote = None
             if pos.get("category") != "OPTION":
-                quote = self.quotes.get_quote(pos.get("symbol") or "", pos.get("eoy_currency") or "USD")
+                quote = quotes.get((pos.get("symbol") or "",
+                                    pos.get("eoy_currency") or "USD"))
             if quote is not None:
                 price, currency, price_source = quote.price, quote.currency, "live"
                 quotes_ok += 1
