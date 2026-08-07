@@ -119,12 +119,15 @@ def enrich_financial_events(
             # 2c. Net proceeds or cost basis in EUR (HIGH PRECISION)
             if event.net_proceeds_or_cost_basis_eur is None: # Only calculate if not already set
                 if event.gross_amount_eur is not None and event.commission_eur is not None:
+                    # commission_eur is signed as a cost: positive when charged,
+                    # negative for a rebate. Keep the sign — forcing it positive
+                    # would make a rebate raise the basis instead of lowering it.
                     if event.event_type in [FinancialEventType.TRADE_BUY_LONG, FinancialEventType.TRADE_BUY_SHORT_COVER]:
                         # Cost basis = gross amount + commission
-                        event.net_proceeds_or_cost_basis_eur = ctx.add(event.gross_amount_eur, event.commission_eur.copy_abs()) # Ensure commission added is positive
+                        event.net_proceeds_or_cost_basis_eur = ctx.add(event.gross_amount_eur, event.commission_eur)
                     elif event.event_type in [FinancialEventType.TRADE_SELL_LONG, FinancialEventType.TRADE_SELL_SHORT_OPEN]:
                         # Proceeds = gross amount - commission
-                        event.net_proceeds_or_cost_basis_eur = ctx.subtract(event.gross_amount_eur, event.commission_eur.copy_abs()) # Ensure commission subtracted is positive
+                        event.net_proceeds_or_cost_basis_eur = ctx.subtract(event.gross_amount_eur, event.commission_eur)
                 elif event.gross_amount_eur is not None and event.commission_eur is None and event.commission_foreign_currency == Decimal('0.0'):
                     # If commission is zero, net = gross
                     event.net_proceeds_or_cost_basis_eur = ctx.create_decimal(event.gross_amount_eur) # ensure it's under context
