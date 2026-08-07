@@ -231,3 +231,91 @@ class RawCorporateActionRecord(RawBaseRecord): # From corpact*.csv
         if v is None or str(v).strip() == "":
             return None
         return str(v).strip()
+
+
+class RawStatementOfFundsRecord(RawBaseRecord):
+    """One line of IBKR's Statement of Funds — the per-currency cash ledger.
+
+    Needed for FX gains on currency disposals (§10 CZ): the gain requires the
+    rate at which the disposed currency was ACQUIRED, and this is the only
+    statement that carries cash balances at all.
+
+    Two row shapes share the schema:
+
+    * **Balance rows** — the ``Starting Balance`` / ``Ending Balance`` markers
+      that open and close each currency block. ``activity_code`` and
+      ``transaction_id`` are empty, ``amount`` is 0, and the figure lives in
+      ``balance``. See ``is_balance_row``.
+    * **Movement rows** — everything else. ``amount == debit + credit``, with
+      debit negative and credit positive.
+
+    A currency conversion is TWO movement rows sharing ``trade_id`` and
+    ``transaction_id``, one per leg; ``activity_code`` is ``FOREX``. The
+    descriptions differ between the legs ("Traded" vs "Trading" Currency Leg),
+    so pairing must go through the IDs, never the text.
+    """
+    client_account_id: Optional[str] = Field(None, alias="ClientAccountID")
+    currency_primary: str = Field(alias="CurrencyPrimary")
+    asset_class: Optional[str] = Field(None, alias="AssetClass")
+    sub_category: Optional[str] = Field(None, alias="SubCategory")
+    symbol: Optional[str] = Field(None, alias="Symbol")
+    description: Optional[str] = Field(None, alias="Description")
+    conid: Optional[str] = Field(None, alias="Conid")
+    isin: Optional[str] = Field(None, alias="ISIN")
+    underlying_symbol: Optional[str] = Field(None, alias="UnderlyingSymbol")
+    # report_date is when the line hit the statement; date is the economic one.
+    # They diverge — a withholding-tax correction reported 2026-07-30 carried
+    # date 2026-06-25 — so the ČNB rate must come from `date`, not report_date.
+    report_date: Optional[str] = Field(None, alias="ReportDate")
+    date: Optional[str] = Field(None, alias="Date")
+    settle_date: Optional[str] = Field(None, alias="SettleDate")
+    activity_code: Optional[str] = Field(None, alias="ActivityCode")
+    activity_description: Optional[str] = Field(None, alias="ActivityDescription")
+    trade_id: Optional[str] = Field(None, alias="TradeID")
+    trade_quantity: Optional[Decimal] = Field(None, alias="TradeQuantity")
+    trade_gross: Optional[Decimal] = Field(None, alias="TradeGross")
+    # Signed as IBKR reports it: negative when charged, positive on a rebate.
+    trade_commission: Optional[Decimal] = Field(None, alias="TradeCommission")
+    trade_tax: Optional[Decimal] = Field(None, alias="TradeTax")
+    debit: Optional[Decimal] = Field(None, alias="Debit")
+    credit: Optional[Decimal] = Field(None, alias="Credit")
+    amount: Optional[Decimal] = Field(None, alias="Amount")
+    balance: Optional[Decimal] = Field(None, alias="Balance")
+    level_of_detail: Optional[str] = Field(None, alias="LevelOfDetail")
+    transaction_id: Optional[str] = Field(None, alias="TransactionID")
+
+    _BALANCE_MARKERS = ("STARTING BALANCE", "ENDING BALANCE")
+
+    @property
+    def is_balance_row(self) -> bool:
+        """Whether this is a block's opening/closing balance marker.
+
+        Keyed on the empty activity code plus the description, because
+        ``LevelOfDetail`` is ``Currency`` on every row and cannot tell them
+        apart.
+        """
+        return (
+            not (self.activity_code or "").strip()
+            and (self.activity_description or "").strip().upper()
+            in self._BALANCE_MARKERS
+        )
+
+    @property
+    def is_starting_balance(self) -> bool:
+        return (self.is_balance_row
+                and (self.activity_description or "").strip().upper()
+                == "STARTING BALANCE")
+
+    @field_validator('trade_quantity', 'trade_gross', 'trade_commission',
+                     'trade_tax', 'debit', 'credit', 'amount', 'balance',
+                     mode='before')
+    @classmethod
+    def parse_decimal_fields(cls, v: Any) -> Optional[Decimal]:
+        return safe_decimal(v, default=None if v is None or str(v).strip() == "" else Decimal("0.0"))
+
+    @field_validator('report_date', 'date', 'settle_date', mode='before')
+    @classmethod
+    def validate_date_strings(cls, v: Any) -> Optional[str]:
+        if v is None or str(v).strip() == "":
+            return None
+        return str(v).strip()

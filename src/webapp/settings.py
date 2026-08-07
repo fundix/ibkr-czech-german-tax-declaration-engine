@@ -30,6 +30,7 @@ SLOT_LABELS = {
     "positions_start": "Pozice na začátku roku",
     "positions_end": "Pozice na konci roku",
     "corp_actions": "Korporátní akce",
+    "statement_of_funds": "Statement of Funds (hotovostní kniha)",
 }
 
 # A run needs these; the rest can be derived (positions_start from the
