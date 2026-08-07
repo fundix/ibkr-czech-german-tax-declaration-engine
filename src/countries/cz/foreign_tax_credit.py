@@ -293,6 +293,21 @@ def evaluate_foreign_tax_credit(
         # Attach to item as dynamic attribute
         it.ftc_record = record  # type: ignore[attr-defined]
 
+        # Escalate onto the item itself. Every review surface — the web review
+        # page, the MCP pending-items tool, the JSON export, the form-mapping
+        # warning count, the PDF pending block — filters on
+        # item.tax_review_status, so a status left only on the record was
+        # invisible everywhere except one XLSX column. Both branches above can
+        # raise it: a missing source country, and a foreign-currency WHT that
+        # EUR mode had to drop from the cap.
+        if review_status == "PENDING_MANUAL_REVIEW":
+            it.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+            if review_note and review_note not in (it.tax_review_note or ""):
+                it.tax_review_note = (
+                    f"{it.tax_review_note}; {review_note}"
+                    if it.tax_review_note else review_note
+                )
+
         # Update summary
         summary.records.append(record)
         summary.foreign_income_total_czk += gross

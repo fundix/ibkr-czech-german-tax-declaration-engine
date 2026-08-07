@@ -239,6 +239,34 @@ class TestMissingCountry:
         summary = evaluate_foreign_tax_credit(items, cfg, has_fx=True)
         assert "UNKNOWN" in summary.per_country
 
+    def test_pending_status_reaches_the_item(self):
+        """Every review surface filters item.tax_review_status.
+
+        Leaving the flag on the FTC record alone made these items invisible to
+        the review page, the MCP pending-items tool, the JSON export and the
+        warning count — visible only as one XLSX column.
+        """
+        from src.countries.cz.tax_items import CzTaxReviewStatus
+
+        cfg = CzTaxConfig()
+        item = _div_no_country(Decimal("1000"), wht_czk=Decimal("150"))
+        assert item.tax_review_status == CzTaxReviewStatus.RESOLVED
+
+        evaluate_foreign_tax_credit([item], cfg, has_fx=True)
+
+        assert item.tax_review_status == CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+        assert "Missing source_country" in (item.tax_review_note or "")
+
+    def test_resolved_item_is_left_alone(self):
+        from src.countries.cz.tax_items import CzTaxReviewStatus
+
+        cfg = CzTaxConfig()
+        item = _div(Decimal("1000"), wht_czk=Decimal("150"), source_country="US")
+        evaluate_foreign_tax_credit([item], cfg, has_fx=True)
+
+        assert item.tax_review_status == CzTaxReviewStatus.RESOLVED
+        assert item.tax_review_note is None
+
 
 # =========================================================================
 # Test 5: No linked WHT → zero credit
