@@ -28,6 +28,13 @@
             <input type="hidden" name="action" value="done">
             <button type="submit" class="small">Prodáno</button>
           </form>
+          <form method="post" action="/targets/zone/state" class="inline-form">
+            <input type="hidden" name="symbol" value="{{ a.symbol }}">
+            <input type="hidden" name="zone_id" value="{{ a.zone_id }}">
+            <input type="hidden" name="action" value="rearm">
+            <button type="submit" class="small"
+                    title="Vrátit zónu do hlídání: smaže značku dosažení, takže může spustit alert znovu. Ceny ani kusů se nedotkne.">Zrušit dosažení</button>
+          </form>
         </td>
       </tr>
       {% endfor %}
@@ -37,5 +44,9 @@
     a značka zůstane, i kdyby cena zase spadla. Vyhodnocuje se ale <strong>jen při
     načtení stránky s živými cenami</strong>; špičku, která proběhne, když aplikaci
     nemáš otevřenou, nezachytí. Cena k 31. 12. ani opce alert nespustí.</p>
+  <p class="note">„Beru na vědomí" alert schová, ale značku nechá — zóna pak už
+    <strong>nikdy nespustí alert znovu</strong>. Když ji označila špatná kotace
+    (typicky nenamapovaný symbol v <code>data/webapp/symbol_map.json</code>),
+    použij <strong>Zrušit dosažení</strong>: vrátí ji do hlídání.</p>
 </section>
 {% endif %}

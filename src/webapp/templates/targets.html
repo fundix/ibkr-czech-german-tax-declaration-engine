@@ -89,6 +89,15 @@
           <input type="hidden" name="action" value="{{ 'undone' if z.done_at else 'done' }}">
           <button type="submit" class="small">{{ "Vrátit mezi aktivní" if z.done_at else "Prodáno" }}</button>
         </form>
+        {% if z.reached_at and not z.done_at %}
+        <form method="post" action="/targets/zone/state" class="inline-form">
+          <input type="hidden" name="symbol" value="{{ row.symbol }}">
+          <input type="hidden" name="zone_id" value="{{ z.id }}">
+          <input type="hidden" name="action" value="rearm">
+          <button type="submit" class="small"
+                  title="Vrátit zónu do hlídání: smaže značku dosažení, takže může spustit alert znovu. Ceny ani kusů se nedotkne.">Zrušit dosažení</button>
+        </form>
+        {% endif %}
         {% if not z.done_at and z.sellable > 0 %}
         <button type="button" class="small"
                 hx-get="/targets/tax/{{ row.symbol | urlencode }}/{{ z.id }}{% if run_id %}?run_id={{ run_id }}{% endif %}"
@@ -97,6 +106,9 @@
                 title="Spočítat, co by prodej v této zóně znamenal daňově.">Daň?</button>
         <span id="tax-spin-{{ z.id }}" class="htmx-indicator"><span class="spinner"></span></span>
         {% endif %}
+        {% if z.reached_at and not z.done_at %}<span class="badge {{ 'ok' if z.reached else 'warn' }}"
+          title="Označeno {{ (z.reached_at or '')[:16] | replace('T', ' ') }} při ceně {{ z.reached_price }}{{ ' — živá kotace je teď pod cílem, značka je tedy starší než dnešní cena' if not z.reached }}."
+          >🎯 dosaženo{{ " dřív" if not z.reached }}</span>{% endif %}
         {% if z.done_at %}<span class="badge muted">prodáno</span>{% endif %}
         {% if z.lot_missing %}<span class="badge warn"
           title="Navázaný nákup už mezi otevřenými loty není — nejspíš je prodaný.">lot chybí</span>{% endif %}
