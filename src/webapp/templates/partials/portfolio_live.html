@@ -27,6 +27,41 @@
     </div>
   </section>
 
+  {% set bd = live.breakdown %}
+  {% if bd and bd.total_czk %}
+  <section class="card">
+    <div class="split">
+      <div class="chart-box">
+        <h2>Podle druhu</h2>
+        <canvas id="category-chart" width="230" height="230"></canvas>
+        <table class="items">
+          <tbody>
+            {% for s in bd.by_category %}
+            <tr><td>{{ s.label }}</td><td class="num">{{ s.value | czk }}</td>
+              <td class="num">{{ "%.1f"|format(s.pct) }} %</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="chart-box">
+        <h2>Podle měny</h2>
+        <canvas id="currency-chart" width="230" height="230"></canvas>
+        <table class="items">
+          <tbody>
+            {% for s in bd.by_currency %}
+            <tr><td>{{ s.label }}</td><td class="num">{{ s.value | czk }}</td>
+              <td class="num">{{ "%.1f"|format(s.pct) }} %</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <p class="note">Podíly z dlouhé strany portfolia ({{ bd.total_czk | czk }} Kč) — vypsané pozice
+      jsou závazek a nezapočítávají se. Měnový rozpad je jen za cenné papíry: hotovostní zůstatky
+      v FIFO knize nejsou, takže skutečná měnová expozice je vyšší.</p>
+  </section>
+  {% endif %}
+
   <section class="card">
     <div class="split">
       {% if allocation.slices %}
@@ -62,6 +97,7 @@
               <th class="num">Náklady Kč</th>
               <th class="num">Nerealizováno Kč</th>
               <th class="num">%</th>
+              <th class="num" title="Podíl na dlouhé straně portfolia (vypsané pozice se nezapočítávají).">Váha %</th>
             </tr>
           </thead>
           <tbody>
@@ -82,6 +118,7 @@
                 p.unrealized_czk is not none else "–" }}</td>
               <td class="num {{ 'neg' if p.unrealized_pct and p.unrealized_pct < 0 }}">{{
                 "%.1f"|format(p.unrealized_pct) if p.unrealized_pct is not none else "–" }}</td>
+              <td class="num">{{ "%.1f"|format(p.weight_pct) if p.weight_pct is not none else "–" }}</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -108,6 +145,21 @@
         options: { plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } } } }
       });
     }
+    // Same doughnut, two more groupings of the very same long value.
+    const doughnut = (id, slices) => {
+      const el = document.getElementById(id);
+      if (!el || !slices.length || !window.Chart) return;
+      new Chart(el, {
+        type: 'doughnut',
+        data: {
+          labels: slices.map(s => s.label),
+          datasets: [{ data: slices.map(s => parseFloat(s.value)) }]
+        },
+        options: { plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 10 } } } } }
+      });
+    };
+    doughnut('category-chart', {{ (live.breakdown.by_category if live.breakdown else []) | tojson }});
+    doughnut('currency-chart', {{ (live.breakdown.by_currency if live.breakdown else []) | tojson }});
     const snaps = {{ snapshots | tojson }};
     const el = document.getElementById('value-chart');
     if (el && snaps.length > 1 && window.Chart) {

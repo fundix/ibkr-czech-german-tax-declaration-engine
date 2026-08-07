@@ -637,6 +637,57 @@ class TestAllocationSlices:
         assert alloc["folded"] == 0
 
 
+class TestPortfolioBreakdown:
+    """Three groupings of the same long value: class, currency, per-row weight."""
+
+    def _rows(self):
+        return [
+            {"symbol": "A", "category": "STOCK", "live_currency": "USD",
+             "value_czk": Decimal("600")},
+            {"symbol": "B", "category": "STOCK", "live_currency": "EUR",
+             "value_czk": Decimal("300")},
+            {"symbol": "C", "category": "OPTION", "eoy_currency": "USD",
+             "value_czk": Decimal("100")},
+            # A written leg: a liability, so it is not part of what you own.
+            {"symbol": "D", "category": "OPTION", "eoy_currency": "USD",
+             "value_czk": Decimal("-400")},
+            {"symbol": "E", "category": "STOCK", "value_czk": None},
+        ]
+
+    def test_splits_by_asset_class(self):
+        bd = RunService.portfolio_breakdown(self._rows())
+        assert bd["total_czk"] == Decimal("1000")
+        assert [(s["label"], s["value"]) for s in bd["by_category"]] == [
+            ("STOCK", "900"), ("OPTION", "100")]
+
+    def test_splits_by_currency_preferring_the_priced_one(self):
+        bd = RunService.portfolio_breakdown(self._rows())
+        assert [(s["label"], s["value"]) for s in bd["by_currency"]] == [
+            ("USD", "700"), ("EUR", "300")]
+
+    def test_weights_sum_to_100_and_skip_the_liability(self):
+        rows = self._rows()
+        RunService.portfolio_breakdown(rows)
+        weights = {r["symbol"]: r["weight_pct"] for r in rows}
+        assert weights["A"] == Decimal("60")
+        assert weights["D"] is None          # written leg
+        assert weights["E"] is None          # no price
+        assert sum(w for w in weights.values() if w is not None) == Decimal("100")
+
+    def test_percentages_are_json_safe(self):
+        """These slices go through tojson into Chart.js, which has no Decimal."""
+        import json
+        bd = RunService.portfolio_breakdown(self._rows())
+        json.dumps(bd["by_category"])
+        assert all(isinstance(s["pct"], float) for s in bd["by_category"])
+
+    def test_an_empty_book_does_not_divide_by_zero(self):
+        bd = RunService.portfolio_breakdown(
+            [{"symbol": "X", "category": "STOCK", "value_czk": None}])
+        assert bd["total_czk"] is None
+        assert bd["by_category"] == []
+
+
 class TestDividendSummaryCountry:
     """The country must not depend on which payout happens to come first."""
 

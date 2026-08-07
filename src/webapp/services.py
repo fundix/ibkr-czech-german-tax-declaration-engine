@@ -1284,6 +1284,50 @@ class RunService:
             "short_value_czk": sum((v for _, v in shorts), Decimal(0)) or None,
         }
 
+    @staticmethod
+    def portfolio_breakdown(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Long-side split by asset class and by trading currency.
+
+        The denominator is the LONG value alone. A written position is a
+        liability, not a share of what you own, so counting it would push the
+        weights past 100% — and the same reasoning already keeps it out of the
+        allocation doughnut.
+
+        Sets ``weight_pct`` on every row as a side effect, so the table can
+        sort by it. Rows are mutated in place because they are the same dicts
+        the caller is about to render.
+        """
+        long_total = sum((r["value_czk"] for r in rows
+                          if r.get("value_czk") and r["value_czk"] > 0),
+                         Decimal(0))
+        by_category: Dict[str, Decimal] = {}
+        by_currency: Dict[str, Decimal] = {}
+        for r in rows:
+            value = r.get("value_czk")
+            if not value or value <= 0:
+                r["weight_pct"] = None
+                continue
+            r["weight_pct"] = (value / long_total * 100) if long_total else None
+            cat = r.get("category") or "?"
+            cur = r.get("live_currency") or r.get("eoy_currency") or "?"
+            by_category[cat] = by_category.get(cat, Decimal(0)) + value
+            by_currency[cur] = by_currency.get(cur, Decimal(0)) + value
+
+        def _slices(totals: Dict[str, Decimal]) -> List[Dict[str, Any]]:
+            # value stays an exact string, pct is a float: it is a display
+            # share, never summed back into money, and these slices go
+            # through tojson into Chart.js, which has no Decimal.
+            return [{"label": k, "value": str(v),
+                     "pct": float(v / long_total * 100) if long_total else None}
+                    for k, v in sorted(totals.items(), key=lambda kv: kv[1],
+                                       reverse=True)]
+
+        return {
+            "total_czk": long_total or None,
+            "by_category": _slices(by_category),
+            "by_currency": _slices(by_currency),
+        }
+
     def _compute_live_portfolio(self, pf: Dict[str, Any]) -> Dict[str, Any]:
         from datetime import date as _date
         today = _date.today()
@@ -1346,7 +1390,9 @@ class RunService:
             rows.append(row)
 
         rows.sort(key=lambda r: r.get("value_czk") or Decimal(0), reverse=True)
+        breakdown = self.portfolio_breakdown(rows)     # also sets weight_pct
         result = {
+            "breakdown": breakdown,
             "as_of": today.isoformat(),
             "tax_year": pf.get("tax_year"),
             "positions": rows,
