@@ -69,6 +69,33 @@ PAIRING_METHODS = ("fifo", "lifo", "weighted_average", "optimal")
 # Result items that represent a realized §10 disposal (carry gain/loss legs).
 DISPOSAL_ITEM_TYPES = ("SECURITY_DISPOSAL", "OPTION_CLOSE", "OPTION_EXPIRY_WORTHLESS")
 
+# Initial ordering of the per-symbol disposal rows. "gain_desc" is the default
+# because the question being asked is "what did I earn on" — ordering by
+# magnitude answers a different one, putting the worst loss above every
+# moderate win. The table is click-sortable, so this only sets the first view.
+DISPOSAL_SORTS = {
+    "gain_desc": (lambda a: a["gain_loss_czk"], True),
+    "gain_asc": (lambda a: a["gain_loss_czk"], False),
+    "abs_desc": (lambda a: abs(a["gain_loss_czk"]), True),
+    "proceeds_desc": (lambda a: a["proceeds_czk"], True),
+    "symbol": (lambda a: a["symbol"], False),
+}
+DEFAULT_DISPOSAL_SORT = "gain_desc"
+
+
+def _qty_display(value: Any) -> str:
+    """FIFO quantities carry eight tail zeros; "5.00000000" reads as noise.
+
+    ``format`` rather than a bare ``normalize()``, which renders Decimal("100")
+    as "1E+2".
+    """
+    if value in (None, ""):
+        return ""
+    try:
+        return format(Decimal(str(value)).normalize(), "f")
+    except (InvalidOperation, ValueError):
+        return str(value)
+
 # Sell-target ladder ("prodejní zóny") — user state, not a run artifact.
 SELL_TARGETS_FILE = "sell_targets.json"
 SELL_TARGETS_LOCK = "sell_targets.lock"
@@ -2783,7 +2810,7 @@ class RunService:
 
     def disposal_summary(
         self, run_id: str, mode: str, symbol: Optional[str] = None,
-        include_lots: bool = False,
+        include_lots: bool = False, sort: str = DEFAULT_DISPOSAL_SORT,
     ) -> Optional[Dict[str, Any]]:
         """Realized §10 disposals from a persisted run.
 
@@ -2888,6 +2915,7 @@ class RunService:
                     "acquisition_date": it.get("acquisition_date"),
                     "holding_period_days": it.get("holding_period_days"),
                     "quantity": it.get("quantity"),
+                    "quantity_display": _qty_display(it.get("quantity")),
                     "proceeds_czk": _q2(it.get("proceeds_czk")),
                     "cost_basis_czk": _q2(it.get("cost_basis_czk")),
                     "gain_loss_czk": _q2(it.get("gain_loss_czk")),
@@ -2901,15 +2929,19 @@ class RunService:
             for key in ("proceeds_czk", "cost_basis_czk", "gain_loss_czk",
                         "taxable_gain_loss_czk", "exempt_gain_loss_czk"):
                 a[key] = a[key].quantize(TWO)
+            # FIFO quantities carry eight tail zeros. format() rather than
+            # plain normalize(), which turns Decimal("100") into "1E+2".
+            a["quantity_display"] = _qty_display(a["quantity_sold"])
         for key in ("proceeds_czk", "cost_basis_czk", "gain_loss_czk",
                     "taxable_gain_loss_czk", "exempt_gain_loss_czk"):
             totals[key] = totals[key].quantize(TWO)
 
+        sort_key, descending = DISPOSAL_SORTS.get(
+            sort, DISPOSAL_SORTS[DEFAULT_DISPOSAL_SORT])
         out: Dict[str, Any] = {
-            "symbol_filter": symbol, "totals": totals,
-            "by_symbol": sorted(by_symbol.values(),
-                                key=lambda a: abs(a["gain_loss_czk"]),
-                                reverse=True),
+            "symbol_filter": symbol, "totals": totals, "sort": sort,
+            "by_symbol": sorted(by_symbol.values(), key=sort_key,
+                                reverse=descending),
             "lots": sorted(lots, key=lambda l: (l["sale_date"] or "",
                                                 l["symbol"])),
             "note": ("Gross per-item aggregation; the §10 taxable netting "

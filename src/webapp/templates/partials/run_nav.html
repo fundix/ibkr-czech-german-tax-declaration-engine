@@ -20,6 +20,7 @@
   <nav class="subnav">
     <a class="{{ 'active' if page == 'results' }}" href="/results/{{ meta.run_id }}?mode={{ mode }}">Souhrn</a>
     <a class="{{ 'active' if page == 'items' }}" href="/results/{{ meta.run_id }}/items?mode={{ mode }}">Položky</a>
+    <a class="{{ 'active' if page == 'disposals' }}" href="/results/{{ meta.run_id }}/disposals?mode={{ mode }}">Prodeje</a>
     <a class="{{ 'active' if page == 'form' }}" href="/results/{{ meta.run_id }}/form?mode={{ mode }}">Řádky DAP</a>
     <a class="{{ 'active' if page == 'review' }}" href="/results/{{ meta.run_id }}/review?mode={{ mode }}">
       Ke kontrole{% if pending %} <span class="badge warn">{{ pending }}</span>{% endif %}

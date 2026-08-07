@@ -13,6 +13,7 @@ from starlette.datastructures import UploadFile
 
 from src.webapp import settings
 from src.webapp.jobs import JobStatus
+from src.webapp.services import DEFAULT_DISPOSAL_SORT, DISPOSAL_SORTS
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,27 @@ def items(request: Request, run_id: str, mode: Optional[str] = None,
     return _tpl(request, "items.html", meta=meta, modes=modes, mode=active,
                 items=rows, sections=sections, section=section, status=status,
                 page="items")
+
+
+@router.get("/results/{run_id}/disposals", response_class=HTMLResponse)
+def disposals(request: Request, run_id: str, mode: Optional[str] = None,
+              symbol: str = "", sort: str = DEFAULT_DISPOSAL_SORT):
+    """"What did I make money on" — realized §10 disposals ranked per symbol.
+
+    Thin wrapper: the aggregation is disposal_summary(), shared with the MCP
+    tool. Picking a symbol also brings the per-lot pairing rows, which the
+    service only builds when asked.
+    """
+    svc = _svc(request)
+    ctx = _run_context(svc, run_id, mode)
+    if ctx is None:
+        return RedirectResponse("/", status_code=303)
+    meta, modes, active = ctx
+    summary = svc.disposal_summary(run_id, active, symbol=symbol or None,
+                                   sort=sort) or {}
+    return _tpl(request, "disposals.html", meta=meta, modes=modes, mode=active,
+                summary=summary, symbol=symbol, sort=sort,
+                sorts=DISPOSAL_SORTS, page="disposals")
 
 
 @router.get("/results/{run_id}/form", response_class=HTMLResponse)

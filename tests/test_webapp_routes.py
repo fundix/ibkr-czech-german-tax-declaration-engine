@@ -85,6 +85,46 @@ class TestPages:
         assert "OLDCO" in r.text          # exempt by 3y time test
         assert "ALPHA" not in r.text      # taxable — filtered out
 
+    @staticmethod
+    def _ranking(html):
+        """Symbol order inside the ranking table.
+
+        Sliced past the table marker on purpose: the datalist feeding the
+        filter box repeats every symbol higher up the page.
+        """
+        table = html.split('id="disposals-table"', 1)[1]
+        return sorted(("OLDCO", "ALPHA", "UNDR"), key=table.index)
+
+    def test_disposals_page_ranks_by_gain(self, client):
+        r = client.get("/results/2024-test/disposals")
+        assert r.status_code == 200
+        assert "Realizované prodeje" in r.text
+        # Golden year gains: OLDCO 21 810.98, ALPHA 19 379.40, the put 4 657.74.
+        assert self._ranking(r.text) == ["OLDCO", "ALPHA", "UNDR"]
+        # The table opts into the shared sort/filter JS.
+        assert 'class="items sortable"' in r.text
+
+    def test_disposals_page_sorts_by_proceeds_independently_of_gain(self, client):
+        """ALPHA has the largest proceeds (136 256) but not the largest gain,
+        so this order can only come from the server honouring ?sort=."""
+        r = client.get("/results/2024-test/disposals?sort=proceeds_desc")
+        assert r.status_code == 200
+        assert self._ranking(r.text) == ["ALPHA", "OLDCO", "UNDR"]
+
+    def test_disposals_page_symbol_brings_the_lot_rows(self, client):
+        # Without a symbol the service does not build per-lot rows at all.
+        assert 'id="disposal-lots-table"' not in client.get(
+            "/results/2024-test/disposals").text
+        r = client.get("/results/2024-test/disposals?symbol=ALPHA")
+        assert r.status_code == 200
+        assert 'id="disposal-lots-table"' in r.text
+        assert "OLDCO" not in r.text          # filtered out
+
+    def test_disposals_page_accepts_a_sort_order(self, client):
+        r = client.get("/results/2024-test/disposals?sort=gain_asc")
+        assert r.status_code == 200
+        assert self._ranking(r.text) == ["UNDR", "ALPHA", "OLDCO"]
+
     def test_form_page_shows_official_line_refs(self, client):
         r = client.get("/results/2024-test/form")
         assert r.status_code == 200

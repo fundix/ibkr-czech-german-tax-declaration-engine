@@ -957,6 +957,50 @@ class TestDisposalsAndCompare:
                 "acquisition_date": "2025-01-01", "holding_period_days": 424,
                 "is_taxable": True, "is_exempt": False, **extra}
 
+    def test_default_sort_ranks_the_biggest_gain_first(self, service):
+        """"What did I earn on" — not "what moved most".
+
+        Ordering by magnitude put a 900 loss above a 400 win, which is the
+        opposite of what the page is asked.
+        """
+        self._write_run(service, "run-s", {}, [
+            self._sale("WIN", "400.00", "1400.00", "1000.00"),
+            self._sale("LOSS", "-900.00", "100.00", "1000.00"),
+            self._sale("MID", "50.00", "150.00", "100.00"),
+        ])
+        data = service.disposal_summary("run-s", "daily")
+        assert [a["symbol"] for a in data["by_symbol"]] == ["WIN", "MID", "LOSS"]
+        assert data["sort"] == "gain_desc"
+
+    def test_other_sort_orders(self, service):
+        self._write_run(service, "run-s2", {}, [
+            self._sale("WIN", "400.00", "1400.00", "1000.00"),
+            self._sale("LOSS", "-900.00", "100.00", "1000.00"),
+            self._sale("MID", "50.00", "150.00", "100.00"),
+        ])
+        order = lambda s: [a["symbol"] for a in                     # noqa: E731
+                           service.disposal_summary("run-s2", "daily", sort=s)["by_symbol"]]
+        assert order("gain_asc") == ["LOSS", "MID", "WIN"]
+        assert order("abs_desc") == ["LOSS", "WIN", "MID"]
+        assert order("proceeds_desc") == ["WIN", "MID", "LOSS"]
+        assert order("symbol") == ["LOSS", "MID", "WIN"]
+
+    def test_unknown_sort_falls_back_to_the_default(self, service):
+        self._write_run(service, "run-s3", {}, [
+            self._sale("WIN", "400.00", "1400.00", "1000.00"),
+            self._sale("LOSS", "-900.00", "100.00", "1000.00"),
+        ])
+        data = service.disposal_summary("run-s3", "daily", sort="nonsense")
+        assert [a["symbol"] for a in data["by_symbol"]] == ["WIN", "LOSS"]
+
+    def test_quantities_lose_their_fifo_tail_zeros(self, service):
+        self._write_run(service, "run-q", {}, [
+            self._sale("ABC", "10.00", "110.00", "100.00", quantity="100.00000000"),
+        ])
+        data = service.disposal_summary("run-q", "daily", include_lots=True)
+        assert data["by_symbol"][0]["quantity_display"] == "100"
+        assert data["lots"][0]["quantity_display"] == "100"
+
     def test_compare_runs_decomposes_gain_delta(self, service):
         self._write_run(
             service, "run-a", {"pairing_method": "fifo"},
