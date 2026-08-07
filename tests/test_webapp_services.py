@@ -1001,6 +1001,55 @@ class TestDisposalsAndCompare:
         assert data["by_symbol"][0]["quantity_display"] == "100"
         assert data["lots"][0]["quantity_display"] == "100"
 
+    def _mixed_run(self, service, run_id):
+        self._write_run(service, run_id, {}, [
+            self._sale("ABC", "100.00", "1100.00", "1000.00",
+                       event_date="2026-02-10"),
+            self._sale("XYZ", "200.00", "1200.00", "1000.00",
+                       category="OPTION", item_type="OPTION_CLOSE",
+                       event_date="2026-05-20"),
+            # A CFD is emitted as OPTION_CLOSE too — the whole reason the
+            # filter keys on asset_category and not item_type.
+            self._sale("CFD1", "300.00", "1300.00", "1000.00",
+                       category="CFD", item_type="OPTION_CLOSE",
+                       event_date="2026-08-30"),
+        ])
+        return run_id
+
+    def _symbols(self, service, run_id, **kw):
+        return [a["symbol"] for a in
+                service.disposal_summary(run_id, "daily", **kw)["by_symbol"]]
+
+    def test_category_filter_does_not_confuse_a_cfd_with_an_option(self, service):
+        run = self._mixed_run(service, "run-f1")
+        assert self._symbols(service, run, category="OPTION") == ["XYZ"]
+        assert self._symbols(service, run, category="CFD") == ["CFD1"]
+        assert self._symbols(service, run, category="STOCK") == ["ABC"]
+
+    def test_date_window_is_inclusive_on_both_ends(self, service):
+        run = self._mixed_run(service, "run-f2")
+        assert self._symbols(service, run, date_from="2026-05-20",
+                             date_to="2026-05-20") == ["XYZ"]
+        assert sorted(self._symbols(service, run, date_from="2026-05-20")) == \
+            ["CFD1", "XYZ"]
+        assert sorted(self._symbols(service, run, date_to="2026-05-20")) == \
+            ["ABC", "XYZ"]
+
+    def test_filters_combine(self, service):
+        run = self._mixed_run(service, "run-f3")
+        assert self._symbols(service, run, category="OPTION",
+                             date_from="2026-06-01") == []
+        assert self._symbols(service, run, category="CFD",
+                             date_from="2026-06-01") == ["CFD1"]
+
+    def test_totals_follow_the_filter(self, service):
+        """The headline numbers are of the filtered set, not the whole year."""
+        run = self._mixed_run(service, "run-f4")
+        data = service.disposal_summary(run, "daily", category="STOCK")
+        assert data["totals"]["count"] == 1
+        assert data["totals"]["gain_loss_czk"] == Decimal("100.00")
+        assert data["filters"]["category"] == "STOCK"
+
     def test_compare_runs_decomposes_gain_delta(self, service):
         self._write_run(
             service, "run-a", {"pairing_method": "fifo"},

@@ -1,0 +1,21 @@
+{# Shared symbol / category / date-window inputs.
+
+   Bookmarkable GET params, the same names the service and the MCP tools take.
+   Include inside an existing <form method="get">; the caller owns the rest of
+   the form (its own selects, the submit button, the hidden mode field). #}
+<label>Symbol
+  <input type="text" name="symbol" value="{{ symbol }}" placeholder="např. PYPL"
+         list="filter-symbols">
+</label>
+<label>Druh
+  <select name="category">
+    <option value="">vše</option>
+    {% for c in categories %}<option value="{{ c }}" {{ 'selected' if c == category }}>{{ c }}</option>{% endfor %}
+  </select>
+</label>
+<label>Od
+  <input type="date" name="date_from" value="{{ date_from }}">
+</label>
+<label>Do
+  <input type="date" name="date_to" value="{{ date_to }}">
+</label>

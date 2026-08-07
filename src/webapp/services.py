@@ -83,6 +83,59 @@ DISPOSAL_SORTS = {
 DEFAULT_DISPOSAL_SORT = "gain_desc"
 
 
+def symbol_matches(sym: str, category: Optional[str],
+                   description: Optional[str], want: str) -> bool:
+    """Whether a result row belongs to the ticker the user typed.
+
+    A stock symbol also claims the options written on it, in both key styles
+    (OCC ``PYPL  260731C00061000`` and marker-first ``C TUI  20260619 9 M``),
+    plus a description-prefix fallback for listings whose stock ticker differs
+    from the option key's underlying token (stock ``TUI1`` vs option
+    ``C TUI …`` — IBKR's option description opens with the stock ticker,
+    "TUI1 19DEC25 6.4 C").
+
+    Shared by the disposals ranking and the items list so typing a ticker
+    means the same thing on both.
+    """
+    if not want:
+        return True
+    up = sym.upper()
+    if up == want:
+        return True
+    if category != "OPTION":
+        return False
+    if _OCC_KEY_TAIL.search(up):               # OCC: underlying first
+        return up.startswith(want + " ")
+    if (up[:2] in ("C ", "P ")                 # marker-first key style
+            and up[2:].lstrip().startswith(want + " ")):
+        return True
+    return (description or "").upper().startswith(want + " ")
+
+
+def item_matches(it: Dict[str, Any], *, category: Optional[str] = None,
+                 date_from: Optional[str] = None,
+                 date_to: Optional[str] = None) -> bool:
+    """Category and date-window filter shared by the disposals and items views.
+
+    Category keys on ``asset_category``, never ``item_type``: a CFD is emitted
+    as ``OPTION_CLOSE`` (item_builder), so an item_type filter would silently
+    count CFDs among the options.
+
+    Both date bounds are inclusive and expect a full ISO ``YYYY-MM-DD``, which
+    is what ``<input type="date">`` submits and which compares correctly as a
+    string. A row with no date falls outside any window that is set.
+    """
+    if category and (it.get("asset_category") or "") != category:
+        return False
+    if date_from or date_to:
+        when = it.get("event_date") or ""
+        if date_from and when < date_from:
+            return False
+        if date_to and when > date_to:
+            return False
+    return True
+
+
 def _qty_display(value: Any) -> str:
     """FIFO quantities carry eight tail zeros; "5.00000000" reads as noise.
 
@@ -2811,6 +2864,8 @@ class RunService:
     def disposal_summary(
         self, run_id: str, mode: str, symbol: Optional[str] = None,
         include_lots: bool = False, sort: str = DEFAULT_DISPOSAL_SORT,
+        category: Optional[str] = None, date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Realized §10 disposals from a persisted run.
 
@@ -2818,36 +2873,16 @@ class RunService:
         each sale consumed) when ``symbol`` is given or ``include_lots`` is
         True — kept opt-in so a busy year doesn't flood the MCP client.
 
-        Single source for the MCP tool. ``symbol`` matches the exact asset
-        symbol, and heuristically the options on that underlying: both option
-        key styles (OCC ``PYPL  260731C00061000`` and marker-first
-        ``C TUI  20260619 9 M``), plus a description-prefix fallback for
-        listings whose stock ticker differs from the option key's underlying
-        token (stock ``TUI1`` vs option ``C TUI …`` — IBKR's option
-        description starts with the stock ticker, "TUI1 19DEC25 6.4 C").
-        The per-lot rows always show exact symbols.
+        Single source for the web page AND the MCP tool. ``symbol`` matches
+        the exact asset symbol and the options written on that underlying
+        (see ``symbol_matches``); ``category`` and the date window come from
+        ``item_matches``. The per-lot rows always show exact symbols.
         """
         result = self.load_result(run_id, mode)
         if result is None:
             return None
         TWO = Decimal("0.01")
         want = (symbol or "").strip().upper()
-
-        def _matches(sym: str, category: Optional[str],
-                     description: Optional[str]) -> bool:
-            if not want:
-                return True
-            up = sym.upper()
-            if up == want:
-                return True
-            if category != "OPTION":
-                return False
-            if _OCC_KEY_TAIL.search(up):           # OCC: underlying first
-                return up.startswith(want + " ")
-            if (up[:2] in ("C ", "P ")             # marker-first key style
-                    and up[2:].lstrip().startswith(want + " ")):
-                return True
-            return (description or "").upper().startswith(want + " ")
 
         by_symbol: Dict[str, Dict[str, Any]] = {}
         lots: List[Dict[str, Any]] = []
@@ -2864,8 +2899,11 @@ class RunService:
             if it.get("item_type") not in DISPOSAL_ITEM_TYPES:
                 continue
             sym = it.get("asset_symbol") or "?"
-            if not _matches(sym, it.get("asset_category"),
-                            it.get("asset_description")):
+            if not symbol_matches(sym, it.get("asset_category"),
+                                  it.get("asset_description"), want):
+                continue
+            if not item_matches(it, category=category, date_from=date_from,
+                                date_to=date_to):
                 continue
             gain = Decimal(it.get("gain_loss_czk") or 0)
             proceeds = Decimal(it.get("proceeds_czk") or 0)
@@ -2940,6 +2978,8 @@ class RunService:
             sort, DISPOSAL_SORTS[DEFAULT_DISPOSAL_SORT])
         out: Dict[str, Any] = {
             "symbol_filter": symbol, "totals": totals, "sort": sort,
+            "filters": {"symbol": symbol or None, "category": category or None,
+                        "date_from": date_from or None, "date_to": date_to or None},
             "by_symbol": sorted(by_symbol.values(), key=sort_key,
                                 reverse=descending),
             "lots": sorted(lots, key=lambda l: (l["sale_date"] or "",

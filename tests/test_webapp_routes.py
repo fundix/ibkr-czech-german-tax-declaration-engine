@@ -95,6 +95,15 @@ class TestPages:
         table = html.split('id="disposals-table"', 1)[1]
         return sorted(("OLDCO", "ALPHA", "UNDR"), key=table.index)
 
+    @staticmethod
+    def _ranking_present(html):
+        """Which of the golden year's three symbols the table actually lists."""
+        if 'id="disposals-table"' not in html:
+            return []
+        table = html.split('id="disposals-table"', 1)[1]
+        return sorted((s for s in ("OLDCO", "ALPHA", "UNDR") if s in table),
+                      key=table.index)
+
     def test_disposals_page_ranks_by_gain(self, client):
         r = client.get("/results/2024-test/disposals")
         assert r.status_code == 200
@@ -124,6 +133,37 @@ class TestPages:
         r = client.get("/results/2024-test/disposals?sort=gain_asc")
         assert r.status_code == 200
         assert self._ranking(r.text) == ["UNDR", "ALPHA", "OLDCO"]
+
+    def test_shared_filters_are_bookmarkable_on_both_pages(self, client):
+        """Same query names on /items and /disposals, and on the MCP tool."""
+        # The golden year sells ALPHA and OLDCO as stock, the put as an option.
+        r = client.get("/results/2024-test/disposals?category=OPTION")
+        assert r.status_code == 200
+        assert self._ranking_present(r.text) == ["UNDR"]
+
+        r = client.get("/results/2024-test/items?category=STOCK")
+        assert r.status_code == 200
+        assert "UNDR" not in r.text.split('id="items-table"', 1)[1]
+
+    def test_date_window_narrows_both_pages(self, client):
+        # ALPHA sells 2024-09-10, OLDCO 2024-05-20, the put expires 2024-03-15.
+        r = client.get("/results/2024-test/disposals"
+                       "?date_from=2024-06-01&date_to=2024-12-31")
+        assert r.status_code == 200
+        assert self._ranking_present(r.text) == ["ALPHA"]
+
+        r = client.get("/results/2024-test/items"
+                       "?date_from=2024-01-01&date_to=2024-04-01")
+        body = r.text.split('id="items-table"', 1)[1]
+        assert "ALPHA" not in body and "OLDCO" not in body
+
+    def test_items_symbol_filter_pulls_in_the_options_on_it(self, client):
+        """Typing a ticker means the same thing here as on the disposals page."""
+        r = client.get("/results/2024-test/items?symbol=UNDR")
+        assert r.status_code == 200
+        body = r.text.split('id="items-table"', 1)[1]
+        assert "UNDR" in body
+        assert "ALPHA" not in body
 
     def test_form_page_shows_official_line_refs(self, client):
         r = client.get("/results/2024-test/form")

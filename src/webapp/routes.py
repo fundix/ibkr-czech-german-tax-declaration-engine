@@ -13,7 +13,9 @@ from starlette.datastructures import UploadFile
 
 from src.webapp import settings
 from src.webapp.jobs import JobStatus
-from src.webapp.services import DEFAULT_DISPOSAL_SORT, DISPOSAL_SORTS
+from src.webapp.services import (
+    DEFAULT_DISPOSAL_SORT, DISPOSAL_SORTS, item_matches, symbol_matches,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +170,8 @@ def results(request: Request, run_id: str, mode: Optional[str] = None):
 
 @router.get("/results/{run_id}/items", response_class=HTMLResponse)
 def items(request: Request, run_id: str, mode: Optional[str] = None,
-          section: str = "", status: str = ""):
+          section: str = "", status: str = "", symbol: str = "",
+          category: str = "", date_from: str = "", date_to: str = ""):
     svc = _svc(request)
     ctx = _run_context(svc, run_id, mode)
     if ctx is None:
@@ -176,7 +179,10 @@ def items(request: Request, run_id: str, mode: Optional[str] = None,
     meta, modes, active = ctx
     result = svc.load_result(run_id, active) or {}
     rows = result.get("items", [])
+    # Options offered before filtering, so narrowing never empties the pickers.
     sections = sorted({it.get("section", "") for it in rows})
+    categories = sorted({it.get("asset_category") for it in rows
+                         if it.get("asset_category")})
     if section:
         rows = [it for it in rows if it.get("section") == section]
     if status == "taxable":
@@ -185,14 +191,24 @@ def items(request: Request, run_id: str, mode: Optional[str] = None,
         rows = [it for it in rows if it.get("is_exempt")]
     elif status == "pending":
         rows = [it for it in rows if it.get("tax_review_status") == PENDING_STATUS]
+    want = symbol.strip().upper()
+    rows = [it for it in rows
+            if symbol_matches(it.get("asset_symbol") or "",
+                              it.get("asset_category"),
+                              it.get("asset_description"), want)
+            and item_matches(it, category=category or None,
+                             date_from=date_from or None,
+                             date_to=date_to or None)]
     return _tpl(request, "items.html", meta=meta, modes=modes, mode=active,
                 items=rows, sections=sections, section=section, status=status,
-                page="items")
+                categories=categories, symbol=symbol, category=category,
+                date_from=date_from, date_to=date_to, page="items")
 
 
 @router.get("/results/{run_id}/disposals", response_class=HTMLResponse)
 def disposals(request: Request, run_id: str, mode: Optional[str] = None,
-              symbol: str = "", sort: str = DEFAULT_DISPOSAL_SORT):
+              symbol: str = "", sort: str = DEFAULT_DISPOSAL_SORT,
+              category: str = "", date_from: str = "", date_to: str = ""):
     """"What did I make money on" — realized §10 disposals ranked per symbol.
 
     Thin wrapper: the aggregation is disposal_summary(), shared with the MCP
@@ -204,11 +220,19 @@ def disposals(request: Request, run_id: str, mode: Optional[str] = None,
     if ctx is None:
         return RedirectResponse("/", status_code=303)
     meta, modes, active = ctx
-    summary = svc.disposal_summary(run_id, active, symbol=symbol or None,
-                                   sort=sort) or {}
+    summary = svc.disposal_summary(
+        run_id, active, symbol=symbol or None, sort=sort,
+        category=category or None, date_from=date_from or None,
+        date_to=date_to or None,
+    ) or {}
+    # Unfiltered so narrowing by category never empties its own dropdown.
+    categories = sorted({it.get("asset_category")
+                         for it in (svc.load_result(run_id, active) or {}).get("items", [])
+                         if it.get("asset_category")})
     return _tpl(request, "disposals.html", meta=meta, modes=modes, mode=active,
-                summary=summary, symbol=symbol, sort=sort,
-                sorts=DISPOSAL_SORTS, page="disposals")
+                summary=summary, symbol=symbol, sort=sort, sorts=DISPOSAL_SORTS,
+                categories=categories, category=category, date_from=date_from,
+                date_to=date_to, page="disposals")
 
 
 @router.get("/results/{run_id}/form", response_class=HTMLResponse)

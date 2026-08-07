@@ -7,19 +7,27 @@
   <form method="get" class="filters">
     <input type="hidden" name="mode" value="{{ mode }}">
     <label>Sekce
-      <select name="section" onchange="this.form.submit()">
+      <select name="section">
         <option value="">všechny</option>
         {% for s in sections %}<option value="{{ s }}" {{ 'selected' if s == section }}>{{ s }}</option>{% endfor %}
       </select>
     </label>
     <label>Stav
-      <select name="status" onchange="this.form.submit()">
+      <select name="status">
         <option value="">vše</option>
         <option value="taxable" {{ 'selected' if status == 'taxable' }}>zdanitelné</option>
         <option value="exempt" {{ 'selected' if status == 'exempt' }}>osvobozené</option>
         <option value="pending" {{ 'selected' if status == 'pending' }}>k ruční kontrole</option>
       </select>
     </label>
+    {% include "partials/item_filters.html" %}
+    <datalist id="filter-symbols">
+      {% for s in items | map(attribute="asset_symbol") | unique | sort %}{% if s %}<option value="{{ s }}">{% endif %}{% endfor %}
+    </datalist>
+    <button type="submit">Použít</button>
+    {% if section or status or symbol or category or date_from or date_to %}
+    <a class="muted" href="/results/{{ meta.run_id }}/items?mode={{ mode }}">zrušit filtry</a>
+    {% endif %}
   </form>
 
   <div class="table-toolbar">

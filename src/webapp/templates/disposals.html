@@ -27,13 +27,10 @@
 
   <form method="get" class="filters">
     <input type="hidden" name="mode" value="{{ mode }}">
-    <label>Symbol
-      <input type="text" name="symbol" value="{{ symbol }}" placeholder="např. PYPL"
-             list="disposal-symbols">
-      <datalist id="disposal-symbols">
-        {% for a in summary.by_symbol or [] %}<option value="{{ a.symbol }}">{% endfor %}
-      </datalist>
-    </label>
+    {% include "partials/item_filters.html" %}
+    <datalist id="filter-symbols">
+      {% for a in summary.by_symbol or [] %}<option value="{{ a.symbol }}">{% endfor %}
+    </datalist>
     <label>Řazení
       <select name="sort" onchange="this.form.submit()">
         {% set sort_labels = {
@@ -46,7 +43,9 @@
       </select>
     </label>
     <button type="submit">Použít</button>
-    {% if symbol %}<a class="muted" href="/results/{{ meta.run_id }}/disposals?mode={{ mode }}">zrušit filtr</a>{% endif %}
+    {% if symbol or category or date_from or date_to %}
+    <a class="muted" href="/results/{{ meta.run_id }}/disposals?mode={{ mode }}&sort={{ sort }}">zrušit filtry</a>
+    {% endif %}
   </form>
 
   {% if summary.by_symbol %}
