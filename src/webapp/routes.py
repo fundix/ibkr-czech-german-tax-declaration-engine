@@ -14,7 +14,8 @@ from starlette.datastructures import UploadFile
 from src.webapp import settings
 from src.webapp.jobs import JobStatus
 from src.webapp.services import (
-    DEFAULT_DISPOSAL_SORT, DISPOSAL_SORTS, item_matches, symbol_matches,
+    ASSIGNMENT_NEAR_DAYS, DEFAULT_DISPOSAL_SORT, DISPOSAL_SORTS, item_matches,
+    symbol_matches,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,8 +78,43 @@ def dashboard_valuation(request: Request):
     opt = svc.options_overview(data["run_id"])
     return _tpl(request, "partials/dashboard_valuation.html",
                 run_id=data["run_id"], meta=data["meta"], live=live,
-                allocation=allocation, options=opt["options"],
-                options_as_of=opt["as_of"], snapshots=svc.list_snapshots())
+                allocation=allocation, snapshots=svc.list_snapshots(),
+                **_options_ctx(svc, opt, live["tax_year"]))
+
+
+def _options_ctx(svc, overview: dict, tax_year) -> dict:
+    """Template variables for partials/dashboard_options.html."""
+    return {
+        "options": overview["options"],
+        "options_as_of": overview["as_of"],
+        "options_at_risk": overview.get("at_risk"),
+        "options_source": overview.get("source"),
+        "options_age_hours": overview.get("age_hours"),
+        "options_tax_year": tax_year,
+        "assignment_near_days": ASSIGNMENT_NEAR_DAYS,
+        "positions_refreshable": bool(
+            svc.get_flex_config().queries.get("positions")),
+    }
+
+
+@router.post("/dashboard/options/refresh", response_class=HTMLResponse)
+def refresh_positions(request: Request, tax_year: Optional[int] = Form(None)):
+    """Pull today's positions statement and re-render just the options table.
+
+    No engine run: positions is its own Flex slot, so the contracts and their
+    moneyness refresh in one request while the tax figures stay as computed.
+    """
+    svc = _svc(request)
+    year = tax_year or date.today().year
+    try:
+        svc.refresh_positions_sync(year)
+        overview = svc.options_from_positions(year)
+    except Exception as exc:  # noqa: BLE001 — a friendly card beats a 500
+        logger.exception("Positions refresh failed")
+        return _tpl(request, "partials/job_error.html",
+                    error=f"Načtení pozic selhalo: {exc}")
+    return _tpl(request, "partials/dashboard_options.html",
+                **_options_ctx(svc, overview, year))
 
 
 @router.get("/runs", response_class=HTMLResponse)

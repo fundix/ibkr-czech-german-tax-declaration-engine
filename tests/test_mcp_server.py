@@ -36,7 +36,7 @@ SENTINEL = "SENTINEL_PINNED_LIFO"
 EXPECTED_TOOLS = {
     "list_datasets", "run_pipeline", "refresh_data", "get_tax_summary",
     "get_form_mapping", "get_pending_review_items", "get_positions",
-    "get_time_test_status", "get_dividends", "get_disposals",
+    "get_time_test_status", "get_dividends", "get_disposals", "get_options",
     "compare_runs", "simulate_sale",
 }
 
@@ -212,6 +212,7 @@ class TestTools:
         ("get_time_test_status", {}),
         ("get_dividends", {}),
         ("get_disposals", {}),
+        ("get_options", {"with_quotes": False}),
         ("simulate_sale", {"symbol": "DIVCO", "quantity": 1}),
     ])
     def test_every_tool_honours_run_id(self, server, tool, extra):

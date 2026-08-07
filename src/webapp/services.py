@@ -43,6 +43,7 @@ from src.countries.cz.aggregation_service import run_cz_aggregation, run_cz_comp
 from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.time_test import time_test_deadline
 from src.engine.pairing import PairingMethod, coerce as coerce_pairing_method
+from src.parsers.positions_parser import parse_positions_csv
 from src.pipeline_runner import run_core_processing_pipeline
 from src.utils.decimal_context import setup_decimal_context
 from src.utils.type_utils import parse_ibkr_date
@@ -175,6 +176,14 @@ ALLOCATION_SLICES = 12
 # SE 30 vs 15, CH 35 vs 15, IE 25 vs 15.
 TREATY_RATE_TOLERANCE = Decimal("0.005")
 
+# Days to expiry at which a written in-the-money contract stops being something
+# to watch and becomes something to act on. An American option can be assigned
+# any day it is in the money, but it clusters at expiry and around ex-dividend
+# dates — which this tool cannot see, so time and moneyness are the whole
+# signal here.
+ASSIGNMENT_URGENT_DAYS = 7
+ASSIGNMENT_NEAR_DAYS = 30
+
 # Fuzzy description→symbol matching for the spreadsheet import. Deliberately
 # strict: a WRONG symbol in a sell plan is far worse than an unresolved row the
 # user picks from a dropdown. Measured on the real sheet, 0.72 keeps the good
@@ -264,6 +273,48 @@ def _parse_decimal_cz(text: Any, field: str) -> Decimal:
 
 # OCC option keys end with yymmdd + C/P + 8-digit strike ("SOFI  260417P00020000").
 _OCC_KEY_TAIL = re.compile(r"\d{6}[CP]\d{8}$")
+
+# The same two key styles, captured. IBKR's positions statement exports neither
+# Strike, Expiry nor Put/Call, so a positions-only refresh has to read them back
+# out of the contract key itself.
+_OCC_KEY = re.compile(r"(?P<ymd>\d{6})(?P<kind>[CP])(?P<strike>\d{8})$")
+_MARKER_KEY = re.compile(
+    r"^(?P<kind>[CP])\s+\S+\s+(?P<ymd>\d{8})\s+(?P<strike>\d+(?:\.\d+)?)")
+
+
+def parse_option_key(symbol: str) -> Dict[str, Any]:
+    """Recover strike, expiry and Call/Put from an option's contract key.
+
+    Handles both styles IBKR emits — OCC with the underlying first
+    ("NU    280121C00013000" → 2028-01-21 call, strike 13) and the
+    marker-first European form ("C TUI  20260918 8 M" → 2026-09-18 call,
+    strike 8). Unknown shapes come back all ``None`` rather than guessed.
+    """
+    blank = {"option_type": None, "strike_price": None, "expiry_date": None}
+    key = (symbol or "").strip().upper()
+    if not key:
+        return blank
+
+    occ = _OCC_KEY.search(key)
+    if occ:
+        try:
+            expiry = datetime.strptime(occ["ymd"], "%y%m%d").date()
+        except ValueError:
+            return blank
+        # OCC pads the strike to eight digits in thousandths of a unit.
+        strike = Decimal(occ["strike"]) / Decimal(1000)
+        return {"option_type": occ["kind"], "expiry_date": expiry.isoformat(),
+                "strike_price": strike}
+
+    marker = _MARKER_KEY.match(key)
+    if marker:
+        try:
+            expiry = datetime.strptime(marker["ymd"], "%Y%m%d").date()
+        except ValueError:
+            return blank
+        return {"option_type": marker["kind"], "expiry_date": expiry.isoformat(),
+                "strike_price": Decimal(marker["strike"])}
+    return blank
 
 # Placeholder account label until real multi-account support lands. Runs are
 # tagged with the IBKR account id(s) found in their inputs; a run with no
@@ -1042,6 +1093,12 @@ class RunService:
                 "isin": getattr(asset, "ibkr_isin", None),
                 "description": asset.description,
                 "category": category,
+                # Geography inputs, kept raw so the view can say where a
+                # country came from: IBKR's own issuer code when the positions
+                # query exports it, and the sub-category that tells an ADR
+                # (whose ISIN is American whatever the issuer) from a share.
+                "issuer_country": getattr(asset, "ibkr_issuer_country", None),
+                "ibkr_sub": getattr(asset, "ibkr_sub_category_raw", None),
                 "account": single_account,
                 "time_test_applicable": time_test_applies,
                 "quantity_long": sum((l.quantity for l in lots), Decimal(0)),
@@ -1074,8 +1131,9 @@ class RunService:
         path = self.runs_dir / run_id / "portfolio.json"
         return load_json(path) if path.is_file() else None
 
-    def options_overview(self, run_id: str) -> Dict[str, Any]:
-        """Open option contracts from a run's portfolio, with days-to-expiry.
+    def options_overview(self, run_id: str, with_quotes: bool = True) -> Dict[str, Any]:
+        """Open option contracts from a run's portfolio, with days-to-expiry
+        and — when ``with_quotes`` — how far each one is in the money.
 
         Includes both long (bought) and short (written) contracts — writing
         options is exactly where the expiry matters most — so it reads the raw
@@ -1089,10 +1147,84 @@ class RunService:
         ``min(today, 31 Dec of the tax year)`` — today for the live current
         year, the year-end for closed years. ``options`` is empty for old runs
         whose ``portfolio.json`` predates option metadata (re-run to populate).
+
+        Quote lookups go through the runner: they need its decimal context for
+        the moneyness arithmetic, and the fetch pool must not be scheduled from
+        the worker it would otherwise block. Pass ``with_quotes=False`` for the
+        cheap offline shape.
         """
         pf = self.load_portfolio(run_id)
         if pf is None:
             return {"as_of": None, "tax_year": None, "options": []}
+        if not with_quotes:
+            return self._compute_options_overview(pf, quotes={})
+        rows = self._compute_options_overview(pf, quotes=None)
+        return self.runner.run_sync(self._price_options_overview, rows, timeout=120)
+
+    def _price_options_overview(self, overview: Dict[str, Any]) -> Dict[str, Any]:
+        """Second pass on the runner: one quote per distinct underlying."""
+        wanted = {(r["underlying"], r["currency"] or "USD")
+                  for r in overview["options"]
+                  if r.get("underlying") and r.get("strike_price")}
+        quotes = self._fetch_quote_map(sorted(wanted))
+        for row in overview["options"]:
+            self._annotate_moneyness(row, quotes)
+        overview["quotes_ok"] = sum(1 for r in overview["options"]
+                                    if r.get("underlying_price") is not None)
+        overview["at_risk"] = sum(1 for r in overview["options"]
+                                  if r.get("assignment_risk") in ("high", "elevated"))
+        return overview
+
+    @staticmethod
+    def _annotate_moneyness(row: Dict[str, Any], quotes: Dict[Tuple[str, str], Any]) -> None:
+        """Fill in the underlying price, moneyness and assignment risk.
+
+        The underlying carries no currency of its own, so the contract's stands
+        in — which is what picks the exchange suffix, and is right for the real
+        book (a TUI option in EUR wants TUI1 on Xetra, a US option in USD wants
+        the US listing).
+
+        ``moneyness_pct`` is the intrinsic value as a share of the strike, so
+        positive always means in the money whichever way the option points.
+        Assignment risk is only ever set on a written leg: being long an
+        in-the-money contract is the good case.
+        """
+        row.update({"underlying_price": None, "intrinsic_value": None,
+                    "moneyness_pct": None, "in_the_money": None,
+                    "assignment_risk": None})
+        strike = row.get("strike_price")
+        kind = row.get("option_type")
+        if not strike or kind not in ("C", "P") or not row.get("underlying"):
+            return
+        quote = quotes.get((row["underlying"], row.get("currency") or "USD"))
+        if quote is None:
+            return
+
+        strike_d = Decimal(str(strike))
+        spot = Decimal(str(quote.price))
+        row["underlying_price"] = spot
+        edge = (spot - strike_d) if kind == "C" else (strike_d - spot)
+        row["intrinsic_value"] = max(edge, Decimal(0))
+        row["moneyness_pct"] = (edge / strike_d * 100) if strike_d else None
+        row["in_the_money"] = edge > 0
+
+        if row["net_quantity"] >= 0 or row.get("expired"):
+            return                              # long leg, or already past it
+        days = row.get("days_to_expiry")
+        if edge <= 0:
+            row["assignment_risk"] = "none"
+        elif days is None:
+            row["assignment_risk"] = "watch"
+        elif days <= ASSIGNMENT_URGENT_DAYS:
+            row["assignment_risk"] = "high"
+        elif days <= ASSIGNMENT_NEAR_DAYS:
+            row["assignment_risk"] = "elevated"
+        else:
+            row["assignment_risk"] = "watch"
+
+    def _compute_options_overview(self, pf: Dict[str, Any],
+                                  quotes: Optional[Dict[Tuple[str, str], Any]]
+                                  ) -> Dict[str, Any]:
         today = date.today()
         tax_year = pf.get("tax_year")
         ref = today
@@ -1135,11 +1267,126 @@ class RunService:
                 "net_display": format(net.normalize(), "f"),
             })
         rows.sort(key=lambda r: (r["expiry_date"] is None, r["expiry_date"] or ""))
+        if quotes is not None:
+            for row in rows:
+                self._annotate_moneyness(row, quotes)
         return {"as_of": ref.isoformat(), "tax_year": tax_year, "options": rows}
 
     # ------------------------------------------------------------------
     # Live valuation (quotes + today's CZK), sale simulator, snapshots
     # ------------------------------------------------------------------
+
+    # ---- positions-only refresh (no engine run) -----------------------
+
+    def positions_csv_age_hours(self, tax_year: int) -> Optional[float]:
+        """Hours since the positions statement was written; None if absent."""
+        path = self.data_dir / str(tax_year) / self._FLEX_SLOT_FILES["positions"]
+        if not path.is_file():
+            return None
+        return (time.time() - path.stat().st_mtime) / 3600
+
+    def refresh_positions_sync(self, tax_year: int) -> Dict[str, Any]:
+        """Download only the positions statement — no engine run.
+
+        Positions is its own Flex slot and ``parse_positions_csv`` reads it
+        standalone, so today's open contracts are one request away. Running the
+        whole pipeline just to see whether a written put has gone in the money
+        is slow and beside the point.
+
+        On the runner so it cannot write the CSV from under a running engine.
+        """
+        cfg = self.get_flex_config()
+        query_id = cfg.queries.get("positions")
+        if not cfg.token or not query_id:
+            raise ValueError(
+                "IBKR Flex Web Service není nastavená pro pozice — vyplňte "
+                "token a query ID slotu „positions“ na stránce Soubory."
+            )
+        return self.runner.run_sync(self._download_positions, tax_year,
+                                    cfg.token, query_id, timeout=300)
+
+    def _download_positions(self, tax_year: int, token: str, query_id: str,
+                            fetch=None) -> Dict[str, Any]:
+        # Resolved at call time, not bound as a default: a default argument
+        # freezes the module attribute at import and cannot be patched, which
+        # is how a test ends up talking to the real IBKR endpoint.
+        fetch = fetch or fetch_statement
+        year_dir = self.data_dir / str(tax_year)
+        year_dir.mkdir(parents=True, exist_ok=True)
+        content = fetch(token, query_id)
+        path = year_dir / self._FLEX_SLOT_FILES["positions"]
+        path.write_bytes(content)
+        logger.info(f"IBKR Flex: refreshed positions for {tax_year} "
+                    f"({len(content)} bytes).")
+        return {"tax_year": tax_year, "bytes": len(content)}
+
+    def options_from_positions(self, tax_year: int,
+                               with_quotes: bool = True) -> Dict[str, Any]:
+        """Open option contracts straight from the positions statement.
+
+        Independent of any engine run, so the table can be refreshed on its
+        own. Two differences from ``options_overview`` worth knowing:
+
+        * The statement reports ONE signed quantity per contract, so a
+          simultaneous long and short in the same contract cannot be shown —
+          only the net. Assignment risk only needs the net.
+        * It exports neither Strike, Expiry nor Put/Call, so those are read
+          back out of the contract key (``parse_option_key``).
+
+        ``days_to_expiry`` counts from today, not a year-end: this file is a
+        snapshot of right now, which is the whole reason to refresh it.
+        """
+        path = self.data_dir / str(tax_year) / self._FLEX_SLOT_FILES["positions"]
+        if not path.is_file():
+            return {"as_of": None, "tax_year": tax_year, "options": [],
+                    "source": "positions_csv", "age_hours": None}
+        records = parse_positions_csv(str(path))
+        # SUMMARY rows are the position; LOT rows repeat it per acquisition and
+        # would double every quantity. Fall back to whatever is there when a
+        # query is configured lot-only.
+        opts = [r for r in records if (r.asset_class or "").upper() == "OPT"]
+        summary = [r for r in opts if (r.level_of_detail or "").upper() == "SUMMARY"]
+        rows_src = summary or opts
+
+        today = date.today()
+        rows: List[Dict[str, Any]] = []
+        for rec in rows_src:
+            net = Decimal(str(rec.position or 0))
+            if net == 0:
+                continue
+            key = parse_option_key(rec.symbol)
+            expiry = rec.expiry or key["expiry_date"]
+            days = None
+            if expiry:
+                try:
+                    days = (date.fromisoformat(expiry) - today).days
+                except ValueError:
+                    days = None
+            rows.append({
+                "symbol": rec.symbol,
+                "description": rec.description,
+                "underlying": rec.underlying_symbol,
+                "option_type": rec.put_call or key["option_type"],
+                "strike_price": rec.strike if rec.strike is not None
+                                else key["strike_price"],
+                "multiplier": rec.multiplier,
+                "currency": rec.currency_primary,
+                "expiry_date": expiry,
+                "days_to_expiry": days,
+                "expired": days is not None and days < 0,
+                "quantity_long": max(net, Decimal(0)),
+                "quantity_short": max(-net, Decimal(0)),
+                "net_quantity": net,
+                "net_display": _qty_display(net),
+            })
+        rows.sort(key=lambda r: (r["expiry_date"] is None, r["expiry_date"] or ""))
+        overview = {"as_of": today.isoformat(), "tax_year": tax_year,
+                    "options": rows, "source": "positions_csv",
+                    "age_hours": self.positions_csv_age_hours(tax_year)}
+        if not with_quotes:
+            return overview
+        return self.runner.run_sync(self._price_options_overview, overview,
+                                    timeout=120)
 
     def _cz_converter(self):
         """Daily-ČNB converter for 'today' valuations (network-backed cache)."""
@@ -1169,7 +1416,13 @@ class RunService:
         pf = self.load_portfolio(run_id)
         if pf is None:
             return None
-        return self.runner.run_sync(self._compute_live_portfolio, pf, timeout=120)
+        # Income rows answer for the country of any payer the positions
+        # statement did not label — read here, where the run_id is known.
+        meta = self.get_run(run_id) or {}
+        mode = (meta.get("modes") or ["daily"])[0]
+        return self.runner.run_sync(self._compute_live_portfolio, pf,
+                                    self.event_countries(run_id, mode),
+                                    timeout=120)
 
     @staticmethod
     def _net_quantity(pos: Dict[str, Any]) -> Decimal:
@@ -1227,36 +1480,41 @@ class RunService:
             return Decimal(str(mult))
         return None if pos.get("category") == "OPTION" else Decimal(1)
 
-    def _fetch_quotes(self, pf: Dict[str, Any]) -> Dict[Tuple[str, str], Any]:
-        """Every holding's live quote, fetched concurrently. ``{}`` values may
-        be ``None`` — a missing quote is the caller's EOY-fallback case.
+    def _fetch_quote_map(
+        self, keys: List[Tuple[str, str]]
+    ) -> Dict[Tuple[str, str], Any]:
+        """Fetch these (symbol, currency) quotes concurrently.
 
-        Keyed by (symbol, currency) because the currency is what picks the
-        Yahoo exchange suffix, and deduplicated so one symbol held twice costs
-        one request.
+        Values may be ``None`` — a missing quote is the caller's fallback case.
+        Keyed by the pair because the currency is what picks the Yahoo exchange
+        suffix; pass a deduplicated list and one symbol wanted twice costs one
+        request.
 
-        Its own pool, deliberately NOT ``self.runner``: this method already
-        runs ON the runner's single worker, so scheduling there would deadlock.
-        Threads get the engine's decimal context through ``initializer``, the
-        same way ``jobs.py`` arms its worker.
+        Its own pool, deliberately NOT ``self.runner``: callers already run ON
+        the runner's single worker, so scheduling there would deadlock. Threads
+        get the engine's decimal context through ``initializer``, the same way
+        ``jobs.py`` arms its worker.
         """
-        wanted = {
-            (pos.get("symbol") or "", pos.get("eoy_currency") or "USD")
-            for pos in pf.get("positions", [])
-            if self._needs_quote(pos)
-        }
-        keys = sorted(wanted)
         if not keys:
             return {}
-        if len(keys) == 1:                      # no pool for a single holding
+        if len(keys) == 1:                      # no pool for a single symbol
             return {keys[0]: self.quotes.get_quote(*keys[0])}
         with ThreadPoolExecutor(max_workers=min(QUOTE_FETCH_WORKERS, len(keys)),
                                 thread_name_prefix="quote",
                                 initializer=setup_decimal_context) as pool:
             futures = {key: pool.submit(self.quotes.get_quote, *key) for key in keys}
         # .result() re-raises, so a broken quote service still surfaces here
-        # rather than turning into a silent EOY fallback.
+        # rather than turning into a silent fallback.
         return {key: future.result() for key, future in futures.items()}
+
+    def _fetch_quotes(self, pf: Dict[str, Any]) -> Dict[Tuple[str, str], Any]:
+        """Live quote per holding worth one — see ``_needs_quote``."""
+        wanted = {
+            (pos.get("symbol") or "", pos.get("eoy_currency") or "USD")
+            for pos in pf.get("positions", [])
+            if self._needs_quote(pos)
+        }
+        return self._fetch_quote_map(sorted(wanted))
 
     @staticmethod
     def allocation_slices(positions: List[Dict[str, Any]],
@@ -1291,6 +1549,84 @@ class RunService:
             "short_excluded": len(shorts),
             "short_value_czk": sum((v for _, v in shorts), Decimal(0)) or None,
         }
+
+    @staticmethod
+    def resolve_country(pos: Dict[str, Any],
+                        event_countries: Dict[str, str]) -> Tuple[Optional[str], str]:
+        """Issuer country of a holding, plus where the answer came from.
+
+        Four layers, most trustworthy first:
+
+        1. ``ibkr`` — IssuerCountryCode on the positions statement. Absent
+           unless that Flex query exports the column.
+        2. ``event`` — the country IBKR put on an income row for the same
+           symbol this year. Covers every dividend payer, ADRs included.
+        3. ``isin`` — the ISIN's country prefix. **Skipped for ADRs**, where it
+           names the depositary's country: all five ADRs in the real book carry
+           a US ISIN while none of the issuers is American. Labelled as derived
+           so nobody mistakes it for IBKR's own answer.
+        4. ``unknown`` — refused rather than guessed.
+        """
+        issuer = (pos.get("issuer_country") or "").strip().upper()
+        if issuer:
+            return issuer, "ibkr"
+        from_event = (event_countries.get(pos.get("symbol") or "")
+                      or "").strip().upper()
+        if from_event:
+            return from_event, "event"
+        isin = (pos.get("isin") or "").strip().upper()
+        is_adr = (pos.get("ibkr_sub") or "").strip().upper() == "ADR"
+        if len(isin) >= 2 and isin[:2].isalpha() and not is_adr:
+            return isin[:2], "isin"
+        return None, "unknown"
+
+    @classmethod
+    def country_breakdown(cls, rows: List[Dict[str, Any]],
+                          event_countries: Dict[str, str]) -> Dict[str, Any]:
+        """Long-side split by issuer country, with each source counted.
+
+        Same denominator as the other breakdowns — the long side, because a
+        written contract is a liability rather than a share of what you own.
+        Options are left out entirely: a contract's geography is the
+        underlying's, and folding derivative notional into a country weight
+        would overstate it.
+
+        Annotates each row with ``country`` and ``country_source`` so the table
+        can show the provenance next to the value.
+        """
+        by_country: Dict[str, Decimal] = {}
+        sources: Dict[str, int] = {}
+        total = Decimal(0)
+        for r in rows:
+            value = r.get("value_czk")
+            if not value or value <= 0 or r.get("category") == "OPTION":
+                continue
+            country, source = cls.resolve_country(r, event_countries)
+            r["country"], r["country_source"] = country, source
+            label = country or "neznámé"
+            by_country[label] = by_country.get(label, Decimal(0)) + value
+            sources[source] = sources.get(source, 0) + 1
+            total += value
+        slices = [{"label": k, "value": str(v),
+                   "pct": float(v / total * 100) if total else None}
+                  for k, v in sorted(by_country.items(), key=lambda kv: kv[1],
+                                     reverse=True)]
+        return {"total_czk": total or None, "by_country": slices,
+                "sources": sources}
+
+    def event_countries(self, run_id: str, mode: str) -> Dict[str, str]:
+        """symbol → country, from this year's income rows.
+
+        IBKR sends IssuerCountryCode on dividend and interest rows, so a payer
+        answers for itself even when the positions query exports no column.
+        """
+        result = self.load_result(run_id, mode) or {}
+        out: Dict[str, str] = {}
+        for it in result.get("items", []):
+            symbol, country = it.get("asset_symbol"), it.get("source_country")
+            if symbol and country and symbol not in out:
+                out[symbol] = country
+        return out
 
     @staticmethod
     def portfolio_breakdown(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1336,7 +1672,10 @@ class RunService:
             "by_currency": _slices(by_currency),
         }
 
-    def _compute_live_portfolio(self, pf: Dict[str, Any]) -> Dict[str, Any]:
+    def _compute_live_portfolio(
+        self, pf: Dict[str, Any],
+        event_countries: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
         from datetime import date as _date
         today = _date.today()
         converter = self._converter_factory()
@@ -1399,6 +1738,7 @@ class RunService:
 
         rows.sort(key=lambda r: r.get("value_czk") or Decimal(0), reverse=True)
         breakdown = self.portfolio_breakdown(rows)     # also sets weight_pct
+        breakdown["country"] = self.country_breakdown(rows, event_countries or {})
         result = {
             "breakdown": breakdown,
             "as_of": today.isoformat(),
