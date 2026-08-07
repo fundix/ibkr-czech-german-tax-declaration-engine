@@ -6,8 +6,10 @@ must reproduce the same figures test_golden_e2e_cz.py pins (final tax
 3 604 CZK), proving the GUI path computes exactly what the CLI does.
 """
 import shutil
+import threading
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -535,6 +537,103 @@ class TestLivePortfolio:
         snaps = stub_service.list_snapshots()
         assert len(snaps) == 1
         assert Decimal(snaps[0]["total_value_czk"]) == Decimal("8200")
+
+
+class TestQuoteFetching:
+    """One HTTP round trip per symbol, so they go out concurrently.
+
+    The sell-zone ladder pays for these inline before it can render; the real
+    portfolio's 24 holdings took 4.5 s one at a time.
+    """
+
+    @staticmethod
+    def _quote(symbol):
+        return SimpleNamespace(ibkr_symbol=symbol, yahoo_symbol=symbol,
+                               price=Decimal("10"), currency="USD", fetched_at=0.0)
+
+    def _pf(self, count):
+        return {"tax_year": 2025, "positions": [
+            {"symbol": f"S{i}", "description": "x", "category": "STOCK",
+             "time_test_applicable": True, "quantity_long": "1",
+             "eoy_currency": "USD", "eoy_market_price": "9",
+             "total_cost_eur": "5", "lots": []}
+            for i in range(count)
+        ]}
+
+    def _service(self, tmp_path, quotes):
+        return RunService(data_dir=tmp_path / "data", runs_dir=tmp_path / "runs",
+                          quote_service=quotes, converter_factory=StubConverter)
+
+    def test_every_symbol_is_in_flight_at_once(self, tmp_path):
+        """A barrier is the proof — fetching one at a time could never pass it."""
+        barrier = threading.Barrier(3, timeout=5)
+        quote = self._quote
+
+        class BarrierQuotes:
+            def get_quote(self, symbol, currency):
+                barrier.wait()      # releases only once all three have arrived
+                return quote(symbol)
+
+        svc = self._service(tmp_path, BarrierQuotes())
+        try:
+            live = svc._compute_live_portfolio(self._pf(3))
+        finally:
+            svc.runner.shutdown(wait=False)
+        assert live["quotes_ok"] == 3        # no BrokenBarrierError ⇒ concurrent
+
+    def test_one_symbol_held_twice_costs_one_request(self, tmp_path):
+        quotes = _CountingQuotes(self._quote)
+        pf = self._pf(1)
+        pf["positions"].append(dict(pf["positions"][0]))   # e.g. a second account
+        svc = self._service(tmp_path, quotes)
+        try:
+            live = svc._compute_live_portfolio(pf)
+        finally:
+            svc.runner.shutdown(wait=False)
+        assert quotes.calls == [("S0", "USD")]
+        assert live["quotes_ok"] == 2         # both rows still priced
+
+    def test_options_and_closed_positions_cost_nothing(self, tmp_path):
+        quotes = _CountingQuotes(self._quote)
+        pf = self._pf(1)
+        pf["positions"] += [
+            {"symbol": "OPT", "category": "OPTION", "quantity_long": "2",
+             "quantity_short": "0", "eoy_currency": "USD", "lots": []},
+            {"symbol": "SOLD", "category": "STOCK", "quantity_long": "0",
+             "eoy_currency": "USD", "eoy_market_price": "5", "lots": []},
+        ]
+        svc = self._service(tmp_path, quotes)
+        try:
+            svc._compute_live_portfolio(pf)
+        finally:
+            svc.runner.shutdown(wait=False)
+        assert quotes.calls == [("S0", "USD")]
+
+    def test_a_broken_quote_service_still_surfaces(self, tmp_path):
+        """Not swallowed into a silent EOY fallback, same as before the pool."""
+        class BoomQuotes:
+            def get_quote(self, symbol, currency):
+                raise RuntimeError("yahoo down")
+
+        svc = self._service(tmp_path, BoomQuotes())
+        try:
+            with pytest.raises(RuntimeError, match="yahoo down"):
+                svc._compute_live_portfolio(self._pf(3))
+        finally:
+            svc.runner.shutdown(wait=False)
+
+
+class _CountingQuotes:
+    """Records what was asked for. ``calls`` is appended from pool threads;
+    list.append is atomic, and the assertions never depend on the order."""
+
+    def __init__(self, factory):
+        self.calls = []
+        self._factory = factory
+
+    def get_quote(self, symbol, currency):
+        self.calls.append((symbol, currency))
+        return self._factory(symbol)
 
 
 class TestOptionsOverview:
