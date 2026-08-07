@@ -1,0 +1,244 @@
+{% extends "base.html" %}
+{% block title %}Prodejní zóny{% endblock %}
+{% block content %}
+<h1>Prodejní zóny</h1>
+
+<p class="muted">Prodejní plán po titulech — na každý titul žebřík cenových zón.
+  Uloženo v <code>data/webapp/sell_targets.json</code>, nezávisle na výpočtech,
+  takže přepočet pipeline plán nesmaže.</p>
+
+{% if saved %}<p class="badge ok">Uloženo: <code>{{ saved }}</code></p>{% endif %}
+{% if deleted %}<p class="badge ok">Smazáno: <code>{{ deleted }}</code></p>{% endif %}
+{% if imported %}<p class="badge ok">Naimportováno {{ imported }} zón.</p>{% endif %}
+{% if error %}<p class="badge warn">{{ error }}</p>{% endif %}
+
+<p><a href="/targets/import">📋 Importovat z tabulky →</a></p>
+
+{% if meta %}
+<p class="note">Ceny a držené množství z běhu <code>{{ run_id }}</code>
+  (daňový rok {{ meta.tax_year }}), k {{ overview.as_of }}{% if overview.quotes_ok is not none %} ·
+  {{ overview.quotes_ok }}/{{ overview.quotes_total }} živých kotací{% endif %}.</p>
+{% else %}
+<section class="card">
+  <p class="badge warn">Zatím není žádný výpočet — zóny si uložit můžeš, ale
+    živé ceny ani loty se nemají odkud vzít. <a href="/runs">Spustit výpočet →</a></p>
+</section>
+{% endif %}
+
+<section class="card">
+  <p class="note"><strong>Časový test je v ČR 3 roky</strong> (§4 odst. 1 ZDP),
+    u papírů pořízených před 1. 1. 2014 6 měsíců — ne 2 roky. Osvobození se
+    u každé zóny počítá ze skutečných dat pořízení jednotlivých nákupů.</p>
+</section>
+
+{% with alerts = overview.alerts %}{% include "partials/targets_alerts.html" %}{% endwith %}
+
+{% macro tt_badge(z) %}
+  {%- if z.sellable <= 0 %}<span class="muted">–</span>
+  {%- elif z.unknown_quantity > 0 %}<span class="badge warn"
+      title="Odhadované datum pořízení — časový test nelze vyhodnotit.">? ověřit ručně</span>
+  {%- elif z.exempt_quantity >= z.sellable %}<span class="badge ok"
+      title="Celý objem této zóny je po tříletém testu.">osvobozeno</span>
+  {%- elif z.exempt_quantity > 0 %}<span class="badge warn">{{ z.exempt_quantity }} z {{ z.sellable }} ks</span>
+  {%- else %}<span class="badge">zdanitelné</span>{%- endif %}
+  {%- if z.exempt_from %}<div class="note">celé od {{ z.exempt_from }}
+    ({{ z.days_remaining }} dní)</div>{% endif %}
+{% endmacro %}
+
+{% macro zone_forms(row, row_lots) %}
+<table class="zone-table">
+  <tbody>
+    {% for z in row.zones %}
+    <tr class="{{ 'zone-done' if z.done_at }}">
+      <td colspan="5">
+        <form method="post" action="/targets/zone" class="inline-form">
+          <input type="hidden" name="symbol" value="{{ row.symbol }}">
+          <input type="hidden" name="zone_id" value="{{ z.id }}">
+          <input type="text" name="price" value="{{ z.price }}" size="9"
+                 aria-label="Cílová cena" inputmode="decimal">
+          <span class="muted">{{ z.currency or row.live_currency or "" }}</span>
+          <input type="text" name="quantity" value="{{ z.quantity or '' }}" size="7"
+                 placeholder="vše" aria-label="Počet kusů (volitelné)" inputmode="decimal">
+          <span class="muted">ks</span>
+          <select name="lot_acquired" aria-label="Navázat na nákup">
+            <option value="">— kterýkoli lot (FIFO) —</option>
+            {% for b in row_lots %}
+            <option value="{{ b.acquired }}" {{ "selected" if z.lot_acquired == b.acquired }}>
+              {{ b.acquired }} · {{ b.quantity }} ks
+              {%- if b.unit_cost_eur %} · {{ "%.2f"|format(b.unit_cost_eur) }} EUR{% endif %}
+              {%- if b.exempt is true %} · osvobozeno{% elif b.exempt is none %} · ?{% endif %}
+            </option>
+            {% endfor %}
+            {% if z.lot_acquired and z.lot_acquired not in (row_lots | map(attribute='acquired') | list) %}
+            <option value="{{ z.lot_acquired }}" selected>{{ z.lot_acquired }} (už v portfoliu není)</option>
+            {% endif %}
+          </select>
+          <input type="text" name="note" value="{{ z.note or '' }}" size="16"
+                 placeholder="poznámka">
+          <button type="submit" class="small">Uložit</button>
+        </form>
+        <form method="post" action="/targets/zone/delete" class="inline-form"
+              onsubmit="return confirm('Smazat zónu {{ z.price }} u {{ row.symbol }}?');">
+          <input type="hidden" name="symbol" value="{{ row.symbol }}">
+          <input type="hidden" name="zone_id" value="{{ z.id }}">
+          <button type="submit" class="small danger">Smazat</button>
+        </form>
+        <form method="post" action="/targets/zone/state" class="inline-form">
+          <input type="hidden" name="symbol" value="{{ row.symbol }}">
+          <input type="hidden" name="zone_id" value="{{ z.id }}">
+          <input type="hidden" name="action" value="{{ 'undone' if z.done_at else 'done' }}">
+          <button type="submit" class="small">{{ "Vrátit mezi aktivní" if z.done_at else "Prodáno" }}</button>
+        </form>
+        {% if not z.done_at and z.sellable > 0 %}
+        <button type="button" class="small"
+                hx-get="/targets/tax/{{ row.symbol | urlencode }}/{{ z.id }}{% if run_id %}?run_id={{ run_id }}{% endif %}"
+                hx-target="#tax-{{ z.id }}" hx-swap="innerHTML"
+                hx-indicator="#tax-spin-{{ z.id }}"
+                title="Spočítat, co by prodej v této zóně znamenal daňově.">Daň?</button>
+        <span id="tax-spin-{{ z.id }}" class="htmx-indicator"><span class="spinner"></span></span>
+        {% endif %}
+        {% if z.done_at %}<span class="badge muted">prodáno</span>{% endif %}
+        {% if z.lot_missing %}<span class="badge warn"
+          title="Navázaný nákup už mezi otevřenými loty není — nejspíš je prodaný.">lot chybí</span>{% endif %}
+        {% if z.short_of_plan and not z.lot_missing %}<span class="badge warn"
+          title="Předchozí zóny žebříku už spotřebovaly část kusů.">zbývá jen {{ z.sellable }} ks</span>{% endif %}
+        {% if z.currency_mismatch %}<span class="badge warn">jiná měna než kotace</span>{% endif %}
+        <div id="tax-{{ z.id }}" class="zone-tax"></div>
+      </td>
+    </tr>
+    {% endfor %}
+
+    <tr class="zone-new">
+      <td colspan="5">
+        <form method="post" action="/targets/zone" class="inline-form">
+          <input type="hidden" name="symbol" value="{{ row.symbol }}">
+          <input type="text" name="price" placeholder="cena" size="9"
+                 inputmode="decimal" required aria-label="Cílová cena nové zóny">
+          <input type="text" name="quantity" placeholder="kusů (nepovinné)" size="14"
+                 inputmode="decimal" aria-label="Počet kusů nové zóny">
+          <select name="lot_acquired" aria-label="Navázat na nákup">
+            <option value="">— kterýkoli lot (FIFO) —</option>
+            {% for b in row_lots %}
+            <option value="{{ b.acquired }}">{{ b.acquired }} · {{ b.quantity }} ks
+              {%- if b.unit_cost_eur %} · {{ "%.2f"|format(b.unit_cost_eur) }} EUR{% endif %}</option>
+            {% endfor %}
+          </select>
+          <input type="text" name="note" placeholder="poznámka" size="16">
+          <button type="submit" class="small">Přidat zónu</button>
+        </form>
+        <form method="post" action="/targets/symbol/delete" class="inline-form"
+              onsubmit="return confirm('Smazat celý prodejní plán pro {{ row.symbol }}?');">
+          <input type="hidden" name="symbol" value="{{ row.symbol }}">
+          <button type="submit" class="small danger">Smazat titul</button>
+        </form>
+      </td>
+    </tr>
+  </tbody>
+</table>
+{% endmacro %}
+
+<section class="card">
+  <h2>Nový titul</h2>
+  <form method="post" action="/targets/zone" class="inline-form">
+    <input type="text" name="symbol" list="target-symbols" placeholder="symbol"
+           size="14" required aria-label="Symbol titulu">
+    <datalist id="target-symbols">
+      {% for s in symbol_choices %}<option value="{{ s }}">{% endfor %}
+    </datalist>
+    <input type="text" name="price" placeholder="cílová cena" size="12"
+           inputmode="decimal" required aria-label="Cílová cena">
+    <input type="text" name="quantity" placeholder="kusů (nepovinné)" size="14"
+           inputmode="decimal" aria-label="Počet kusů">
+    <input type="text" name="note" placeholder="poznámka (volitelné)">
+    <button type="submit">Přidat</button>
+  </form>
+  <p class="note">Symbol musí odpovídat symbolu z IBKR (např. <code>TUI1</code>,
+    <code>NU</code>), ne názvu firmy. Desetinná čárka i tečka fungují.
+    Počet kusů je nepovinný — bez něj zóna znamená „prodat vše". Navázání na
+    konkrétní nákup vybereš po rozbalení řádku.</p>
+</section>
+
+{% if rows %}
+<section class="card">
+  <h2>Plán ({{ rows | length }} titulů)</h2>
+  <div class="table-toolbar">
+    <span class="table-search">
+      <input type="search" placeholder="Filtr symbolu…" autocomplete="off"
+             data-filter-for="targets-table" data-filter-col="1" data-filter-count="targets-count"
+             aria-label="Rychlý filtr podle symbolu">
+    </span>
+    <span class="table-count"><strong id="targets-count">{{ rows | length }}</strong> z {{ rows | length }} titulů</span>
+  </div>
+  <table class="items sortable" id="targets-table" data-grouped>
+    <thead>
+      <tr>
+        <th data-no-sort></th><th>Titul</th>
+        <th class="num">Cena teď</th><th class="num">Příští zóna</th>
+        <th class="num">% k zóně</th><th class="num">Ks</th>
+        <th class="num">Výnos Kč</th>
+        <th data-no-sort>Časový test</th>
+      </tr>
+    </thead>
+    {% for row in rows %}
+    {# One <tbody> per symbol: table-enhance.js sorts/filters a grouped table
+       by tbody, so the ladder editor always travels with its summary row. #}
+    <tbody id="s-{{ row.symbol }}">
+      <tr>
+        <td>
+          <button type="button" class="expander"
+                  onclick="document.getElementById('zones-{{ loop.index }}').classList.toggle('hidden'); this.textContent = this.textContent === '▸' ? '▾' : '▸';">▸</button>
+        </td>
+        <td>
+          <strong>{{ row.symbol }}</strong>
+          {% if row.status == "not_held" %}<span class="badge warn"
+            title="Titul není mezi otevřenými pozicemi posledního výpočtu.">nedržíš</span>
+          {% elif row.status == "option" %}<span class="badge muted">opce — bez kotace</span>
+          {% elif row.status == "no_price" %}<span class="badge warn">bez ceny</span>
+          {% elif row.price_source == "eoy" %}<span class="badge muted"
+            title="Živá kotace nedostupná — použita cena k 31. 12.">31.12.</span>{% endif %}
+          {% if row.reached_open %}<span class="badge ok">🎯 {{ row.reached_open }}</span>{% endif %}
+          {% if row.description %}<div class="note">{{ row.description }}</div>{% endif %}
+          {% if row.over_allocated %}<div class="note"><span class="badge warn"
+            title="Zóny dohromady počítají s víc kusy, než kolik držíš.">plán &gt; drženo</span></div>{% endif %}
+        </td>
+        <td class="num">{{ "%.2f"|format(row.live_price) if row.live_price else "–" }}
+          <span class="muted">{{ row.live_currency or "" }}</span></td>
+        <td class="num">{{ row.next_zone.price if row.next_zone else "–" }}</td>
+        <td class="num {{ 'neg' if row.next_zone and row.next_zone.distance_pct is not none and row.next_zone.distance_pct < 0 }}">
+          {%- if row.next_zone and row.next_zone.distance_pct is not none -%}
+            {{ "%+.2f"|format(row.next_zone.distance_pct) }} %
+          {%- else -%}–{%- endif -%}
+        </td>
+        <td class="num">
+          {%- if row.next_zone -%}
+            {{ row.next_zone.sellable }}
+            {%- if row.next_zone.unspecified %} <span class="muted"
+              title="Zóna neurčuje počet kusů — zobrazeno vše, co po závazných zónách zbývá.">vše</span>{% endif -%}
+          {%- else -%}–{%- endif -%}
+        </td>
+        <td class="num">{{ row.proceeds_czk | czk if row.proceeds_czk else "–" }}</td>
+        <td>{% if row.next_zone %}{{ tt_badge(row.next_zone) }}{% else %}<span class="muted">–</span>{% endif %}</td>
+      </tr>
+      <tr id="zones-{{ loop.index }}" class="hidden lots-row">
+        <td></td>
+        <td colspan="7">{{ zone_forms(row, lots.get(row.symbol, [])) }}</td>
+      </tr>
+    </tbody>
+    {% endfor %}
+  </table>
+  <p class="note">Řazeno podle vzdálenosti k nejbližší zóně.
+    <code>% k zóně</code> = (cíl − aktuální cena) / aktuální cena; záporná hodnota
+    znamená, že cena už zónu překonala. Výnos je hrubý, dnešním kurzem ČNB.</p>
+  <p class="note">Zóna navázaná na konkrétní nákup si rezervuje právě ten lot,
+    zóna s uvedeným počtem kusů si ukrojí z toho, co zbylo — takže se stejné akcie
+    nezapočítají dvakrát. Zóna <em>bez</em> počtu kusů nic nerezervuje a ukazuje
+    jen zbytek, aby dvě takové zóny nevycházely na nulu.</p>
+</section>
+{% else %}
+<section class="card">
+  <p>Zatím žádný prodejní plán. Přidej první titul formulářem výše, nebo
+    <a href="/targets/import">naimportuj tabulku</a>.</p>
+</section>
+{% endif %}
+
+{% endblock %}

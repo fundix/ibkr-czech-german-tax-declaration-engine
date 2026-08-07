@@ -1,0 +1,93 @@
+{% set unresolved = parsed.rows | selectattr("symbol", "none") | list %}
+<section class="card">
+  <h2>Náhled importu</h2>
+  <p>
+    <span class="badge ok">{{ parsed.rows | length }} řádků k importu</span>
+    {% if unresolved %}<span class="badge warn">{{ unresolved | length }} bez symbolu</span>{% endif %}
+    {% if parsed.skipped %}<span class="badge warn">{{ parsed.skipped | length }} přeskočeno</span>{% endif %}
+    {% if parsed.header_used %}<span class="badge muted">hlavička rozpoznána</span>{% endif %}
+  </p>
+
+  {% if unresolved %}
+  <p class="note">U zvýrazněných řádků se nepodařilo jednoznačně určit symbol.
+    Vyber ho z nabídky, nebo řádek odškrtni — bez symbolu se neuloží.</p>
+  {% endif %}
+
+  <form method="post" action="/targets/import/apply">
+    <table class="items">
+      <thead>
+        <tr>
+          <th data-no-sort>Importovat</th>
+          <th>Z tabulky</th>
+          <th>Symbol</th>
+          <th>Jak dohledáno</th>
+          <th class="num">Cílová cena</th>
+          <th class="num">Kusů (nepovinné)</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in parsed.rows %}
+        <tr class="{{ 'attention' if not r.symbol }}">
+          <td>
+            <input type="checkbox" name="include" value="{{ loop.index0 }}"
+                   {{ "checked" if r.symbol }}
+                   aria-label="Importovat řádek {{ r.line }}">
+          </td>
+          <td>{{ r.raw_symbol }}<div class="muted">ř. {{ r.line }}</div></td>
+          <td>
+            {% if r.symbol %}
+            <strong>{{ r.symbol }}</strong>
+            <input type="hidden" name="symbol" value="{{ r.symbol }}">
+            {% else %}
+            <select name="symbol">
+              <option value="">— vyber symbol —</option>
+              {% for c in r.candidates %}
+              <option value="{{ c }}">{{ c }} (nejbližší)</option>
+              {% endfor %}
+              {% for s in symbol_choices %}
+              {% if s not in r.candidates %}<option value="{{ s }}">{{ s }}</option>{% endif %}
+              {% endfor %}
+            </select>
+            {% endif %}
+          </td>
+          <td class="muted">{{ r.match }}</td>
+          <td class="num">{{ r.price }}
+            <input type="hidden" name="price" value="{{ r.price }}"></td>
+          <td class="num">
+            {% if r.quantity %}{{ r.quantity }}{% else %}<span class="muted">vše</span>{% endif %}
+            {% if r.quantity_note %}<div class="note">{{ r.quantity_note }}</div>{% endif %}
+            <input type="hidden" name="quantity" value="{{ r.quantity or '' }}"></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div style="margin-top:.6rem">
+      <label class="inline-form">
+        <input type="checkbox" name="replace" value="1">
+        Nejdřív smazat celý stávající plán
+      </label>
+      <button type="submit">Importovat</button>
+    </div>
+    <p class="note">Bez zaškrtnutí se u vkládaných titulů nahradí jejich
+      <em>aktivní</em> zóny a zóny označené jako prodané zůstanou. Opakovaný import
+      téže tabulky tak nevytvoří duplicity.</p>
+  </form>
+</section>
+
+{% if parsed.skipped %}
+<section class="card">
+  <h2>Přeskočené řádky ({{ parsed.skipped | length }})</h2>
+  <p class="note">Tyhle řádky se nepodařilo přečíst. Oprav je v tabulce a vlož znovu,
+    nebo je doplň ručně na stránce prodejních zón.</p>
+  <table class="items">
+    <thead><tr><th class="num">Řádek</th><th>Důvod</th><th>Obsah</th></tr></thead>
+    <tbody>
+      {% for s in parsed.skipped %}
+      <tr><td class="num">{{ s.line }}</td><td>{{ s.error }}</td>
+        <td><code>{{ s.raw[:80] }}</code></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}

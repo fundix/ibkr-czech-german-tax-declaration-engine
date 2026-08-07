@@ -1,0 +1,19 @@
+{# Zone context, then the untouched simulator card. #}
+<section class="card">
+  <p>
+    <span class="badge ok">Zóna {{ zone.price }} {{ zone.currency or sim.currency }}</span>
+    {% if zone.lot_acquired %}<span class="badge">nákup {{ zone.lot_acquired }}</span>{% endif %}
+    {% if skip_quantity %}<span class="badge muted"
+      title="Simulace přeskočila starší kusy, aby počítala právě ty, kterých se zóna týká.">přeskočeno {{ skip_quantity }} starších ks</span>{% endif %}
+  </p>
+  <p class="note"><strong>Odhad, ne daňové poradenství.</strong> Náklady se přepočítávají
+    dnešním kurzem ČNB (engine v přiznání použije kurz k datu pořízení), počítá se
+    plochých 15 % bez pásma 23 %, bez zápočtu ztrát z ostatních titulů a bez §38f.
+    {% if pairing_method and pairing_method != "fifo" %}
+    Simulace jede FIFO, ale běh je spočítaný metodou
+    <code>{{ pairing_method }}</code> — čísla se proto s přiznáním rozejdou.
+    {% endif %}
+  </p>
+</section>
+
+{% include "partials/sim_result.html" %}

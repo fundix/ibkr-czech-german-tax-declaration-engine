@@ -1,4 +1,5 @@
 <div id="portfolio-live">
+  {% with alerts = (live.sell_targets or {}).get("alerts") %}{% include "partials/targets_alerts.html" %}{% endwith %}
   <section class="cards-row">
     <div class="card stat">
       <h3>Aktuální hodnota</h3>
