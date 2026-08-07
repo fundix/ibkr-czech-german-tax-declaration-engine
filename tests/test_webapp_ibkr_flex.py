@@ -120,6 +120,19 @@ class TestFlexConfig:
         cfg = load_flex_config(tmp_path / "nope.json")
         assert not cfg.configured
 
+    def test_statement_of_funds_is_a_slot_but_not_required(self, tmp_path):
+        """It only feeds FX gains on currency disposals — a run without it must
+        still work, and a config that has only the other four is complete."""
+        from src.webapp import settings
+        from src.webapp.ibkr_flex import FLEX_SLOTS
+
+        assert "statement_of_funds" in FLEX_SLOTS
+        assert "statement_of_funds" not in settings.REQUIRED_SLOTS
+
+        path = tmp_path / "flex.json"
+        save_flex_config(path, FlexConfig(token="tok", queries={"trades": "1"}))
+        assert load_flex_config(path).configured
+
 
 class TestEffectiveFxMode:
     def test_compare_downgrades_to_daily_for_running_year(self):

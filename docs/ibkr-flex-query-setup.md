@@ -19,11 +19,15 @@ Queries** → panel **Activity Flex Query** → ikona **➕**.
 
 > Nepoužívejte Default Statements ani Trade Confirmation Flex Query.
 
-Vytvoříte **čtyři samostatné query** (každá právě jedna sekce!) — engine
+Vytvoříte **pět samostatných query** (každá právě jedna sekce!) — engine
 čte každý dataset jako samostatné CSV. Jedna query s více sekcemi by
 vyrobila slepený soubor, který parser nepřečte.
 
-## Společná konfigurace (všechny čtyři query)
+Query 1–4 jsou povinné. Query 5 (Statement of Funds) je potřeba jen pro
+kurzové rozdíly z konverzí měn — bez ní engine funguje, jen ty konverze
+neumí spočítat a jen je označí k ruční kontrole.
+
+## Společná konfigurace (všechny query)
 
 **Delivery Configuration:**
 
@@ -35,7 +39,13 @@ vyrobila slepený soubor, který parser nepřečte.
 | **Include column headers?** | **Yes** ← bez toho parser CSV nepřečte |
 | Display single column header row? | No |
 | Include section code and line descriptor? | No |
-| Period | libovolné (při spuštění se přepíše na Custom Date Range) |
+| **Period** | **Year to Date** |
+
+> **Period není libovolný**, i když se při ručním spuštění přepisuje na
+> Custom Date Range. Když appka stahuje **běžící rok**, žádný rozsah
+> nepředává a spoléhá právě na uložený Period ([services.py](../src/webapp/services.py)) —
+> s „Last Business Day" by dostala jediný den. Pro historii appka posílá
+> `fd`/`td` po letech sama.
 
 **General Configuration:**
 
@@ -156,6 +166,62 @@ země záměrně neodhaduje vůbec.
 > Type (FS/RS/TC…) rozlišuje split vs. merger; Proceeds nese hotovost
 > z cash mergerů.
 
+## Query 5: `TaxEngine-Statement-of-Funds`
+
+Volitelná — jen pro kurzové rozdíly z konverzí měn (§10). Bez ní engine
+konverze pouze označí k ruční kontrole.
+
+- Sekce: **Statement of Funds**
+- Options — na těchhle třech to stojí:
+
+  | Volba | Hodnota | Proč |
+  |---|---|---|
+  | **Include Starting and Ending Balances** | **zapnuto** | Bez počátečního zůstatku není znám nabývací kurz držené měny a FIFO nemá z čeho vycházet. Tohle je důvod, proč query existuje. |
+  | **Currency Breakout** | **zapnuto** | Řádky v původní měně. Měna pohybu je pro kurzový rozdíl to hlavní. |
+  | **Base Currency Summary** | **vypnuto** | Přepočet kurzy IBKR — pro §10 nepoužitelné (nutný denní kurz ČNB) a zdvojilo by každý pohyb. |
+  | Summarize Trades by Symbol…, Order Summary | vypnuto | potřebujeme jeden řádek na pohyb, ne agregát |
+
+- Pole (24):
+
+  Account ID · Currency · Asset Class · Symbol · Description · Conid ·
+  ISIN · Underlying Symbol · **Report Date** · **Date** · **Settle Date** ·
+  **Activity Code** · **Activity Description** · Trade ID · Trade Quantity ·
+  Trade Gross · Trade Commission · **Trade Tax** · **Debit** · **Credit** ·
+  **Amount** · **Balance** · Level Of Detail · **Transaction ID**
+
+> `FX Rate To Base` **nezapínejte** — je to kurz IBKR, pro §10 se musí použít
+> denní kurz ČNB.
+
+### Jak vypadá výstup
+
+Ověřeno na skutečném běhu za červenec 2026 (24 sloupců, jedna hlavička):
+
+- Soubor je **seskupený po měnách**. Každý blok začíná řádkem
+  `Starting Balance` a končí `Ending Balance`.
+- Zůstatkové řádky se poznají takto: `ActivityCode` je **prázdný**,
+  `TransactionID` **prázdný**, `Amount` je **0** a hodnota zůstatku je
+  ve sloupci **`Balance`**. `LevelOfDetail` je na všech řádcích `Currency`,
+  takže k rozlišení neslouží.
+- `Amount == Debit + Credit` (ověřeno na všech řádcích); `Debit` je záporný,
+  `Credit` kladný.
+- **Konverze měn = dvě řádky se stejným `TradeID` i `TransactionID`**, jedna
+  za každou nohu. `ActivityCode` je `FOREX`. Pozor, popis se mezi nohama
+  liší („Trad**ed** Currency Leg" vs „Trad**ing** Currency Leg"), takže se
+  na něj nedá spoléhat — párovat se musí přes ID.
+- `ActivityCode` viděné v praxi: `BUY`, `SELL`, `FOREX`, `DINT` (debetní
+  úrok), `DIV`, `PIL` (payment in lieu), `OFEE`, `FRTAX` (srážková daň
+  a její opravy), prázdný u zůstatků.
+- **`Date` je ekonomické datum, `ReportDate` datum výpisu** — u opravy
+  srážkové daně se lišily o měsíc (report 2026-07-30, date 2026-06-25).
+  Pro kurz ČNB se používá `Date`, pro pohyb hotovosti `SettleDate`.
+- `TradeCommission` může být **kladná** (rebate od IBKR) — potvrzeno i tady,
+  stejný jev jako v Trades.
+
+> **Záporné zůstatky jsou normální, ne chyba.** Na marginovém účtu je debetní
+> zůstatek *vypůjčená* měna. Na reálném běhu byly na začátku měsíce záporné
+> USD, CZK, SEK i HKD. Kurzový rozdíl z vypůjčené měny je zrcadlový oproti
+> držené (zisk vzniká při oslabení), takže to FIFO musí umět.
+
 ## Spouštění
 
 U každé query ikona spuštění (šipka) → Period: **Custom Date Range**.
@@ -167,6 +233,7 @@ Flex umí max. **365 dní na jeden běh**, proto historie po letech:
 | CorpActions | stejné roky jako Trades | splity z dřívějších let ovlivňují SOY rekonstrukci |
 | Cash | 1. 1. – 31. 12. daňového roku | starší dividendy nejsou potřeba |
 | Positions | jednodenní rozsah 31. 12. roku PŘED daňovým rokem (SOY) a znovu 31. 12. daňového roku (EOY) | dva běhy téže query |
+| Statement of Funds | stejné roky jako Trades | nabývací kurz pozbyté měny může být z dřívějšího roku — bez historie je FIFO na hotovosti k ničemu |
 
 ## Pojmenování a uložení
 

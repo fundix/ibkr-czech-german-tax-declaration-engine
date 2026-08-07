@@ -53,6 +53,9 @@
     <label>Query ID — Korporátní akce
       <input type="text" name="q_corp_actions" value="{{ flex.queries.get('corp_actions', '') }}">
     </label>
+    <label>Query ID — Statement of Funds (volitelné)
+      <input type="text" name="q_statement_of_funds" value="{{ flex.queries.get('statement_of_funds', '') }}">
+    </label>
     <label>První rok obchodování u IBKR (volitelné)
       <input type="number" name="first_year" min="2000" max="2100"
              value="{{ flex.first_year or '' }}" placeholder="např. 2024">

@@ -884,6 +884,7 @@ class RunService:
         "cash": "cash_transactions.csv",
         "positions": "positions_end.csv",
         "corp_actions": "corporate_actions.csv",
+        "statement_of_funds": "statement_of_funds.csv",
     }
 
     @property

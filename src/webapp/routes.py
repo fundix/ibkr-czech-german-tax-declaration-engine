@@ -686,11 +686,13 @@ def delete_year(request: Request, tax_year: int = Form(...)):
 def save_flex(request: Request, token: str = Form(""),
               q_trades: str = Form(""), q_cash: str = Form(""),
               q_positions: str = Form(""), q_corp_actions: str = Form(""),
+              q_statement_of_funds: str = Form(""),
               first_year: str = Form("")):
     svc = _svc(request)
     svc.save_flex_settings(token, {
         "trades": q_trades, "cash": q_cash,
         "positions": q_positions, "corp_actions": q_corp_actions,
+        "statement_of_funds": q_statement_of_funds,
     }, first_year=first_year)
     return RedirectResponse("/files?flex_saved=1", status_code=303)
 

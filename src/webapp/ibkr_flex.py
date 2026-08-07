@@ -37,7 +37,10 @@ GET_STATEMENT_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/Fle
 _UA = {"User-Agent": "ibkr-tax-engine (local)"}
 
 # Statement slots we know how to consume, in fetch order.
-FLEX_SLOTS = ("trades", "cash", "positions", "corp_actions")
+# Order matters only for the download log. "statement_of_funds" is optional:
+# it feeds FX gains on currency disposals and nothing else depends on it.
+FLEX_SLOTS = ("trades", "cash", "positions", "corp_actions",
+              "statement_of_funds")
 
 # Friendly messages for the documented Flex error codes.
 _ERROR_HINTS = {
