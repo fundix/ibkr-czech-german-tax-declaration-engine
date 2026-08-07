@@ -83,6 +83,10 @@ MAX_IMPORT_LINES = 500
 # roughly one round trip; kept modest because it is all one host.
 QUOTE_FETCH_WORKERS = 8
 
+# Slices the allocation doughnut draws before folding the rest into "ostatní".
+# 12 keeps the legend readable; the book runs to 36 rows, so the fold matters.
+ALLOCATION_SLICES = 12
+
 # Fuzzy description→symbol matching for the spreadsheet import. Deliberately
 # strict: a WRONG symbol in a sell plan is far worse than an unresolved row the
 # user picks from a dropdown. Measured on the real sheet, 0.72 keeps the good
@@ -1165,6 +1169,40 @@ class RunService:
         # .result() re-raises, so a broken quote service still surfaces here
         # rather than turning into a silent EOY fallback.
         return {key: future.result() for key, future in futures.items()}
+
+    @staticmethod
+    def allocation_slices(positions: List[Dict[str, Any]],
+                         limit: int = ALLOCATION_SLICES) -> Dict[str, Any]:
+        """Doughnut slices: the biggest ``limit`` holdings plus one "ostatní".
+
+        Chart.js normalises whatever it is handed to a full circle, so handing
+        it a bare top-N drew the tail as if it did not exist and inflated every
+        slice that survived — a real 5% holding rendered as 6-7% of the ring
+        with nothing to say the picture was partial.
+
+        Written positions are a liability, not a share of the portfolio, and a
+        negative wedge renders broken; they are left out and counted, so the
+        caller can disclose both what was folded and what was dropped.
+        """
+        priced = [(p.get("symbol") or "?", Decimal(str(p["value_czk"])))
+                  for p in positions if p.get("value_czk") is not None]
+        longs = sorted(((s, v) for s, v in priced if v > 0),
+                       key=lambda sv: sv[1], reverse=True)
+        shorts = [(s, v) for s, v in priced if v < 0]
+
+        head, tail = longs[:limit], longs[limit:]
+        slices = [{"label": s, "value": str(v)} for s, v in head]
+        if tail:
+            slices.append({
+                "label": f"ostatní ({len(tail)})",
+                "value": str(sum((v for _, v in tail), Decimal(0))),
+            })
+        return {
+            "slices": slices,
+            "folded": len(tail),
+            "short_excluded": len(shorts),
+            "short_value_czk": sum((v for _, v in shorts), Decimal(0)) or None,
+        }
 
     def _compute_live_portfolio(self, pf: Dict[str, Any]) -> Dict[str, Any]:
         from datetime import date as _date

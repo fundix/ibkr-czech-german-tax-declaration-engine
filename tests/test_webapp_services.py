@@ -598,6 +598,45 @@ class TestLivePortfolio:
         assert Decimal(snaps[0]["total_value_czk"]) == Decimal("8200")
 
 
+class TestAllocationSlices:
+    """Chart.js normalises its input to a full circle, so a bare top-N lied."""
+
+    def _rows(self, n, start=100):
+        return [{"symbol": f"S{i}", "value_czk": Decimal(start + i)}
+                for i in range(n)]
+
+    def test_everything_fits_below_the_limit(self):
+        alloc = RunService.allocation_slices(self._rows(3))
+        assert [s["label"] for s in alloc["slices"]] == ["S2", "S1", "S0"]
+        assert alloc["folded"] == 0
+
+    def test_the_tail_becomes_one_labelled_slice(self):
+        alloc = RunService.allocation_slices(self._rows(15))
+        assert len(alloc["slices"]) == 13          # 12 + "ostatní"
+        assert alloc["slices"][-1]["label"] == "ostatní (3)"
+        assert alloc["folded"] == 3
+
+    def test_the_slices_still_add_up_to_the_whole(self):
+        rows = self._rows(15)
+        alloc = RunService.allocation_slices(rows)
+        assert (sum(Decimal(s["value"]) for s in alloc["slices"])
+                == sum(r["value_czk"] for r in rows))
+
+    def test_written_positions_are_excluded_and_disclosed(self):
+        """A negative wedge renders broken, and a liability is not a holding."""
+        rows = self._rows(2) + [{"symbol": "PUT", "value_czk": Decimal("-500")}]
+        alloc = RunService.allocation_slices(rows)
+        assert [s["label"] for s in alloc["slices"]] == ["S1", "S0"]
+        assert alloc["short_excluded"] == 1
+        assert alloc["short_value_czk"] == Decimal("-500")
+
+    def test_unpriced_rows_are_skipped(self):
+        rows = self._rows(1) + [{"symbol": "NOPRICE", "value_czk": None}]
+        alloc = RunService.allocation_slices(rows)
+        assert [s["label"] for s in alloc["slices"]] == ["S0"]
+        assert alloc["folded"] == 0
+
+
 class TestDividendSummaryCountry:
     """The country must not depend on which payout happens to come first."""
 

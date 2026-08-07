@@ -70,10 +70,7 @@ def dashboard_valuation(request: Request):
     if data is None:
         return HTMLResponse("")
     live = data["live"]
-    allocation = [
-        {"label": p["symbol"], "value": str(p["value_czk"])}
-        for p in live["positions"] if p.get("value_czk")
-    ][:12]
+    allocation = svc.allocation_slices(live["positions"])
     opt = svc.options_overview(data["run_id"])
     return _tpl(request, "partials/dashboard_valuation.html",
                 run_id=data["run_id"], meta=data["meta"], live=live,
@@ -270,10 +267,7 @@ def portfolio_live(request: Request, run_id: str):
     if live is None:
         return HTMLResponse("")
     snapshots = svc.list_snapshots()
-    allocation = [
-        {"label": p["symbol"], "value": str(p["value_czk"])}
-        for p in live["positions"] if p.get("value_czk")
-    ][:12]
+    allocation = svc.allocation_slices(live["positions"])
     return _tpl(request, "partials/portfolio_live.html", run_id=run_id, live=live,
                 allocation=allocation, snapshots=snapshots)
 

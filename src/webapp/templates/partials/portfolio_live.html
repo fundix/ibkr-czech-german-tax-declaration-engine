@@ -29,10 +29,17 @@
 
   <section class="card">
     <div class="split">
-      {% if allocation %}
+      {% if allocation.slices %}
       <div class="chart-box">
         <h2>Alokace</h2>
         <canvas id="alloc-chart" width="230" height="230"></canvas>
+        {% if allocation.folded or allocation.short_excluded %}
+        <p class="note">
+          {%- if allocation.folded %}Nejmenších {{ allocation.folded }} pozic je sloučeno do „ostatní“.{% endif %}
+          {%- if allocation.short_excluded %} Vypsané pozice ({{ allocation.short_excluded }}) jsou
+          závazek, v koláči nejsou.{% endif %}
+        </p>
+        {% endif %}
       </div>
       {% endif %}
       <div class="grow">
@@ -89,7 +96,7 @@
 
   <script>
     (function () {
-      const alloc = {{ allocation | tojson
+      const alloc = {{ allocation.slices | tojson
     }};
     if (alloc.length && window.Chart) {
       new Chart(document.getElementById('alloc-chart'), {
