@@ -7,6 +7,9 @@ of the rate at which a held currency was acquired. Kept standalone, like
 """
 import csv
 import logging
+from collections import Counter
+from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Dict, List, Optional
 
 from pydantic import ValidationError
@@ -80,26 +83,113 @@ def movements(
     return [r for r in records if not r.is_balance_row]
 
 
-def conversion_legs(
-    records: List[RawStatementOfFundsRecord],
-) -> Dict[str, List[RawStatementOfFundsRecord]]:
-    """FOREX rows grouped into their two legs, keyed by transaction id.
+@dataclass
+class Conversion:
+    """One FX conversion, reassembled from the rows that make it up.
 
-    Both legs of a conversion share ``trade_id`` and ``transaction_id`` — the
-    descriptions differ ("Traded" vs "Trading" Currency Leg), so the ids are
-    the only reliable join. A group with one leg means the other fell outside
-    the requested period and the caller must not treat it as a full exchange.
+    ``legs`` are the two currency sides — one given up, one received. ``charges``
+    are the ancillary rows IBKR books against the same trade, in practice the
+    commission, which lands in whatever currency the commission is billed in
+    and is NOT itself a currency disposal.
     """
-    groups: Dict[str, List[RawStatementOfFundsRecord]] = {}
+    trade_id: str
+    legs: List[RawStatementOfFundsRecord] = field(default_factory=list)
+    charges: List[RawStatementOfFundsRecord] = field(default_factory=list)
+
+    @property
+    def is_complete(self) -> bool:
+        """Both sides present. A single leg means the other fell outside the
+        requested period, and the exchange rate cannot be derived from it."""
+        return len(self.legs) == 2
+
+    def leg_for(self, currency: str) -> Optional[RawStatementOfFundsRecord]:
+        return next((l for l in self.legs
+                     if l.currency_primary.upper() == currency.upper()), None)
+
+    @property
+    def disposed(self) -> Optional[RawStatementOfFundsRecord]:
+        """The side given up — the negative one. That is what a gain is measured
+        on; the other side is merely what it was exchanged for."""
+        if not self.is_complete:
+            return None
+        return min(self.legs, key=lambda l: l.amount or Decimal(0))
+
+    @property
+    def received(self) -> Optional[RawStatementOfFundsRecord]:
+        if not self.is_complete:
+            return None
+        return max(self.legs, key=lambda l: l.amount or Decimal(0))
+
+
+def conversions(records: List[RawStatementOfFundsRecord]) -> List[Conversion]:
+    """Reassemble FOREX rows into conversions, keyed by ``trade_id``.
+
+    A conversion is **two or three** rows, not two:
+
+    * ``Trading Currency Leg`` — carries the pair in ``symbol`` plus the
+      quantity, gross and commission,
+    * ``Traded Currency Leg`` — the other side, no symbol,
+    * optionally ``Commission from Forex Trade`` — the fee, in the currency it
+      is billed in, with its **own** ``transaction_id``.
+
+    Which is why ``trade_id`` is the key and ``transaction_id`` is not.
+    Grouping on the transaction id split every commission off as a bogus
+    one-legged conversion — 26 apparent conversions where the book holds 17.
+
+    The legs are identified from the **pair symbol**, which one leg always
+    carries: ``USD.CZK`` names both currencies, so the two legs are the rows in
+    those currencies and everything else on the trade is a charge. Neither the
+    transaction id nor the description works for this. The commission
+    sometimes shares the legs' transaction id (real trade 1295097860) and
+    sometimes does not (1466896593); and the leg descriptions already differ
+    from each other ("Traded" vs "Trading"), so the text is not something to
+    build on either.
+    """
+    by_trade: Dict[str, List[RawStatementOfFundsRecord]] = {}
     for rec in movements(records):
         if (rec.activity_code or "").strip().upper() != "FOREX":
             continue
-        key = (rec.transaction_id or rec.trade_id or "").strip()
+        key = (rec.trade_id or "").strip()
         if not key:
             logger.warning(
-                f"FOREX row in {rec.currency_primary} on {rec.date} has neither "
-                "transaction nor trade id — cannot be paired to its other leg."
+                f"FOREX row in {rec.currency_primary} on {rec.date} carries no "
+                "trade id — it cannot be joined to the rest of its conversion."
             )
             continue
-        groups.setdefault(key, []).append(rec)
-    return groups
+        by_trade.setdefault(key, []).append(rec)
+
+    out: List[Conversion] = []
+    for trade_id, rows in by_trade.items():
+        conv = Conversion(trade_id=trade_id)
+        pair = next((r for r in rows if "." in (r.symbol or "")), None)
+        if pair is None:
+            # No pair symbol on any row (a leg outside the period, or a layout
+            # we have not seen). Fall back to the shared transaction id and let
+            # is_complete tell the caller it cannot be priced.
+            counts = Counter((r.transaction_id or "").strip() for r in rows)
+            leg_tx = counts.most_common(1)[0][0] if counts else ""
+            for r in rows:
+                (conv.legs if (r.transaction_id or "").strip() == leg_tx
+                 else conv.charges).append(r)
+            out.append(conv)
+            continue
+
+        base, _, quote = (pair.symbol or "").partition(".")
+        wanted = {base.strip().upper(), quote.strip().upper()}
+        conv.legs.append(pair)
+        for r in rows:
+            if r is pair:
+                continue
+            other = wanted - {pair.currency_primary.upper()}
+            if r.currency_primary.upper() in other and len(conv.legs) < 2:
+                conv.legs.append(r)
+            else:
+                conv.charges.append(r)
+        if not conv.is_complete:
+            logger.warning(
+                f"Forex trade {trade_id} ({pair.symbol}) has only "
+                f"{len(conv.legs)} of its two currency legs in this period — "
+                "no rate can be derived from it."
+            )
+        out.append(conv)
+    return out
