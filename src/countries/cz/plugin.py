@@ -34,7 +34,10 @@ from src.countries.cz.fx_policy import (
 )
 from src.countries.cz.annual_limit import evaluate_annual_limit, evaluate_exempt_income_cap
 from src.countries.cz.foreign_tax_credit import CzForeignTaxCreditSummary, evaluate_foreign_tax_credit
-from src.countries.cz.item_builder import build_tax_items
+from src.countries.cz.item_builder import (
+    build_tax_items,
+    is_foreign_currency_disposal,
+)
 from src.countries.cz.loss_offsetting import CzLossOffsettingResult, compute_loss_offsetting
 from src.countries.cz.form_mapping import CzFormMappingResult, build_form_mapping
 from src.countries.cz.tax_liability import CzTaxLiabilitySummary, compute_tax_liability
@@ -45,6 +48,7 @@ from src.domain.assets import Asset
 from src.domain.enums import AssetCategory, FinancialEventType
 from src.domain.events import (
     CashFlowEvent,
+    CurrencyConversionEvent,
     FinancialEvent,
     WithholdingTaxEvent,
 )
@@ -132,6 +136,7 @@ class CzechTaxAggregator:
             financial_events=financial_events,
             asset_resolver=asset_resolver,
             fx=self._fx,
+            home_currency=self.config.home_currency,
         )
 
         # --- Phase 2: Apply time test (sets taxability fields in-place) ---
@@ -275,15 +280,23 @@ class CzechTaxAggregator:
         # M15: FX gains from currency conversions are NOT computed (no cash-
         # balance FIFO). They are taxable §10 income in CZ — make the gap
         # loud whenever conversions exist in the data.
+        # Counted the same way the items are built, or the note would promise
+        # more rows than the review page shows: giving up the home currency to
+        # buy a foreign one realises nothing.
         conversion_count = sum(
             1 for ev in financial_events
-            if getattr(ev, "event_type", None) == FinancialEventType.CURRENCY_CONVERSION
+            if isinstance(ev, CurrencyConversionEvent)
+            and is_foreign_currency_disposal(ev, self.config.home_currency)
         )
         if conversion_count:
             note = (
                 f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found — "
                 "FX gains/losses from currency conversions are NOT computed by this "
-                "engine and are taxable §10 income. Assess them manually."
+                "engine and are taxable §10 income. Each conversion is listed as a "
+                "CURRENCY_CONVERSION item flagged for review, with the amount "
+                "disposed of and its CZK volume at the day's rate; the gain needs "
+                "the rate the currency was ACQUIRED at, which the statements cannot "
+                "supply (no cash balances). Assess them manually."
             )
             cz10_notes.append(note)
             logger.warning(note)

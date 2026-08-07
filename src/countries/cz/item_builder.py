@@ -26,12 +26,15 @@ from src.countries.cz.enums import (
     category_to_cz_section,
 )
 from src.countries.cz.fx_policy import CzCurrencyConverter, FxConversionRecord
-from src.countries.cz.tax_items import CzTaxItem, CzTaxItemType, CzWhtRecord
+from src.countries.cz.tax_items import (
+    CzTaxItem, CzTaxItemType, CzTaxReviewStatus, CzWhtRecord,
+)
 from src.domain.assets import Asset
 from src.domain.enums import AssetCategory, FinancialEventType, RealizationType
 from src.domain.events import (
     CashFlowEvent,
     CorpActionStockDividend,
+    CurrencyConversionEvent,
     FinancialEvent,
     WithholdingTaxEvent,
 )
@@ -73,6 +76,7 @@ def build_tax_items(
     financial_events: List[FinancialEvent],
     asset_resolver: AssetResolver,
     fx: Optional[CzCurrencyConverter] = None,
+    home_currency: str = "CZK",
 ) -> Tuple[List[CzTaxItem], List[FxConversionRecord]]:
     """
     Build ``CzTaxItem`` list from core pipeline outputs.
@@ -100,8 +104,92 @@ def build_tax_items(
         realized_gains_losses, asset_resolver, fx, fx_records,
     )
 
-    all_items = income_items + unlinked_items + disposal_items
+    # --- Phase 4: currency conversions (recorded, not valued) ---
+    currency_items = _build_currency_items(
+        financial_events, asset_resolver, fx, fx_records, home_currency,
+    )
+
+    all_items = income_items + unlinked_items + disposal_items + currency_items
     return all_items, fx_records
+
+
+def is_foreign_currency_disposal(ev: CurrencyConversionEvent,
+                                 home_currency: str = "CZK") -> bool:
+    """Whether this conversion gives up a FOREIGN currency.
+
+    Spending the home currency to buy a foreign one realises nothing — it only
+    establishes what that foreign currency cost. Only the opposite direction,
+    and a conversion between two foreign currencies, disposes of something
+    whose value against the koruna can have moved.
+
+    Shared with the plugin so the review note's count matches the items.
+    """
+    return (ev.from_currency or "").upper() != home_currency.upper()
+
+
+def _build_currency_items(
+    financial_events: List[FinancialEvent],
+    resolver: AssetResolver,
+    fx: Optional[CzCurrencyConverter],
+    fx_records: List[FxConversionRecord],
+    home_currency: str = "CZK",
+) -> List[CzTaxItem]:
+    """One item per FX conversion — the disposal of foreign currency.
+
+    Disposing of a foreign currency is §10 income in CZ, but the gain cannot be
+    computed here: it needs the rate at which that currency was ACQUIRED, and
+    the statements carry no cash balances at all. Reconstructing the balance
+    from trades and cash rows goes negative within days on a margin account,
+    where a debit balance is borrowed currency rather than a holding.
+
+    So each conversion is recorded with the amount disposed of, valued at the
+    day's ČNB rate purely to show the scale, and flagged for manual review.
+    ``included_in_tax_base`` stays False and the section is outside §10 netting,
+    so none of this can leak into a tax figure. Making them items rather than a
+    note means they show up on the review page, in the pending-items MCP tool
+    and in the XLSX for free.
+    """
+    items: List[CzTaxItem] = []
+    for ev in financial_events:
+        if not isinstance(ev, CurrencyConversionEvent):
+            continue
+        if not is_foreign_currency_disposal(ev, home_currency):
+            continue
+        # The disposed leg is what a gain would be measured on: the "from" side.
+        disposed_currency = ev.from_currency
+        disposed_amount = abs(ev.from_amount) if ev.from_amount is not None else None
+        czk, fx_rec = _convert(disposed_amount, disposed_currency, ev.event_date,
+                               fx, fx_records)
+        asset = resolver.get_asset_by_id(ev.asset_internal_id)
+
+        item = CzTaxItem(
+            item_type=CzTaxItemType.CURRENCY_CONVERSION,
+            section=CzTaxSection.CZ_10_CURRENCY,
+            source_event_id=ev.event_id,
+            event_date=ev.event_date,
+            original_amount=disposed_amount,
+            original_currency=disposed_currency,
+            amount_czk=czk,
+            fx=fx_rec,
+            asset_symbol=f"{ev.from_currency}.{ev.to_currency}",
+            asset_description=getattr(asset, "description", None),
+        )
+        item.is_taxable = False
+        item.is_exempt = False
+        item.included_in_tax_base = False
+        item.qualifies_for_annual_limit = False
+        item.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
+        item.tax_review_note = (
+            f"Pozbytí {disposed_amount} {disposed_currency} za "
+            f"{ev.to_amount} {ev.to_currency} (kurz {ev.exchange_rate}). "
+            "Kurzový rozdíl NENÍ spočítán — chybí nabývací kurz pozbyté měny, "
+            "výpisy neobsahují hotovostní zůstatky. Částka v Kč je jen objem "
+            "pozbytí přepočtený denním kurzem ČNB, NE zisk. Posuďte ručně."
+        )
+        if fx is not None and czk is None:
+            item.fx_conversion_failed = True
+        items.append(item)
+    return items
 
 
 # ---------------------------------------------------------------------------

@@ -42,6 +42,9 @@ class CzTaxItemType(Enum):
     OPTION_CLOSE = auto()          # Option traded to close (buy-to-close / sell-to-close)
     OPTION_EXPIRY_WORTHLESS = auto()
     OPTION_EXERCISE_ASSIGNMENT = auto()  # Realized outcome from exercise/assignment
+    # A disposal of foreign currency (FX conversion). Recorded so it is visible
+    # and reviewable; its gain is NOT computed — see _build_currency_items.
+    CURRENCY_CONVERSION = auto()
     OTHER = auto()
 
 

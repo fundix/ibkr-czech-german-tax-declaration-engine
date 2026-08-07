@@ -173,6 +173,24 @@ Bezpodmínečné `copy_abs()` pro každý WHT řádek → kladný refund (běžn
 
 **M15 — Kurzové zisky z konverzí měn se nikde nedaní ani neflagují** ⚖ — [calculation_engine.py:273-281](src/engine/calculation_engine.py:273). V ČR zdanitelný §10 příjem; není v dokumentovaných mezerách. **Oprava:** minimálně PENDING flag za rok s konverzemi; plnohodnotně FIFO na cash.
 
+> **Stav 2026-08-07 — částečně opraveno; plný výpočet je blokovaný daty.**
+> Každé pozbytí cizí měny je teď samostatná položka `CURRENCY_CONVERSION`
+> v sekci `CZ_10_CURRENCY`, označená `PENDING_MANUAL_REVIEW`, s pozbytou
+> částkou a jejím objemem v Kč denním kurzem ČNB. Sekce je mimo §10 netting
+> a `included_in_tax_base` je `False`, takže se do daně nic nepropíše —
+> ověřeno na reálném běhu 2026 (daň 790,00 Kč před i po).
+> Konverze **z** domácí měny se nezapočítávají: nákup cizí měny za koruny
+> nic nerealizuje, jen zakládá nabývací kurz.
+>
+> **Proč plný FIFO na cash nejde z dnešních dat:** výpisy neobsahují žádné
+> hotovostní zůstatky (`positions_end.csv` má jen STK a OPT), takže není
+> známý nabývací kurz pozbyté měny. Rekonstrukce zůstatku z obchodů
+> a cash transakcí jde do minusu v každé měně během několika dnů (USD už
+> 2. 1.) — účet je marginový, takže záporný zůstatek je legitimně
+> *vypůjčená* měna, ne chyba. Plný výpočet proto potřebuje nejdřív nový Flex
+> slot (**Statement of Funds** nebo alespoň **Forex Balances**) a pak
+> rozhodnutí, zda je pozbytím i zaplacení cenného papíru cizí měnou.
+
 **M16 — Zaplacené Stückzinsen v CZ tiše zmizí → úroky §8 nadhodnoceny** — [item_builder.py:180-184](src/countries/cz/item_builder.py:180). INTEREST_PAID_STUECKZINSEN spadne do `continue`. **Oprava:** záporná položka CZ_8_INTEREST nebo PENDING.
 
 **M17 — Prémie vmíchaná do stock basis nese smíšená FX data** — [trade_processor.py:155-157](src/engine/event_processors/trade_processor.py:155). Prémie v EUR (ECB @ otevření opce) se převádí ČNB kurzem dne akciového obchodu → kombinace dvou dat. **Oprava:** nést prémii odděleně s vlastním datem.

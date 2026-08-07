@@ -30,6 +30,10 @@ class CzTaxSection(Enum):
     # §10 ZDP — Ostatní příjmy
     CZ_10_SECURITIES = auto()    # Prodej cenných papírů (akcie, dluhopisy, fondy)
     CZ_10_OPTIONS = auto()       # Opce a deriváty
+    # Konverze měn. Deliberately its own section and NOT netted into the §10
+    # base: the engine records that a disposal of foreign currency happened but
+    # does not compute its gain, so nothing here may reach a tax figure.
+    CZ_10_CURRENCY = auto()
 
 
 def category_to_cz_section(asset_category_name: str) -> CzTaxSection:
