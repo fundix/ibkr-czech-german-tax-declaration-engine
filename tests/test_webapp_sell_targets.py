@@ -1078,6 +1078,48 @@ class TestAlertRoutes:
             c.get("/targets")
         assert live_service.sell_alert_count() == 1
 
+    def test_rearm_offered_in_both_the_card_and_the_ladder(self, live_service):
+        live_service.save_sell_zone("PYPL", "55")
+        with self._client(live_service) as c:
+            text = c.get("/targets").text          # this load also latches
+            assert "Zrušit dosažení" in text
+            # Two forms: one in the alert card, one on the zone's row in the
+            # ladder. Counting the hidden input, not the label — the card's
+            # explanatory note mentions the label too.
+            assert text.count('value="rearm"') == 2
+
+    def test_no_rearm_button_before_anything_latches(self, live_service):
+        live_service.save_sell_zone("PYPL", "70")   # live is 60 — never reached
+        with self._client(live_service) as c:
+            assert "Zrušit dosažení" not in c.get("/targets").text
+
+    def test_rearm_still_reachable_after_acknowledging(self, live_service):
+        """Acknowledging hides the card, so the ladder row is the only way back."""
+        zid = live_service.save_sell_zone("PYPL", "55")
+        live_service.get_live_portfolio("r1")
+        live_service.set_zone_state("PYPL", zid, "acknowledge")
+        with self._client(live_service) as c:
+            text = c.get("/targets").text
+            assert "Dosažené prodejní zóny" not in text
+            assert text.count('value="rearm"') == 1
+
+    def test_rearm_from_the_page_clears_a_latch_set_by_a_bad_quote(self, live_service):
+        """The KWEB case: an unmapped symbol quoted the wrong listing, latched
+        the zone, and the marker outlived the symbol_map fix."""
+        zid = live_service.save_sell_zone("PYPL", "55")
+        live_service.get_live_portfolio("r1")                        # latches at 60
+        live_service.quotes.prices["PYPL"] = (Decimal("40"), "USD")  # mapping fixed
+        with self._client(live_service) as c:
+            assert "dosaženo dřív" in c.get("/targets").text   # latch outlived the price
+            r = c.post("/targets/zone/state",
+                       data={"symbol": "PYPL", "zone_id": zid, "action": "rearm"},
+                       follow_redirects=False)
+            assert r.status_code == 303
+            # Re-evaluated at 40 against a target of 55: nothing re-latches.
+            assert "Dosažené prodejní zóny" not in c.get("/targets").text
+        zone = live_service.list_sell_targets()[0]["zones"][0]
+        assert zone["reached_at"] is None and zone["reached_price"] is None
+
 
 class TestUnspecifiedZonesDoNotStarveEachOther:
     """Two rungs that both say "sell everything" are an unfinished plan.
