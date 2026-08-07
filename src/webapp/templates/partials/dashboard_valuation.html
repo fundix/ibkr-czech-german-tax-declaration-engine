@@ -4,7 +4,8 @@
     <div class="card stat">
       <h3>Aktuální hodnota</h3>
       <p class="big">{{ live.total_value_czk | czk }} Kč</p>
-      <p class="muted">{{ live.quotes_ok }}/{{ live.quotes_total }} živých cen · k {{ live.as_of }}</p>
+      <p class="muted">{{ live.quotes_ok }}/{{ live.quotes_total }} živých cen{% if live.options_at_eoy %} ·
+        {{ live.options_at_eoy }} opcí markem k 31.12.{% endif %} · k {{ live.as_of }}</p>
     </div>
     <div class="card stat">
       <h3>Nerealizovaný zisk/ztráta</h3>

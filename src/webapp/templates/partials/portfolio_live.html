@@ -4,7 +4,9 @@
     <div class="card stat">
       <h3>Aktuální hodnota</h3>
       <p class="big">{{ live.total_value_czk | czk }} Kč</p>
-      <p class="muted">{{ live.quotes_ok }}/{{ live.quotes_total }} živých cen · k {{ live.as_of }}</p>
+      <p class="muted">{{ live.quotes_ok }}/{{ live.quotes_total }} živých cen{% if live.options_at_eoy %} ·
+        {{ live.options_at_eoy }} opcí oceněno markem k 31.12. (živé kotace pro opce nejsou){% endif %} ·
+        k {{ live.as_of }}</p>
     </div>
     <div class="card stat">
       <h3>Nerealizovaný zisk/ztráta</h3>
@@ -62,8 +64,10 @@
                 {% if p.price_source == "eoy" %}<span class="badge muted"
                   title="Živá cena nedostupná — použita cena k 31.12. Přidejte mapování do data/webapp/symbol_map.json.">31.12.</span>
                 {% elif p.price_source == "none" %}<span class="badge warn">bez ceny</span>{% endif %}
+                {% if p.net_quantity is not none and p.net_quantity < 0 %}<span class="badge muted"
+                  title="Vypsaná pozice — hodnota je závazek, náklad je přijatá prémie.">short</span>{% endif %}
               </td>
-              <td class="num">{{ p.quantity_long }}</td>
+              <td class="num">{{ p.net_display or p.quantity_long }}</td>
               <td class="num">{{ p.live_price | czk if p.live_price else "–" }} {{ p.live_currency or "" }}</td>
               <td class="num">{{ p.value_czk | czk if p.value_czk else "–" }}</td>
               <td class="num">{{ p.cost_czk | czk if p.cost_czk else "–" }}</td>

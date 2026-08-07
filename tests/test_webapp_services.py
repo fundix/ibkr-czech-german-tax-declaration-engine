@@ -443,6 +443,47 @@ def _sim_position():
     }
 
 
+def _long_option():
+    """A bought call, numbers lifted from the real 2026 book.
+
+    ``SOFI 280616C00018000``: 1 contract, 31 Dec mark 6.7047 per underlying
+    share, FIFO cost 467.04 EUR *per contract*. Its ``eoy_position_value`` in
+    the snapshot is 670.47 — price x multiplier — which is what the valuation
+    has to reproduce.
+    """
+    return {
+        "symbol": "SOFI  280616C00018000", "description": "SOFI 18 CALL",
+        "category": "OPTION", "time_test_applicable": False,
+        "quantity_long": "1", "quantity_short": "0", "multiplier": 100,
+        "eoy_currency": "USD", "eoy_market_price": "6.7047",
+        "eoy_position_value": "670.47", "total_cost_eur": "467.04",
+        "lots": [{"acquisition_date": "2025-03-03", "quantity": "1",
+                  "unit_cost_eur": "467.04", "acquisition_estimated": False,
+                  "time_test_deadline": None}],
+        "short_lots": [],
+    }
+
+
+def _short_option():
+    """A written put — the liability side, also from the real 2026 book.
+
+    ``SOFI 280616P00015000``: 4 contracts written for 1460.11 EUR of premium,
+    now marked at 3.4756 per share. IBKR carries it as ``eoy_position_value``
+    -1390.24, and buying it back cheaper than it was sold is a GAIN.
+    """
+    return {
+        "symbol": "SOFI  280616P00015000", "description": "SOFI 15 PUT",
+        "category": "OPTION", "time_test_applicable": False,
+        "quantity_long": "0", "quantity_short": "4", "multiplier": 100,
+        "eoy_currency": "USD", "eoy_market_price": "3.4756",
+        "eoy_position_value": "-1390.24", "total_cost_eur": "0",
+        "lots": [],
+        "short_lots": [{"opening_date": "2025-05-05", "quantity": "4",
+                        "unit_proceeds_eur": "365.02",
+                        "total_proceeds_eur": "1460.11"}],
+    }
+
+
 def _result_with_proceeds(existing="715704.73"):
     return {"sections": {"cz_10_summary": {"line_items": {
         "annual_limit_eligible_proceeds_czk": existing,
@@ -507,6 +548,24 @@ class TestSimulator:
         assert sim["price"] == Decimal("12")
         assert sim["price_source"] == "live"
 
+    def test_option_proceeds_carry_the_contract_multiplier(self, stub_service):
+        """Cost per contract vs price per share — the simulator reported a
+        467 EUR loss on a contract actually worth 670 USD."""
+        sim = stub_service._compute_simulation(
+            _long_option(), Decimal("1"), None, _result_with_proceeds()
+        )
+        assert sim["price_source"] == "eoy"        # no chain data for options
+        assert sim["proceeds_czk"] == Decimal("13409.40")   # 6.7047 x100 x20
+        assert sim["taxable_gain_czk"] == Decimal("1733.40")
+        assert sim["estimated_tax_czk"] == Decimal("260.01")
+
+    def test_option_without_multiplier_refuses_to_simulate(self, stub_service):
+        pos = _long_option()
+        del pos["multiplier"]
+        with pytest.raises(ValueError, match="multiplier"):
+            stub_service._compute_simulation(
+                pos, Decimal("1"), None, _result_with_proceeds())
+
 
 class TestLivePortfolio:
     def _pf(self):
@@ -537,6 +596,64 @@ class TestLivePortfolio:
         snaps = stub_service.list_snapshots()
         assert len(snaps) == 1
         assert Decimal(snaps[0]["total_value_czk"]) == Decimal("8200")
+
+
+class TestOptionValuation:
+    """An option is quoted per underlying share but held in contracts of 100.
+
+    Its FIFO cost is already per contract, so dropping the multiplier put the
+    two legs 100x apart and every contract showed as 1% of its worth.
+    """
+
+    def _live(self, svc, *positions):
+        return svc._compute_live_portfolio(
+            {"tax_year": 2026, "positions": list(positions)})
+
+    def test_long_contract_values_at_price_times_multiplier(self, stub_service):
+        live = self._live(stub_service, _long_option())
+        row = live["positions"][0]
+        # 1 x 6.7047 x 100 = 670.47 — exactly IBKR's own eoy_position_value
+        assert row["value_ccy"] == Decimal(_long_option()["eoy_position_value"])
+        assert row["value_czk"] == Decimal("13409.40")        # x20 USD
+        assert row["cost_czk"] == Decimal("11676.00")         # 467.04 EUR x25
+        assert row["unrealized_czk"] == Decimal("1733.40")
+        assert row["price_source"] == "eoy"
+
+    def test_written_contract_is_a_liability_and_the_premium_is_its_cost(
+            self, stub_service):
+        live = self._live(stub_service, _short_option())
+        row = live["positions"][0]
+        assert row["net_quantity"] == Decimal("-4")
+        assert row["value_ccy"] == Decimal("-1390.24")        # matches IBKR
+        assert row["value_czk"] == Decimal("-27804.80")
+        # Premium received is a credit, so the cost side is negative...
+        assert row["cost_czk"] == Decimal("-36502.75")
+        # ...which makes "sold high, now cheaper" come out as a gain.
+        assert row["unrealized_czk"] == Decimal("8697.95")
+        assert row["unrealized_pct"] > 0
+
+    def test_written_contract_reaches_the_totals_at_all(self, stub_service):
+        """It used to be skipped outright, so net worth was overstated."""
+        live = self._live(stub_service, _long_option(), _short_option())
+        assert [p["symbol"] for p in live["positions"]] == [
+            _long_option()["symbol"], _short_option()["symbol"]]
+        assert live["total_value_czk"] == Decimal("13409.40") - Decimal("27804.80")
+
+    def test_missing_multiplier_is_refused_not_guessed(self, stub_service):
+        """A contract from a pre-metadata run: no number beats a 100x-light one."""
+        pos = _long_option()
+        del pos["multiplier"]
+        row = self._live(stub_service, pos)["positions"][0]
+        assert row["price_source"] == "none"
+        assert row["value_czk"] is None
+
+    def test_eoy_priced_options_are_counted_for_the_freshness_note(
+            self, stub_service):
+        live = self._live(stub_service, _long_option(), _short_option())
+        # Neither is quotable, so the live ratio must not claim them as fresh.
+        assert live["options_at_eoy"] == 2
+        assert live["quotes_ok"] == 0
+        assert live["quotes_total"] == 0
 
 
 class TestQuoteFetching:
@@ -608,6 +725,29 @@ class TestQuoteFetching:
         finally:
             svc.runner.shutdown(wait=False)
         assert quotes.calls == [("S0", "USD")]
+
+    def test_a_short_only_holding_is_still_quoted(self, tmp_path):
+        """The prefetch and the valuation loop carry the same skip rule.
+
+        They are two copies of one condition; when the loop learned to value
+        written positions, a prefetch still keyed on ``quantity_long`` would
+        have dropped them onto the EOY fallback without a word.
+        """
+        quotes = _CountingQuotes(self._quote)
+        pf = self._pf(0)
+        pf["positions"].append(
+            {"symbol": "SHORTED", "description": "x", "category": "STOCK",
+             "time_test_applicable": True, "quantity_long": "0",
+             "quantity_short": "5", "eoy_currency": "USD",
+             "eoy_market_price": "9", "total_cost_eur": "0",
+             "lots": [], "short_lots": []})
+        svc = self._service(tmp_path, quotes)
+        try:
+            live = svc._compute_live_portfolio(pf)
+        finally:
+            svc.runner.shutdown(wait=False)
+        assert quotes.calls == [("SHORTED", "USD")]
+        assert live["positions"][0]["price_source"] == "live"
 
     def test_a_broken_quote_service_still_surfaces(self, tmp_path):
         """Not swallowed into a silent EOY fallback, same as before the pool."""
