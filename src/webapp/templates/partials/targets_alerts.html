@@ -1,0 +1,41 @@
+{% if alerts %}
+<section class="card">
+  <h2>🎯 Dosažené prodejní zóny ({{ alerts | length }})</h2>
+  <table class="items">
+    <thead>
+      <tr><th>Titul</th><th class="num">Cílová cena</th><th class="num">Cena při dosažení</th>
+        <th class="num">Kusů</th><th>Kdy</th><th data-no-sort></th></tr>
+    </thead>
+    <tbody>
+      {% for a in alerts %}
+      <tr>
+        <td><strong>{{ a.symbol }}</strong>
+          {% if a.description %}<div class="note">{{ a.description }}</div>{% endif %}</td>
+        <td class="num">{{ a.price }} <span class="muted">{{ a.currency or "" }}</span></td>
+        <td class="num">{{ a.reached_price or "–" }}</td>
+        <td class="num">{{ a.quantity or "vše" }}</td>
+        <td>{{ (a.reached_at or "")[:16] | replace("T", " ") }}</td>
+        <td>
+          <form method="post" action="/targets/zone/state" class="inline-form">
+            <input type="hidden" name="symbol" value="{{ a.symbol }}">
+            <input type="hidden" name="zone_id" value="{{ a.zone_id }}">
+            <input type="hidden" name="action" value="acknowledge">
+            <button type="submit" class="small">Beru na vědomí</button>
+          </form>
+          <form method="post" action="/targets/zone/state" class="inline-form">
+            <input type="hidden" name="symbol" value="{{ a.symbol }}">
+            <input type="hidden" name="zone_id" value="{{ a.zone_id }}">
+            <input type="hidden" name="action" value="done">
+            <button type="submit" class="small">Prodáno</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="note">Zóna se označí jako dosažená, jakmile ji živá kotace překonala —
+    a značka zůstane, i kdyby cena zase spadla. Vyhodnocuje se ale <strong>jen při
+    načtení stránky s živými cenami</strong>; špičku, která proběhne, když aplikaci
+    nemáš otevřenou, nezachytí. Cena k 31. 12. ani opce alert nespustí.</p>
+</section>
+{% endif %}

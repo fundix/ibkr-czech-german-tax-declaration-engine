@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Import prodejních zón{% endblock %}
+{% block content %}
+<h1>Import prodejních zón</h1>
+
+<p class="muted"><a href="/targets">← Zpět na prodejní zóny</a></p>
+
+{% if error %}<p class="badge warn">{{ error }}</p>{% endif %}
+
+<section class="card">
+  <h2>Vlož tabulku</h2>
+  <p class="note">Zkopíruj řádky z tabulkového editoru včetně hlavičky a vlož je sem.
+    Oddělovač je <strong>tabulátor nebo středník</strong> — čárka ne, kolidovala by
+    s desetinnou čárkou v <code>1 234,50</code>.</p>
+  <p class="note">Hlavička se rozpozná sama: sloupec s názvem
+    (<code>Titul</code>, <code>Symbol</code>), s cenou (<code>Příští sell zóna</code>,
+    <code>Cena</code>) a s počtem (<code>… v ks</code>). Sloupce s procenty se ignorují.
+    Bez hlavičky se čtou první sloupce jako <code>symbol · cena · kusů</code>.</p>
+  <p class="note"><strong>Počet kusů je nepovinný.</strong> Když ho tabulka neuvádí
+    nebo je nečitelný, zóna se stejně naimportuje a znamená „prodat vše" — cenu
+    kvůli počtu kusů nepřijdeš.</p>
+  <p class="note">Ve sloupci s názvem můžeš mít <strong>název firmy místo symbolu</strong> —
+    aplikace ho zkusí dohledat proti pozicím z posledního výpočtu, i když je uříznutý.
+    Co nedohledá, vybereš v náhledu ručně.</p>
+
+  <form hx-post="/targets/import/preview" hx-target="#import-preview" hx-swap="innerHTML">
+    <input type="hidden" name="run_id" value="{{ run_id or '' }}">
+    <textarea name="text" rows="14" class="import-box" spellcheck="false"
+              placeholder="Titul&#9;Drženo v ks&#9;Příští sell zóna&#10;PayPal Holdings Inc&#9;190&#9;70&#10;TUI AG&#9;200&#9;10"></textarea>
+    <div style="margin-top:.5rem">
+      <button type="submit">Náhled</button>
+      <span class="muted">Nic se neuloží, dokud import nepotvrdíš.</span>
+    </div>
+  </form>
+</section>
+
+<div id="import-preview"></div>
+
+{% if meta %}
+<p class="note">Symboly se dohledávají proti běhu <code>{{ run_id }}</code>
+  (daňový rok {{ meta.tax_year }}).</p>
+{% else %}
+<p class="badge warn">Zatím není žádný výpočet — názvy firem se nebude mít podle čeho
+  dohledat, takže je potřeba vkládat rovnou symboly z IBKR.</p>
+{% endif %}
+
+{% endblock %}

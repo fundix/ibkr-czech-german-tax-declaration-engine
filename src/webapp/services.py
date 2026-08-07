@@ -28,9 +28,12 @@ import logging
 import re
 import shutil
 import time
+import unicodedata
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
-from decimal import Decimal
+import uuid
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -63,6 +66,101 @@ PAIRING_METHODS = ("fifo", "lifo", "weighted_average", "optimal")
 
 # Result items that represent a realized §10 disposal (carry gain/loss legs).
 DISPOSAL_ITEM_TYPES = ("SECURITY_DISPOSAL", "OPTION_CLOSE", "OPTION_EXPIRY_WORTHLESS")
+
+# Sell-target ladder ("prodejní zóny") — user state, not a run artifact.
+SELL_TARGETS_FILE = "sell_targets.json"
+SELL_TARGETS_LOCK = "sell_targets.lock"
+SELL_TARGETS_VERSION = 1
+MAX_ZONES_PER_SYMBOL = 10
+MAX_TARGET_SYMBOLS = 200
+MAX_IMPORT_LINES = 500
+
+# Fuzzy description→symbol matching for the spreadsheet import. Deliberately
+# strict: a WRONG symbol in a sell plan is far worse than an unresolved row the
+# user picks from a dropdown. Measured on the real sheet, 0.72 keeps the good
+# matches (KWEB .95, BABA .89, FLXK .88) and rejects the dangerous near-miss
+# ("Duolingo Inc" scored .58 against PYPL). MARGIN forces a clear winner.
+_MATCH_THRESHOLD = 0.72
+_MATCH_MARGIN = 0.08
+
+# Thousands separators a Czech spreadsheet paste can carry: plain space,
+# no-break, narrow no-break, thin.
+_DEC_JUNK = str.maketrans("", "", "    ")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _lot_is_exempt(lot: Dict[str, Any], time_test_applies: bool,
+                   today: date) -> Optional[bool]:
+    """Is this lot past the §4/1/u holding test?
+
+    Returns ``None`` for "cannot tell" — ``time_test_deadline`` is absent
+    whenever an acquisition date was estimated, and such a lot must never be
+    silently counted as exempt OR as taxable. Callers that need a hard bool
+    (the sale simulator) treat ``None`` as not-exempt, which is the
+    conservative direction.
+
+    Single source of truth so the simulator and the sell-zone overview cannot
+    drift apart on what "exempt" means.
+    """
+    if not time_test_applies:
+        return False
+    deadline = lot.get("time_test_deadline")
+    if not deadline:
+        return None
+    return today > date.fromisoformat(deadline)
+
+
+def _norm_text(value: Any) -> str:
+    """Diacritic-free, punctuation-free, lowercase, single-spaced.
+
+    Used for both header detection and description matching, so "Wix.Com Ltd"
+    and "WIX.COM LTD" collapse to the same key.
+    """
+    s = unicodedata.normalize("NFKD", str(value or ""))
+    s = "".join(c for c in s if not unicodedata.combining(c)).lower()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", s).split())
+
+
+def _split_import_line(line: str) -> List[str]:
+    """Split one pasted line into fields.
+
+    Tab first (a Sheets/Excel paste is TSV), then semicolon (Czech Excel CSV).
+    Plain comma is NEVER a delimiter — it collides with the Czech decimal
+    comma, and "1 234,50" would silently become two columns.
+    """
+    if "\t" in line:
+        parts = line.split("\t")
+    elif ";" in line:
+        parts = line.split(";")
+    else:
+        parts = re.split(r"\s{2,}", line)
+    return [p.strip() for p in parts]
+
+
+def _parse_decimal_cz(text: Any, field: str) -> Decimal:
+    """Parse a Czech-formatted decimal ("1 234,50", "70", "12,5 %") → Decimal.
+
+    Shared by the form path and the bulk-import path so the two can never
+    drift apart. Raises ValueError with a Czech message the routes surface
+    verbatim as a flash.
+    """
+    raw = str(text or "").strip()
+    cleaned = raw.translate(_DEC_JUNK)
+    for junk in ("Kč", "CZK", "$", "%"):
+        cleaned = cleaned.replace(junk, "")
+    cleaned = cleaned.replace(",", ".")
+    if not cleaned:
+        raise ValueError(f"Chybí {field}.")
+    try:
+        value = Decimal(cleaned)
+    except (InvalidOperation, ArithmeticError):
+        raise ValueError(f"{field.capitalize()} není číslo: {raw!r}.") from None
+    if not value.is_finite():
+        raise ValueError(f"{field.capitalize()} není konečné číslo: {raw!r}.")
+    return value
 
 # OCC option keys end with yymmdd + C/P + 8-digit strike ("SOFI  260417P00020000").
 _OCC_KEY_TAIL = re.compile(r"\d{6}[CP]\d{8}$")
@@ -1031,6 +1129,10 @@ class RunService:
             "total_cost_czk": total_cost_czk if total_cost_czk else None,
             "total_unrealized_czk": (total_value_czk - total_cost_czk) if total_value_czk else None,
         }
+        # The one place where every position already carries a fresh quote.
+        # Both entry points (/dashboard/valuation and the portfolio page) pass
+        # through here, so opening either one arms the alerts.
+        result["sell_targets"] = self._evaluate_sell_targets(rows, today)
         if result["total_value_czk"]:
             self._maybe_save_snapshot(pf.get("tax_year"), result)
         return result
@@ -1043,6 +1145,7 @@ class RunService:
         symbol: str,
         quantity: Decimal,
         price: Optional[Decimal] = None,
+        skip_quantity: Decimal = Decimal(0),
     ) -> Dict[str, Any]:
         pf = self.load_portfolio(run_id)
         if pf is None:
@@ -1053,8 +1156,33 @@ class RunService:
         meta = self.get_run(run_id) or {}
         result = self.load_result(run_id, (meta.get("modes") or ["daily"])[0]) or {}
         return self.runner.run_sync(
-            self._compute_simulation, pos, quantity, price, result, timeout=120
+            self._compute_simulation, pos, quantity, price, result, skip_quantity,
+            timeout=120,
         )
+
+    @staticmethod
+    def _lots_after_skip(lots: List[Dict[str, Any]], skip: Decimal):
+        """Drop the first ``skip`` shares in FIFO order.
+
+        Lets a caller ask "what if I sell the LATER lots" — a sell zone pinned
+        to a specific purchase, or a ladder rung whose predecessors already
+        spoke for the older shares. Without it the simulator always starts at
+        lot 0 and would price a different set of shares than the zone claims.
+        Returns ``(pairs, actually_skipped)`` where pairs are
+        ``(lot, available_quantity)``.
+        """
+        pairs, skipped = [], Decimal(0)
+        for lot in lots:
+            qty = Decimal(str(lot.get("quantity") or 0))
+            if skip > 0:
+                drop = min(qty, skip)
+                skip -= drop
+                skipped += drop
+                qty -= drop
+                if qty <= 0:
+                    continue
+            pairs.append((lot, qty))
+        return pairs, skipped
 
     def _compute_simulation(
         self,
@@ -1062,6 +1190,7 @@ class RunService:
         quantity: Decimal,
         price: Optional[Decimal],
         result: Dict[str, Any],
+        skip_quantity: Decimal = Decimal(0),
     ) -> Dict[str, Any]:
         from datetime import date as _date, timedelta as _timedelta
         today = _date.today()
@@ -1081,7 +1210,10 @@ class RunService:
             else:
                 raise ValueError("Cena není k dispozici — zadejte ji ručně.")
 
-        available = Decimal(str(pos.get("quantity_long") or 0))
+        lot_pairs, skipped = self._lots_after_skip(
+            pos.get("lots", []), Decimal(str(skip_quantity or 0)))
+        available = max(
+            Decimal(0), Decimal(str(pos.get("quantity_long") or 0)) - skipped)
         qty = min(Decimal(str(quantity)), available)
         if qty <= 0:
             raise ValueError("Počet kusů musí být kladný.")
@@ -1093,10 +1225,9 @@ class RunService:
         taxable_gain = Decimal(0)
         estimated_involved = False
         latest_deadline = None
-        for lot in pos.get("lots", []):
+        for lot, lot_qty in lot_pairs:
             if remaining <= 0:
                 break
-            lot_qty = Decimal(str(lot["quantity"]))
             take = min(lot_qty, remaining)
             remaining -= take
 
@@ -1110,9 +1241,9 @@ class RunService:
             deadline_d = _date.fromisoformat(deadline) if deadline else None
             estimated = bool(lot.get("acquisition_estimated"))
             estimated_involved = estimated_involved or estimated
-            exempt = bool(
-                time_test_applies and deadline_d is not None and today > deadline_d
-            )
+            # `is True` keeps the historical behaviour: an unknown deadline
+            # (estimated acquisition) counts as NOT exempt here.
+            exempt = _lot_is_exempt(lot, time_test_applies, today) is True
             if gain is not None:
                 if exempt:
                     exempt_gain += gain
@@ -1407,6 +1538,903 @@ class RunService:
             classifier.classifications_cache.pop(key, None)
             classifier.save_classifications()
         logger.info(f"Classification deleted: {key}")
+
+    # ------------------------------------------------------------------
+    # Sell-target ladder (prodejní zóny) — user state about the FUTURE, so it
+    # lives next to the other user stores and must survive re-running the
+    # pipeline. Keyed by symbol: portfolio.json persists no conid/asset_id and
+    # isin is null for options, so symbol is the only reliable join key.
+    # ------------------------------------------------------------------
+
+    @property
+    def sell_targets_path(self) -> Path:
+        """Store location, derived from ``data_dir`` — deliberately NOT a
+        module constant in settings.py: the ``service(tmp_path)`` fixture
+        injects ``data_dir``, so tests get isolation for free. A settings
+        constant would make them write the developer's real file (which is
+        why the classification tests must monkeypatch their path)."""
+        return self.data_dir / SELL_TARGETS_FILE
+
+    @staticmethod
+    def _empty_sell_targets() -> Dict[str, Any]:
+        return {"version": SELL_TARGETS_VERSION, "updated_at": None, "targets": {}}
+
+    def load_sell_targets(self) -> Dict[str, Any]:
+        """Read the store. Never raises — a missing or corrupt file yields the
+        empty store plus a warning, mirroring ``QuoteService._overrides``. A
+        hand-edit typo must not take the whole page down."""
+        path = self.sell_targets_path
+        if not path.is_file():
+            return self._empty_sell_targets()
+        try:
+            data = load_json(path)
+        except Exception:  # noqa: BLE001 — corrupt store degrades, never 500s
+            logger.warning(f"Unreadable sell-target store {path} — ignoring it.")
+            return self._empty_sell_targets()
+        if not isinstance(data, dict) or not isinstance(data.get("targets"), dict):
+            logger.warning(f"Malformed sell-target store {path} — ignoring it.")
+            return self._empty_sell_targets()
+        data.setdefault("version", SELL_TARGETS_VERSION)
+        data.setdefault("updated_at", None)
+        return data
+
+    @staticmethod
+    def _sorted_zones(zones: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ladder order is price-ascending, enforced on write. A sell ladder is
+        monotone by construction, so an explicit order field could contradict
+        price order and make "nearest unmet zone" ambiguous — editing a price
+        IS the reorder."""
+        def _key(z):
+            try:
+                return Decimal(str(z.get("price") or 0))
+            except (InvalidOperation, ArithmeticError):
+                return Decimal(0)
+        return sorted(zones, key=_key)
+
+    def list_sell_targets(self) -> List[Dict[str, Any]]:
+        """UI-ordered view of the store: symbols A→Z, zones price-ascending.
+        No live data — that join is the responsibility of the live pass."""
+        store = self.load_sell_targets()
+        rows = []
+        for symbol, entry in sorted(store.get("targets", {}).items()):
+            zones = self._sorted_zones(list(entry.get("zones") or []))
+            rows.append({
+                "symbol": symbol,
+                "note": entry.get("note") or "",
+                "isin": entry.get("isin"),
+                "zones": zones,
+                "open_zones": [z for z in zones if not z.get("done_at")],
+            })
+        return rows
+
+    @staticmethod
+    def _optional_quantity(quantity: Any) -> Optional[str]:
+        """Quantity is OPTIONAL — the price is what a sell zone is about.
+
+        The user's own sheet admits its share counts are unreliable, so a
+        blank or unparseable quantity must never cost him the price. ``None``
+        means "unspecified"; downstream that reads as the whole holding.
+        """
+        raw = str(quantity or "").strip()
+        if not raw:
+            return None
+        qty = _parse_decimal_cz(raw, "počet kusů")
+        if qty <= 0:
+            raise ValueError("Počet kusů musí být kladný.")
+        return str(qty)
+
+    @staticmethod
+    def _optional_lot_date(value: Any) -> Optional[str]:
+        """Validate an acquisition date used to pin a zone to a purchase.
+
+        Keyed on the DATE alone, not on a lot id: portfolio.json persists no
+        lot identity, and "the batch I bought on the dip in February" is how
+        the user thinks about it. Same-day fills are aggregated, which is the
+        right answer when IBKR split one purchase across several executions.
+        """
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return date.fromisoformat(raw).isoformat()
+        except ValueError:
+            raise ValueError(f"Datum nákupu není platné: {raw!r}.") from None
+
+    def save_sell_zone(self, symbol: str, price: Any, quantity: Any = None,
+                       zone_id: Optional[str] = None, note: str = "",
+                       currency: Optional[str] = None,
+                       isin: Optional[str] = None,
+                       lot_acquired: Any = None) -> str:
+        """Upsert one rung of a symbol's ladder. Returns the zone id.
+
+        Validates on the caller's thread, then hands the write to the worker
+        (same shape as ``save_classification``). ``zone_id=None`` creates.
+        """
+        sym = (symbol or "").strip()
+        if not sym:
+            raise ValueError("Chybí symbol titulu.")
+        if len(sym) > 40:
+            raise ValueError("Symbol je příliš dlouhý (max 40 znaků).")
+        # No .upper(): option keys carry spaces and case. No membership check
+        # against the run either — a target may precede the purchase.
+        price_d = _parse_decimal_cz(price, "cílová cena")
+        if price_d <= 0:
+            raise ValueError("Cílová cena musí být kladné číslo.")
+        qty_s = self._optional_quantity(quantity)
+        lot_s = self._optional_lot_date(lot_acquired)
+        zid = zone_id or uuid.uuid4().hex[:8]
+        self.runner.run_sync(
+            self._write_sell_zone, sym, str(price_d), qty_s, zid,
+            (note or "").strip(), (currency or "").strip().upper() or None,
+            (isin or "").strip() or None, lot_s,
+            timeout=30,
+        )
+        return zid
+
+    def _write_sell_zone(self, symbol: str, price: str, quantity: Optional[str],
+                         zone_id: str, note: str, currency: Optional[str],
+                         isin: Optional[str], lot_acquired: Optional[str] = None
+                         ) -> None:
+        def _mutate(store: Dict[str, Any]) -> None:
+            targets = store["targets"]
+            if symbol not in targets and len(targets) >= MAX_TARGET_SYMBOLS:
+                raise ValueError(f"Maximálně {MAX_TARGET_SYMBOLS} titulů.")
+            entry = targets.setdefault(symbol, {"note": "", "isin": isin, "zones": []})
+            if isin and not entry.get("isin"):
+                entry["isin"] = isin
+            zones = entry.setdefault("zones", [])
+            existing = next((z for z in zones if z.get("id") == zone_id), None)
+            for other in zones:
+                if other is existing:
+                    continue
+                if str(other.get("price")) == price:
+                    raise ValueError(
+                        f"Zóna s cenou {price} u {symbol} už existuje."
+                    )
+            if existing is None and len(zones) >= MAX_ZONES_PER_SYMBOL:
+                raise ValueError(f"Maximálně {MAX_ZONES_PER_SYMBOL} zón na titul.")
+            if existing is None:
+                zones.append({
+                    "id": zone_id, "price": price, "quantity": quantity,
+                    "currency": currency, "note": note,
+                    "lot_acquired": lot_acquired,
+                    "created_at": _utc_now_iso(),
+                    # Alert state is three timestamps, never a status string —
+                    # a hand-edit then cannot invent an inconsistent state.
+                    "reached_at": None, "reached_price": None,
+                    "acknowledged_at": None, "done_at": None,
+                })
+            else:
+                existing.update({"price": price, "quantity": quantity,
+                                 "note": note, "lot_acquired": lot_acquired})
+                if currency:
+                    existing["currency"] = currency
+
+            entry["zones"] = self._sorted_zones(zones)
+
+        self._write_sell_targets(_mutate)
+        logger.info(f"Sell zone saved: {symbol} @ {price} × {quantity}")
+
+    def delete_sell_zone(self, symbol: str, zone_id: str) -> None:
+        self.runner.run_sync(self._delete_sell_zone, symbol, zone_id, timeout=30)
+
+    def _delete_sell_zone(self, symbol: str, zone_id: str) -> None:
+        def _mutate(store: Dict[str, Any]) -> None:
+            entry = store["targets"].get(symbol)
+            if not entry:
+                return
+            entry["zones"] = [z for z in entry.get("zones", [])
+                              if z.get("id") != zone_id]
+            if not entry["zones"]:
+                store["targets"].pop(symbol, None)
+
+        self._write_sell_targets(_mutate)
+        logger.info(f"Sell zone deleted: {symbol}/{zone_id}")
+
+    def delete_sell_target(self, symbol: str) -> None:
+        self.runner.run_sync(self._delete_sell_target, symbol, timeout=30)
+
+    def _delete_sell_target(self, symbol: str) -> None:
+        self._write_sell_targets(lambda s: s["targets"].pop(symbol, None))
+        logger.info(f"Sell target deleted: {symbol}")
+
+    _ZONE_ACTIONS = ("acknowledge", "done", "undone", "rearm")
+
+    def set_zone_state(self, symbol: str, zone_id: str, action: str) -> None:
+        """Advance a zone through pending → reached → acknowledged → done.
+
+        One method (and one route) instead of four near-identical endpoints.
+        ``rearm`` clears the reached latch so the zone can fire again.
+        """
+        if action not in self._ZONE_ACTIONS:
+            raise ValueError(f"Neznámá akce: {action}.")
+        self.runner.run_sync(self._set_zone_state, symbol, zone_id, action, timeout=30)
+
+    def _set_zone_state(self, symbol: str, zone_id: str, action: str) -> None:
+        def _mutate(store: Dict[str, Any]) -> None:
+            entry = store["targets"].get(symbol) or {}
+            zone = next((z for z in entry.get("zones", [])
+                         if z.get("id") == zone_id), None)
+            if zone is None:
+                raise ValueError(f"Zóna {zone_id} u {symbol} neexistuje.")
+            now = _utc_now_iso()
+            if action == "acknowledge":
+                zone["acknowledged_at"] = now
+            elif action == "done":
+                zone["done_at"] = now
+                zone.setdefault("acknowledged_at", None)
+                zone["acknowledged_at"] = zone["acknowledged_at"] or now
+            elif action == "undone":
+                zone["done_at"] = None
+            elif action == "rearm":
+                zone["reached_at"] = None
+                zone["reached_price"] = None
+                zone["acknowledged_at"] = None
+
+        self._write_sell_targets(_mutate)
+        logger.info(f"Sell zone {action}: {symbol}/{zone_id}")
+
+    # ---- alerts ---------------------------------------------------------
+
+    @staticmethod
+    def _zone_is_alerting(zone: Dict[str, Any]) -> bool:
+        """Reached, and the user has neither dismissed it nor sold."""
+        return bool(zone.get("reached_at") and not zone.get("acknowledged_at")
+                    and not zone.get("done_at"))
+
+    def sell_alert_count(self) -> int:
+        """Number of zones waiting to be acknowledged.
+
+        Store read only — no quotes, no run load, so the nav badge on every
+        page costs a single small file read. It therefore reflects the last
+        EVALUATION, not a fresh price check; that is the honest consequence of
+        having no background poller.
+        """
+        try:
+            store = self.load_sell_targets()
+        except Exception:  # noqa: BLE001 — a badge must never break a page
+            return 0
+        return sum(
+            1
+            for entry in store.get("targets", {}).values()
+            for zone in entry.get("zones", [])
+            if self._zone_is_alerting(zone)
+        )
+
+    def _evaluate_sell_targets(self, rows: List[Dict[str, Any]],
+                               today: date) -> Optional[Dict[str, Any]]:
+        """Latch zones whose live price has reached the target.
+
+        WORKER-THREAD ONLY. This runs inside ``_compute_live_portfolio``,
+        which is already executing on the single-worker JobRunner — calling
+        ``runner.run_sync`` from here would deadlock until the 120 s timeout.
+        The write goes straight through ``_write_sell_targets``.
+
+        Deliberately cheap: a price comparison and, at most, one file write.
+        The rich join (lots, time test, proceeds) belongs to
+        ``sell_targets_overview`` and only runs on the /targets page.
+        """
+        try:
+            if not self.sell_targets_path.is_file():
+                return None            # feature unused → cost is one stat()
+            store = self.load_sell_targets()
+            targets = store.get("targets") or {}
+            if not targets:
+                return None
+
+            by_symbol = {r.get("symbol"): r for r in rows}
+            dirty = False
+            alerts: List[Dict[str, Any]] = []
+            now = _utc_now_iso()
+
+            for symbol, entry in targets.items():
+                pos = by_symbol.get(symbol)
+                # Only a genuine live quote may fire an alert. An EOY mark
+                # would make every closed-year run scream permanently, and a
+                # position we no longer hold is a watchlist, not a trigger.
+                live_ok = bool(pos and pos.get("price_source") == "live"
+                               and pos.get("category") != "OPTION")
+                live_price = Decimal(str(pos["live_price"])) if live_ok and pos.get("live_price") else None
+                live_currency = (pos or {}).get("live_currency")
+
+                for zone in entry.get("zones", []):
+                    if zone.get("done_at"):
+                        continue
+                    if (live_price is not None
+                            and not (zone.get("currency") and live_currency
+                                     and zone["currency"] != live_currency)
+                            and live_price >= Decimal(str(zone["price"]))
+                            and not zone.get("reached_at")):
+                        zone["reached_at"] = now
+                        zone["reached_price"] = str(live_price)
+                        dirty = True
+                    if self._zone_is_alerting(zone):
+                        alerts.append({
+                            "symbol": symbol, "zone_id": zone["id"],
+                            "price": zone["price"],
+                            "currency": zone.get("currency") or live_currency,
+                            "quantity": zone.get("quantity"),
+                            "reached_at": zone["reached_at"],
+                            "reached_price": zone.get("reached_price"),
+                            "description": (pos or {}).get("description"),
+                        })
+
+            if dirty:
+                self._write_sell_targets(lambda s: s.update({"targets": targets}))
+            alerts.sort(key=lambda a: a["reached_at"] or "", reverse=True)
+            return {"alert_count": len(alerts), "alerts": alerts}
+        except Exception:  # noqa: BLE001 — never break the net-worth card
+            logger.warning("Sell-target evaluation failed", exc_info=True)
+            return None
+
+    # ---- live overview -------------------------------------------------
+
+    @staticmethod
+    def group_lots_by_date(pos: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Open lots of a position, aggregated per acquisition date.
+
+        Same-day fills become one purchase, which is how a human refers to a
+        lot ("what I bought on the dip on 6 February"). Ordered oldest-first,
+        i.e. the order FIFO would consume them in.
+        """
+        buckets: Dict[str, Dict[str, Any]] = {}
+        for lot in (pos or {}).get("lots", []):
+            key = lot.get("acquisition_date") or ""
+            qty = Decimal(str(lot.get("quantity") or 0))
+            if qty <= 0:
+                continue
+            b = buckets.setdefault(key, {
+                "acquired": key or None, "quantity": Decimal(0),
+                "cost_eur": Decimal(0), "time_test_deadline": None,
+                "estimated": False,
+            })
+            b["quantity"] += qty
+            b["cost_eur"] += qty * Decimal(str(lot.get("unit_cost_eur") or 0))
+            b["estimated"] = b["estimated"] or bool(lot.get("acquisition_estimated"))
+            deadline = lot.get("time_test_deadline")
+            if deadline:
+                # Conservative: the latest deadline of the merged fills.
+                current = b["time_test_deadline"]
+                b["time_test_deadline"] = max(current, deadline) if current else deadline
+            else:
+                b["time_test_deadline"] = b["time_test_deadline"]
+        out = []
+        for b in buckets.values():
+            b["unit_cost_eur"] = (b["cost_eur"] / b["quantity"]) if b["quantity"] else None
+            out.append(b)
+        out.sort(key=lambda b: b["acquired"] or "")
+        return out
+
+    def position_lots(self, run_id: str, symbol: str) -> List[Dict[str, Any]]:
+        """Lot buckets of one holding — feeds the zone editor's lot picker."""
+        pf = self.load_portfolio(run_id) or {}
+        pos = next((p for p in pf.get("positions", []) if p.get("symbol") == symbol), None)
+        if pos is None:
+            return []
+        today = date.today()
+        applies = bool(pos.get("time_test_applicable"))
+        out = []
+        for b in self.group_lots_by_date(pos):
+            exempt = _lot_is_exempt({"time_test_deadline": b["time_test_deadline"]},
+                                    applies, today)
+            out.append({**b, "exempt": exempt})
+        return out
+
+    def sell_targets_overview(self, run_id: Optional[str] = None) -> Dict[str, Any]:
+        """Sell zones joined with live prices, lots and the §4/1/u time test.
+
+        Runs on the request thread (``get_live_portfolio`` does its own
+        ``run_sync``), so it must NOT be called from inside the live-portfolio
+        worker — that would nest ``run_sync`` on a single-worker pool and hang.
+        """
+        if run_id is None:
+            latest = (self.dashboard_overview() or {}).get("latest") or {}
+            run_id = latest.get("run_id")
+        # Live valuation FIRST: it is what latches newly reached zones, so
+        # reading the store before it would render a stale ladder.
+        live = self.get_live_portfolio(run_id) if run_id else None
+        targets = self.list_sell_targets()
+        by_symbol = {p["symbol"]: p for p in (live or {}).get("positions", [])}
+        today = date.today()
+        converter = self._converter_factory()
+
+        rows = [self._build_target_row(t, by_symbol.get(t["symbol"]), today, converter)
+                for t in targets]
+        rows.sort(key=lambda r: (
+            r["next_zone"]["distance_pct"] if r.get("next_zone")
+            and r["next_zone"].get("distance_pct") is not None else Decimal("9999")
+        ))
+        return {
+            "run_id": run_id, "as_of": (live or {}).get("as_of") or today.isoformat(),
+            "tax_year": (live or {}).get("tax_year"),
+            "rows": rows,
+            "reached_count": sum(r["reached_open"] for r in rows),
+            "alerts": ((live or {}).get("sell_targets") or {}).get("alerts") or [],
+            "quotes_ok": (live or {}).get("quotes_ok"),
+            "quotes_total": (live or {}).get("quotes_total"),
+        }
+
+    def _build_target_row(self, target: Dict[str, Any], pos: Optional[Dict[str, Any]],
+                          today: date, converter) -> Dict[str, Any]:
+        symbol = target["symbol"]
+        live_price = pos.get("live_price") if pos else None
+        live_price = Decimal(str(live_price)) if live_price is not None else None
+        live_currency = (pos or {}).get("live_currency")
+        price_source = (pos or {}).get("price_source") or "none"
+        held = Decimal(str((pos or {}).get("quantity_long") or 0))
+        is_option = (pos or {}).get("category") == "OPTION"
+
+        if pos is None:
+            status = "not_held"
+        elif is_option:
+            status = "option"          # options are never quoted
+        elif live_price is None or live_price <= 0:
+            status = "no_price"
+        else:
+            status = "ok"
+
+        # A FIFO cursor over the lot buckets so a ladder cannot sell the same
+        # shares twice: zone 2 gets what zone 1 left behind. Lot-pinned zones
+        # take their own purchase out of the pool first.
+        pool = [dict(b) for b in self.group_lots_by_date(pos)]
+        applies = bool((pos or {}).get("time_test_applicable"))
+        open_zones = [z for z in target["zones"] if not z.get("done_at")]
+        # Three passes, in decreasing order of how firmly a rung is committed:
+        #   1. pinned to a purchase  → reserves that lot before anyone else
+        #   2. explicit quantity     → consumes the remaining pool FIFO
+        #   3. neither               → reports what is LEFT without consuming
+        # Pass 3 must not consume: two rungs that both say "sell everything"
+        # are an unfinished plan, not a claim on disjoint shares, and letting
+        # the first one eat the position left the next showing a bogus 0 ks.
+        pinned = [z for z in open_zones if z.get("lot_acquired")]
+        sized = [z for z in open_zones if not z.get("lot_acquired") and z.get("quantity")]
+        unsized = [z for z in open_zones
+                   if not z.get("lot_acquired") and not z.get("quantity")]
+
+        views: Dict[str, Dict[str, Any]] = {}
+        for zone in pinned + sized:
+            views[zone["id"]] = self._zone_view(
+                zone, pool, applies, today, live_price, live_currency,
+                converter, consume=True)
+        for zone in unsized:
+            views[zone["id"]] = self._zone_view(
+                zone, pool, applies, today, live_price, live_currency,
+                converter, consume=False)
+        for zone in target["zones"]:
+            if zone.get("done_at"):
+                views[zone["id"]] = self._zone_view(
+                    zone, [], applies, today, live_price, live_currency,
+                    converter, consume=False)
+
+        zone_views = [views[z["id"]] for z in target["zones"]]
+        open_views = [v for v in zone_views if not v["done_at"]]
+        unreached = [v for v in open_views if not v["reached"]]
+        next_zone = min(
+            (v for v in unreached if v["distance_pct"] is not None),
+            key=lambda v: v["distance_pct"], default=None)
+        if next_zone is None and unreached:
+            next_zone = unreached[0]
+        if next_zone is not None:
+            next_zone["is_next"] = True
+
+        return {
+            "symbol": symbol, "note": target.get("note") or "",
+            "description": (pos or {}).get("description"),
+            "status": status, "in_portfolio": pos is not None,
+            "held_quantity": held if pos else None,
+            "live_price": live_price, "live_currency": live_currency,
+            "price_source": price_source,
+            "zones": zone_views, "open_zones": open_views, "next_zone": next_zone,
+            "reached_open": sum(1 for v in open_views if v["reached"]),
+            # What the plan ASKS for, from committed rungs only (a lot or an
+            # explicit count). Summing `sellable` instead would hide
+            # over-allocation, because the cursor already clamps it to what is
+            # left; "sell everything" rungs are excluded so an unfinished plan
+            # cannot fire a bogus warning.
+            "planned_quantity": sum((v["wanted"] for v in open_views
+                                     if v["consumes"]), Decimal(0)),
+            "over_allocated": bool(
+                pos and sum((v["wanted"] for v in open_views
+                             if v["consumes"]), Decimal(0)) > held),
+            "proceeds_czk": sum((v["proceeds_czk"] for v in open_views
+                                 if v["proceeds_czk"] is not None), Decimal(0)) or None,
+        }
+
+    def _zone_view(self, zone: Dict[str, Any], pool: List[Dict[str, Any]],
+                   applies: bool, today: date, live_price: Optional[Decimal],
+                   live_currency: Optional[str], converter,
+                   consume: bool = True) -> Dict[str, Any]:
+        price = Decimal(str(zone["price"]))
+        pinned_to = zone.get("lot_acquired")
+
+        # How many shares this rung is about: an explicit count, else the
+        # pinned lot's size, else whatever the ladder has not spoken for.
+        if zone.get("quantity"):
+            wanted = Decimal(str(zone["quantity"]))
+        elif pinned_to:
+            wanted = sum((b["quantity"] for b in pool
+                          if b["acquired"] == pinned_to), Decimal(0))
+        else:
+            wanted = sum((b["quantity"] for b in pool), Decimal(0))
+
+        take_from = ([b for b in pool if b["acquired"] == pinned_to] if pinned_to
+                     else list(pool))
+        remaining = wanted
+        consumed, exempt_qty, unknown_qty = Decimal(0), Decimal(0), Decimal(0)
+        wait_until = None
+        for bucket in take_from:
+            if remaining <= 0:
+                break
+            take = min(bucket["quantity"], remaining)
+            if take <= 0:
+                continue
+            if consume:
+                bucket["quantity"] -= take      # the cursor: later rungs see less
+            remaining -= take
+            consumed += take
+            state = _lot_is_exempt({"time_test_deadline": bucket["time_test_deadline"]},
+                                   applies, today)
+            if state is True:
+                exempt_qty += take
+            elif state is None:
+                unknown_qty += take             # estimated date — never guess
+            else:
+                deadline = bucket["time_test_deadline"]
+                if deadline:
+                    wait_until = max(wait_until or deadline, deadline)
+
+        distance_pct = None
+        currency_mismatch = bool(zone.get("currency") and live_currency
+                                 and zone["currency"] != live_currency)
+        if live_price and live_price > 0 and not currency_mismatch:
+            distance_pct = (price - live_price) / live_price * Decimal(100)
+
+        proceeds_ccy = consumed * price if consumed else None
+        proceeds_czk = (self._to_czk(converter, proceeds_ccy,
+                                     zone.get("currency") or live_currency or "USD", today)
+                        if proceeds_ccy else None)
+        return {
+            **zone,
+            "price_d": price,
+            "sellable": consumed,
+            "wanted": wanted,
+            "consumes": consume,
+            "unspecified": not consume,
+            "short_of_plan": bool(consume and consumed < wanted),
+            "lot_missing": bool(pinned_to and consumed == 0),
+            "distance_pct": distance_pct,
+            "currency_mismatch": currency_mismatch,
+            "reached": bool(live_price and live_price >= price and not currency_mismatch),
+            "exempt_quantity": exempt_qty,
+            "unknown_quantity": unknown_qty,
+            "taxable_quantity": consumed - exempt_qty - unknown_qty,
+            "exempt_from": (date.fromisoformat(wait_until) + timedelta(days=1)).isoformat()
+                           if wait_until else None,
+            "days_remaining": ((date.fromisoformat(wait_until) - today).days + 1)
+                              if wait_until else None,
+            "proceeds_ccy": proceeds_ccy,
+            "proceeds_czk": proceeds_czk,
+            "is_next": False,
+        }
+
+    def zone_tax_impact(self, run_id: Optional[str], symbol: str,
+                        zone_id: str) -> Dict[str, Any]:
+        """What selling this rung at its target price would mean, tax-wise.
+
+        On demand only — one click, one simulation. Never for every row on
+        page load: each call builds a fresh ČNB converter (which loads a
+        ~267 kB cache and may hit the network) and takes a turn on the
+        single-worker executor, so 25 of them would queue behind any running
+        pipeline.
+
+        The zone decides both the size and WHICH shares: a pinned rung skips
+        everything acquired earlier, an ordinary rung skips what the cheaper
+        committed rungs already spoke for. Returns the ``simulate_sale``
+        payload plus the zone context the template needs.
+        """
+        if not run_id:
+            raise ValueError("Zatím není žádný výpočet — spusť ho na stránce Výpočty.")
+        overview_row = next(
+            (r for r in self.sell_targets_overview(run_id)["rows"]
+             if r["symbol"] == symbol), None)
+        if overview_row is None:
+            raise ValueError(f"Titul {symbol} v plánu není.")
+        zone = next((z for z in overview_row["zones"] if z["id"] == zone_id), None)
+        if zone is None:
+            raise ValueError("Zóna neexistuje.")
+        if not overview_row["in_portfolio"]:
+            raise ValueError(f"{symbol} není mezi otevřenými pozicemi — nelze simulovat.")
+
+        qty = zone["sellable"]
+        if qty <= 0:
+            raise ValueError(
+                "Na tuhle zónu nezbývají žádné kusy — dřívější zóny žebříku je "
+                "už rozebraly, nebo navázaný nákup v portfoliu není."
+            )
+
+        skip = Decimal(0)
+        pf = self.load_portfolio(run_id) or {}
+        pos = next((p for p in pf.get("positions", []) if p.get("symbol") == symbol), None)
+        buckets = self.group_lots_by_date(pos)
+        if zone.get("lot_acquired"):
+            skip = sum((b["quantity"] for b in buckets
+                        if (b["acquired"] or "") < zone["lot_acquired"]), Decimal(0))
+        else:
+            skip = sum(
+                (z["sellable"] for z in overview_row["open_zones"]
+                 if z["consumes"] and not z.get("lot_acquired")
+                 and Decimal(str(z["price"])) < Decimal(str(zone["price"]))),
+                Decimal(0),
+            )
+        sim = self.simulate_sale(run_id, symbol, quantity=qty,
+                                 price=Decimal(str(zone["price"])),
+                                 skip_quantity=skip)
+        return {"sim": sim, "zone": zone, "symbol": symbol,
+                "skip_quantity": skip,
+                "pairing_method": (self.get_run(run_id) or {}).get("pairing_method")}
+
+    # ---- spreadsheet import -------------------------------------------
+
+    # Header keywords, matched against _norm_text of the header cell.
+    _HDR_SYMBOL = ("titul", "symbol", "ticker", "nazev", "akcie", "instrument")
+    _HDR_PRICE = ("cena", "zona", "sell", "target", "cil")
+    _HDR_QTY = ("ks", "kus", "pocet", "mnozstvi", "quantity", "qty")
+
+    @staticmethod
+    def _sellable_positions(pf: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Non-option positions of a run — the universe a pasted name may
+        resolve to. Options are excluded: their key embeds expiry and strike,
+        so a ladder on one goes stale with the contract."""
+        return [p for p in (pf or {}).get("positions", [])
+                if p.get("category") != "OPTION"]
+
+    def resolve_target_symbol(self, value: str,
+                              positions: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Map a pasted cell to an IBKR symbol.
+
+        His sheet's "Titul" column holds company NAMES, often truncated by the
+        column width ("Franklin FTSE Korea UCITS ET"), so an exact symbol match
+        is the exception, not the rule. Ladder of strategies, most trustworthy
+        first; anything not clearly resolved comes back with ``symbol=None``
+        and candidates for the user to pick in the preview.
+        """
+        raw = (value or "").strip()
+        out = {"symbol": None, "how": "", "candidates": []}
+        if not raw:
+            out["how"] = "prázdné"
+            return out
+
+        by_symbol = {p["symbol"]: p for p in positions}
+        if raw in by_symbol:
+            return {"symbol": raw, "how": "symbol", "candidates": []}
+        for sym in by_symbol:
+            if sym.lower() == raw.lower():
+                return {"symbol": sym, "how": "symbol", "candidates": []}
+
+        needle = _norm_text(raw)
+        if not needle:
+            out["how"] = "prázdné"
+            return out
+
+        exact = [p["symbol"] for p in positions
+                 if _norm_text(p.get("description")) == needle]
+        if len(exact) == 1:
+            return {"symbol": exact[0], "how": "název", "candidates": []}
+
+        # Prefix both ways: the sheet value may be truncated, or it may carry
+        # a suffix the description lacks ("Evolution AB (publ)" vs "EVOLUTION AB").
+        prefix = []
+        for p in positions:
+            desc = _norm_text(p.get("description"))
+            if desc and (desc.startswith(needle) or needle.startswith(desc)):
+                prefix.append(p["symbol"])
+        if len(prefix) == 1:
+            return {"symbol": prefix[0], "how": "částečný název", "candidates": []}
+        if len(prefix) > 1:
+            return {"symbol": None, "how": "víc shod", "candidates": sorted(prefix)}
+
+        scored = sorted(
+            ((SequenceMatcher(None, needle, _norm_text(p.get("description"))).ratio(),
+              p["symbol"]) for p in positions),
+            key=lambda t: (-t[0], t[1]),
+        )
+        if scored:
+            best_score, best_sym = scored[0]
+            runner_up = scored[1][0] if len(scored) > 1 else 0.0
+            if best_score >= _MATCH_THRESHOLD and (best_score - runner_up) >= _MATCH_MARGIN:
+                return {"symbol": best_sym, "how": f"podobnost {best_score:.0%}",
+                        "candidates": []}
+            out["candidates"] = [s for _, s in scored[:5]]
+            out["how"] = f"nejisté (nejblíž {best_sym}, {best_score:.0%})"
+        else:
+            out["how"] = "žádné pozice k porovnání"
+        return out
+
+    def parse_sell_targets(self, text: str,
+                           positions: Optional[List[Dict[str, Any]]] = None
+                           ) -> Dict[str, Any]:
+        """Parse a pasted sheet into rows. Pure — never writes.
+
+        Returns ``{"rows": [...], "skipped": [...], "header_used": bool}``.
+        Every row carries what was understood so the preview can show it and
+        the user can correct the symbol before anything is stored.
+        """
+        positions = positions if positions is not None else []
+        lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+        if len(lines) > MAX_IMPORT_LINES:
+            raise ValueError(
+                f"Příliš mnoho řádků ({len(lines)}), maximum je {MAX_IMPORT_LINES}."
+            )
+
+        rows: List[Dict[str, Any]] = []
+        skipped: List[Dict[str, Any]] = []
+        cols: Optional[Dict[str, int]] = None
+
+        first = _split_import_line(lines[0]) if lines else []
+        if first and self._looks_like_header(first):
+            cols = self._map_header(first)
+            lines = lines[1:]
+
+        for offset, line in enumerate(lines, start=2 if cols else 1):
+            fields = _split_import_line(line)
+            try:
+                raw_symbol, raw_price, raw_qty = self._pick_fields(fields, cols)
+                price = _parse_decimal_cz(raw_price, "cílová cena")
+                if price <= 0:
+                    raise ValueError("Cílová cena musí být kladné číslo.")
+            except ValueError as exc:
+                # Only a missing/broken PRICE loses the row — that is the one
+                # thing a sell zone cannot do without.
+                skipped.append({"line": offset, "raw": line.strip(), "error": str(exc)})
+                continue
+            try:
+                qty = self._optional_quantity(raw_qty)
+                qty_note = ""
+            except ValueError:
+                # Share counts in the source sheet are known to be unreliable;
+                # keep the price and flag the quantity rather than dropping it.
+                qty, qty_note = None, f"počet kusů nepřečten ({raw_qty.strip()[:20]})"
+            match = self.resolve_target_symbol(raw_symbol, positions)
+            rows.append({
+                "line": offset, "raw_symbol": raw_symbol.strip(),
+                "symbol": match["symbol"], "match": match["how"],
+                "candidates": match["candidates"],
+                "price": str(price), "quantity": qty, "quantity_note": qty_note,
+            })
+        return {"rows": rows, "skipped": skipped, "header_used": cols is not None}
+
+    def _looks_like_header(self, fields: List[str]) -> bool:
+        """A header row names columns and carries no parseable number."""
+        joined = " ".join(_norm_text(f) for f in fields)
+        if not self._header_matches(joined, self._HDR_SYMBOL + self._HDR_PRICE):
+            return False
+        for f in fields:
+            try:
+                _parse_decimal_cz(f, "x")
+                return False       # a number ⇒ this is data, not a header
+            except ValueError:
+                continue
+        return True
+
+    @staticmethod
+    def _header_matches(name: str, keywords) -> bool:
+        """Token-prefix match: a keyword must start a word of the header.
+
+        Prefix rather than equality so Czech case endings still hit ("Kusů" →
+        "kusu" matches "kus"); anchored to a word start rather than a bare
+        substring so "ks" cannot fire inside an unrelated word.
+        """
+        return any(tok.startswith(k) for tok in name.split() for k in keywords)
+
+    def _map_header(self, fields: List[str]) -> Dict[str, int]:
+        cols: Dict[str, int] = {}
+        for idx, field in enumerate(fields):
+            name = _norm_text(field)
+            if not name:
+                continue
+            # "% k prodejní zóně" is a computed column — never let it win the
+            # price slot just because it mentions the zone.
+            is_pct = "%" in field or name.startswith("procent")
+            if "symbol" not in cols and self._header_matches(name, self._HDR_SYMBOL):
+                cols["symbol"] = idx
+            elif (not is_pct and "price" not in cols
+                    and self._header_matches(name, self._HDR_PRICE)):
+                cols["price"] = idx
+            elif "quantity" not in cols and self._header_matches(name, self._HDR_QTY):
+                cols["quantity"] = idx
+        return cols
+
+    @staticmethod
+    def _pick_fields(fields: List[str], cols: Optional[Dict[str, int]]):
+        def at(i):
+            return fields[i] if 0 <= i < len(fields) else ""
+        if cols:
+            # Quantity is optional: a sheet with only names and prices is a
+            # perfectly good sell plan.
+            missing = [n for n in ("symbol", "price") if n not in cols]
+            if missing:
+                raise ValueError(
+                    "V hlavičce chybí sloupec: " + ", ".join(missing) + "."
+                )
+            return (at(cols["symbol"]), at(cols["price"]),
+                    at(cols["quantity"]) if "quantity" in cols else "")
+        if len(fields) < 2:
+            raise ValueError("Řádek musí mít aspoň 2 sloupce: symbol a cenu.")
+        return fields[0], fields[1], fields[2] if len(fields) > 2 else ""
+
+    def import_sell_targets(self, rows: List[Dict[str, Any]],
+                            replace: bool = False) -> Dict[str, Any]:
+        """Write reviewed rows into the store.
+
+        Takes the rows the user CONFIRMED in the preview, not raw text — so
+        what gets written is exactly what was on screen, with no re-parse in
+        between. Per symbol the paste replaces the OPEN zones and keeps the
+        ones already marked sold; otherwise re-importing the sheet would
+        duplicate every rung. ``replace=True`` wipes the store first.
+        """
+        clean: List[Dict[str, Any]] = []
+        for row in rows:
+            symbol = (row.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            price = _parse_decimal_cz(row.get("price"), "cílová cena")
+            if price <= 0:
+                raise ValueError(f"Neplatná cílová cena u {symbol}.")
+            clean.append({"symbol": symbol, "price": str(price),
+                          "quantity": self._optional_quantity(row.get("quantity")),
+                          "note": (row.get("note") or "").strip()})
+        if not clean:
+            raise ValueError("Není co importovat — vyber aspoň jeden řádek.")
+
+        self.runner.run_sync(self._write_import, clean, bool(replace), timeout=60)
+        return {"imported": len(clean),
+                "symbols": sorted({r["symbol"] for r in clean})}
+
+    def _write_import(self, rows: List[Dict[str, Any]], replace: bool) -> None:
+        def _mutate(store: Dict[str, Any]) -> None:
+            if replace:
+                store["targets"] = {}
+            targets = store["targets"]
+            touched = {r["symbol"] for r in rows}
+            for symbol in touched:
+                entry = targets.setdefault(symbol, {"note": "", "isin": None, "zones": []})
+                # Keep sold rungs — they are history, not plan.
+                entry["zones"] = [z for z in entry.get("zones", []) if z.get("done_at")]
+            for r in rows:
+                entry = targets[r["symbol"]]
+                if len(entry["zones"]) >= MAX_ZONES_PER_SYMBOL:
+                    continue
+                if any(str(z.get("price")) == r["price"] for z in entry["zones"]):
+                    continue
+                entry["zones"].append({
+                    "id": uuid.uuid4().hex[:8], "price": r["price"],
+                    "quantity": r["quantity"], "currency": None, "note": r["note"],
+                    "created_at": _utc_now_iso(), "reached_at": None,
+                    "reached_price": None, "acknowledged_at": None, "done_at": None,
+                })
+            for symbol in touched:
+                targets[symbol]["zones"] = self._sorted_zones(targets[symbol]["zones"])
+                if not targets[symbol]["zones"]:
+                    targets.pop(symbol, None)
+
+        self._write_sell_targets(_mutate)
+        logger.info(f"Sell targets imported: {len(rows)} zones")
+
+    def _write_sell_targets(self, mutator) -> None:
+        """Read-modify-write under a DEDICATED lock.
+
+        Not the global ``engine_file_lock()``: that one exists because the
+        pipeline reads ``user_classifications.json``. Nothing but this feature
+        touches the sell-target store, so sharing the engine lock would make
+        saving a zone block behind a multi-minute run — and block the run.
+        """
+        with engine_file_lock(lock_file=self.data_dir / SELL_TARGETS_LOCK):
+            store = self.load_sell_targets()
+            mutator(store)
+            store["version"] = SELL_TARGETS_VERSION
+            store["updated_at"] = _utc_now_iso()
+            self.sell_targets_path.parent.mkdir(parents=True, exist_ok=True)
+            dump_json(store, self.sell_targets_path)
 
     # ------------------------------------------------------------------
     # Reading persisted runs

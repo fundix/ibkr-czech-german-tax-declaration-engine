@@ -5,6 +5,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
@@ -400,6 +401,184 @@ def classify_count(request: Request, year: Optional[int] = None):
     except ValueError:
         return HTMLResponse("")
     return _tpl(request, "partials/classify_count.html", year=active, scan=scan)
+
+
+# ---------------------------------------------------------------------------
+# Sell targets (prodejní zóny)
+# ---------------------------------------------------------------------------
+
+def _targets_run(svc, run_id: Optional[str] = None):
+    """Resolve the run the ladder is read against.
+
+    Top-level page, so there is no run in the URL: default to the newest run
+    of the highest tax year, exactly as get_dashboard_valuation() does. An
+    explicit ?run_id= wins. Returns (run_id, meta) — both None when no run
+    exists yet, which the page renders as an empty-state, not an error.
+    """
+    if run_id:
+        meta = svc.get_run(run_id)
+        if meta is not None:
+            return run_id, meta
+    latest = (svc.dashboard_overview() or {}).get("latest")
+    if not latest:
+        return None, None
+    return latest.get("run_id"), latest
+
+
+@router.get("/targets", response_class=HTMLResponse)
+def targets(request: Request, run_id: Optional[str] = None, saved: str = "",
+            deleted: str = "", error: str = "", imported: int = 0):
+    svc = _svc(request)
+    active_run, meta = _targets_run(svc, run_id)
+    try:
+        overview = svc.sell_targets_overview(active_run)
+    except Exception as exc:  # noqa: BLE001 — a quote outage must not 500 the page
+        logger.exception("Sell-target overview failed")
+        return _tpl(request, "partials/job_error.html", error=f"Načtení selhalo: {exc}")
+    pf = svc.load_portfolio(active_run) if active_run else None
+    held = {p["symbol"]: p for p in (pf or {}).get("positions", [])
+            if Decimal(str(p.get("quantity_long") or 0)) > 0}
+    # Lot buckets per planned symbol, so each ladder can offer a lot picker.
+    lots = {r["symbol"]: svc.position_lots(active_run, r["symbol"])
+            for r in overview["rows"]} if active_run else {}
+    # Options are excluded from the symbol picker: their key embeds expiry and
+    # strike, so a ladder on one goes stale with the contract.
+    choices = sorted(s for s, p in held.items() if p.get("category") != "OPTION")
+    return _tpl(request, "targets.html", overview=overview, rows=overview["rows"],
+                lots=lots, meta=meta, run_id=active_run, symbol_choices=choices,
+                saved=saved, deleted=deleted, error=error, imported=imported)
+
+
+@router.post("/targets/zone")
+def targets_save_zone(request: Request, symbol: str = Form(...),
+                      price: str = Form(...), quantity: str = Form(""),
+                      zone_id: str = Form(""), note: str = Form(""),
+                      lot_acquired: str = Form("")):
+    svc = _svc(request)
+    currency = isin = None
+    active_run, _ = _targets_run(svc)
+    for pos in (svc.load_portfolio(active_run) or {}).get("positions", []) if active_run else []:
+        if pos.get("symbol") == symbol.strip():
+            currency, isin = pos.get("eoy_currency"), pos.get("isin")
+            break
+    try:
+        svc.save_sell_zone(symbol, price, quantity, zone_id=zone_id.strip() or None,
+                           note=note, currency=currency, isin=isin,
+                           lot_acquired=lot_acquired)
+    except ValueError as exc:
+        return RedirectResponse(f"/targets?error={quote_plus(str(exc))}", status_code=303)
+    sym = quote_plus(symbol.strip())
+    return RedirectResponse(f"/targets?saved={sym}#s-{sym}", status_code=303)
+
+
+@router.post("/targets/zone/delete")
+def targets_delete_zone(request: Request, symbol: str = Form(...),
+                        zone_id: str = Form(...)):
+    _svc(request).delete_sell_zone(symbol.strip(), zone_id)
+    return RedirectResponse(f"/targets?deleted={quote_plus(symbol.strip())}",
+                            status_code=303)
+
+
+@router.post("/targets/zone/state")
+def targets_zone_state(request: Request, symbol: str = Form(...),
+                       zone_id: str = Form(...), action: str = Form(...)):
+    svc = _svc(request)
+    try:
+        svc.set_zone_state(symbol.strip(), zone_id, action)
+    except ValueError as exc:
+        return RedirectResponse(f"/targets?error={quote_plus(str(exc))}", status_code=303)
+    sym = quote_plus(symbol.strip())
+    return RedirectResponse(f"/targets#s-{sym}", status_code=303)
+
+
+@router.post("/targets/symbol/delete")
+def targets_delete_symbol(request: Request, symbol: str = Form(...)):
+    _svc(request).delete_sell_target(symbol.strip())
+    return RedirectResponse(f"/targets?deleted={quote_plus(symbol.strip())}",
+                            status_code=303)
+
+
+@router.get("/targets/badge", response_class=HTMLResponse)
+def targets_badge(request: Request):
+    """Lazy HTMX badge for the nav — a store read only, no quotes.
+
+    It therefore shows the state of the last evaluation, which happens when
+    the dashboard or the portfolio page loads live prices.
+    """
+    count = _svc(request).sell_alert_count()
+    if not count:
+        return HTMLResponse("")        # empty so the nav does not jitter
+    return _tpl(request, "partials/targets_badge.html", count=count)
+
+
+@router.get("/targets/tax/{symbol}/{zone_id}", response_class=HTMLResponse)
+def targets_zone_tax(request: Request, symbol: str, zone_id: str,
+                     run_id: Optional[str] = None):
+    """On-demand tax impact of one zone — one click, one simulation."""
+    svc = _svc(request)
+    active_run, _ = _targets_run(svc, run_id)
+    try:
+        impact = svc.zone_tax_impact(active_run, symbol, zone_id)
+    except (ValueError, ArithmeticError) as exc:
+        return _tpl(request, "partials/job_error.html", error=str(exc))
+    return _tpl(request, "partials/targets_tax.html", **impact)
+
+
+@router.get("/targets/import", response_class=HTMLResponse)
+def targets_import_form(request: Request, run_id: Optional[str] = None):
+    svc = _svc(request)
+    active_run, meta = _targets_run(svc, run_id)
+    return _tpl(request, "targets_import.html", meta=meta, run_id=active_run)
+
+
+@router.post("/targets/import/preview", response_class=HTMLResponse)
+def targets_import_preview(request: Request, text: str = Form(""),
+                           run_id: str = Form("")):
+    """Step 1 of 2: parse and show what was understood, write nothing.
+
+    A 25-row paste with one bad decimal must never half-import, and pasted
+    company names need a chance to be corrected before they become a plan.
+    """
+    svc = _svc(request)
+    active_run, _ = _targets_run(svc, run_id or None)
+    positions = svc._sellable_positions(svc.load_portfolio(active_run) if active_run else None)
+    try:
+        parsed = svc.parse_sell_targets(text, positions)
+    except ValueError as exc:
+        return _tpl(request, "partials/job_error.html", error=str(exc))
+    if not parsed["rows"] and not parsed["skipped"]:
+        return _tpl(request, "partials/job_error.html",
+                    error="Nepodařilo se přečíst žádný řádek. Zkopíruj tabulku "
+                          "včetně hlavičky (oddělovač tabulátor nebo středník).")
+    return _tpl(request, "partials/targets_import_preview.html", parsed=parsed,
+                symbol_choices=sorted(p["symbol"] for p in positions))
+
+
+@router.post("/targets/import/apply")
+def targets_import_apply(request: Request,
+                         symbol: List[str] = Form([]),
+                         price: List[str] = Form([]),
+                         quantity: List[str] = Form([]),
+                         include: List[int] = Form([]),
+                         replace: str = Form("")):
+    """Step 2 of 2: store exactly the rows shown in the preview.
+
+    Parallel lists are full-length; `include` carries the indices still
+    ticked, so unchecking a row cannot shift the others out of alignment.
+    """
+    svc = _svc(request)
+    keep = set(include)
+    rows = [
+        {"symbol": symbol[i], "price": price[i], "quantity": quantity[i]}
+        for i in sorted(keep)
+        if i < len(symbol) and i < len(price) and i < len(quantity)
+    ]
+    try:
+        result = svc.import_sell_targets(rows, replace=bool(replace))
+    except ValueError as exc:
+        return RedirectResponse(f"/targets/import?error={quote_plus(str(exc))}",
+                                status_code=303)
+    return RedirectResponse(f"/targets?imported={result['imported']}", status_code=303)
 
 
 # ---------------------------------------------------------------------------

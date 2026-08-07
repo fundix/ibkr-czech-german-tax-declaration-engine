@@ -35,9 +35,14 @@
   // <tr> whose cells drive sorting and column-based filtering. A table with more
   // than one <tbody> is treated as grouped (one unit per <tbody>), so detail
   // rows always travel with their parent record.
+  //
+  // `data-grouped` forces that reading even with a single <tbody>. Inferring it
+  // from the count alone breaks on a one-record table: the record's detail row
+  // would become a unit of its own, so it could be sorted away from its parent
+  // and it inflated the "N of M" counter.
   function tableUnits(table) {
     var bodies = table.tBodies;
-    if (bodies.length > 1) {
+    if (bodies.length > 1 || (bodies.length === 1 && table.hasAttribute("data-grouped"))) {
       var groups = [];
       for (var i = 0; i < bodies.length; i++) {
         if (bodies[i].rows.length) {
