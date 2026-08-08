@@ -249,10 +249,22 @@ class RawStatementOfFundsRecord(RawBaseRecord):
     * **Movement rows** — everything else. ``amount == debit + credit``, with
       debit negative and credit positive.
 
-    A currency conversion is TWO movement rows sharing ``trade_id`` and
-    ``transaction_id``, one per leg; ``activity_code`` is ``FOREX``. The
-    descriptions differ between the legs ("Traded" vs "Trading" Currency Leg),
-    so pairing must go through the IDs, never the text.
+    A currency conversion is **two or three** movement rows sharing
+    ``trade_id`` — one per currency leg, plus, usually, the commission booked
+    in whatever currency it is billed in. ``activity_code`` is ``FOREX`` on all
+    of them.
+
+    ``transaction_id`` is **not** the join key and neither is the description:
+
+    * the commission has its own transaction id on some trades and shares the
+      legs' id on others (real trades 1466896593 and 1295097860 respectively),
+      so grouping on it turned 17 real conversions into 26 apparent ones;
+    * the two legs already describe themselves differently ("Trad**ed**" vs
+      "Trad**ing** Currency Leg"), so the text is nothing to build on either.
+
+    What identifies the legs is the **pair symbol** that one leg always
+    carries: ``USD.CZK`` names both currencies. See
+    ``statement_of_funds_parser.conversions``, which reassembles them.
     """
     client_account_id: Optional[str] = Field(None, alias="ClientAccountID")
     currency_primary: str = Field(alias="CurrencyPrimary")
