@@ -39,7 +39,7 @@
       title="Odhadované datum pořízení — časový test nelze vyhodnotit.">? ověřit ručně</span>
   {%- elif z.exempt_quantity >= z.sellable %}<span class="badge ok"
       title="Celý objem této zóny je po tříletém testu.">osvobozeno</span>
-  {%- elif z.exempt_quantity > 0 %}<span class="badge warn">{{ z.exempt_quantity }} z {{ z.sellable }} ks</span>
+  {%- elif z.exempt_quantity > 0 %}<span class="badge warn">{{ z.exempt_quantity | qty }} z {{ z.sellable | qty }} ks</span>
   {%- else %}<span class="badge">zdanitelné</span>{%- endif %}
   {%- if z.exempt_from %}<div class="note">celé od {{ z.exempt_from }}
     ({{ z.days_remaining }} dní)</div>{% endif %}
@@ -64,7 +64,7 @@
             <option value="">— kterýkoli lot (FIFO) —</option>
             {% for b in row_lots %}
             <option value="{{ b.acquired }}" {{ "selected" if z.lot_acquired == b.acquired }}>
-              {{ b.acquired }} · {{ b.quantity }} ks
+              {{ b.acquired }} · {{ b.quantity | qty }} ks
               {%- if b.unit_cost_eur %} · {{ "%.2f"|format(b.unit_cost_eur) }} EUR{% endif %}
               {%- if b.exempt is true %} · osvobozeno{% elif b.exempt is none %} · ?{% endif %}
             </option>
@@ -77,6 +77,9 @@
                  placeholder="poznámka">
           <button type="submit" class="small">Uložit</button>
         </form>
+        {# Each action is its own <form>, so they need a flex row around them to
+           sit side by side instead of one per line. #}
+        <div class="action-row">
         <form method="post" action="/targets/zone/delete" class="inline-form"
               onsubmit="return confirm('Smazat zónu {{ z.price }} u {{ row.symbol }}?');">
           <input type="hidden" name="symbol" value="{{ row.symbol }}">
@@ -113,8 +116,9 @@
         {% if z.lot_missing %}<span class="badge warn"
           title="Navázaný nákup už mezi otevřenými loty není — nejspíš je prodaný.">lot chybí</span>{% endif %}
         {% if z.short_of_plan and not z.lot_missing %}<span class="badge warn"
-          title="Předchozí zóny žebříku už spotřebovaly část kusů.">zbývá jen {{ z.sellable }} ks</span>{% endif %}
+          title="Předchozí zóny žebříku už spotřebovaly část kusů.">zbývá jen {{ z.sellable | qty }} ks</span>{% endif %}
         {% if z.currency_mismatch %}<span class="badge warn">jiná měna než kotace</span>{% endif %}
+        </div>
         <div id="tax-{{ z.id }}" class="zone-tax"></div>
       </td>
     </tr>
@@ -131,18 +135,20 @@
           <select name="lot_acquired" aria-label="Navázat na nákup">
             <option value="">— kterýkoli lot (FIFO) —</option>
             {% for b in row_lots %}
-            <option value="{{ b.acquired }}">{{ b.acquired }} · {{ b.quantity }} ks
+            <option value="{{ b.acquired }}">{{ b.acquired }} · {{ b.quantity | qty }} ks
               {%- if b.unit_cost_eur %} · {{ "%.2f"|format(b.unit_cost_eur) }} EUR{% endif %}</option>
             {% endfor %}
           </select>
           <input type="text" name="note" placeholder="poznámka" size="16">
           <button type="submit" class="small">Přidat zónu</button>
         </form>
-        <form method="post" action="/targets/symbol/delete" class="inline-form"
-              onsubmit="return confirm('Smazat celý prodejní plán pro {{ row.symbol }}?');">
-          <input type="hidden" name="symbol" value="{{ row.symbol }}">
-          <button type="submit" class="small danger">Smazat titul</button>
-        </form>
+        <div class="action-row">
+          <form method="post" action="/targets/symbol/delete" class="inline-form"
+                onsubmit="return confirm('Smazat celý prodejní plán pro {{ row.symbol }}?');">
+            <input type="hidden" name="symbol" value="{{ row.symbol }}">
+            <button type="submit" class="small danger">Smazat titul</button>
+          </form>
+        </div>
       </td>
     </tr>
   </tbody>
@@ -187,7 +193,8 @@
         <th data-no-sort></th><th>Titul</th>
         <th class="num">Cena teď</th><th class="num">Příští zóna</th>
         <th class="num">% k zóně</th><th class="num">Ks</th>
-        <th class="num" title="Celá částka, kterou za prodej dostanete (kusy × cíl), ne zisk. Zisk a daň spočítá tlačítko „Daň?“ u zóny — potřebuje k tomu nabývací cenu každého lotu.">Hrubý příjem Kč</th>
+        <th class="num" title="Celá částka, kterou za prodej dostanete (kusy × cíl) — ne zisk.">Hrubý příjem Kč</th>
+        <th class="num" title="Odhad zisku: hrubý příjem minus nabývací cena právě těch kusů, které zóna prodává. Dnešním kurzem ČNB, bez daně — tu spočítá tlačítko „Daň?“ u zóny.">Odhad zisku Kč</th>
         <th data-no-sort>Časový test</th>
       </tr>
     </thead>
@@ -223,28 +230,55 @@
         </td>
         <td class="num">
           {%- if row.next_zone -%}
-            {{ row.next_zone.sellable }}
+            {{ row.next_zone.sellable | qty }}
             {%- if row.next_zone.unspecified %} <span class="muted"
               title="Zóna neurčuje počet kusů — zobrazeno vše, co po závazných zónách zbývá.">vše</span>{% endif -%}
           {%- else -%}–{%- endif -%}
         </td>
-        <td class="num">{{ row.proceeds_czk | czk if row.proceeds_czk else "–" }}</td>
+        {# All five money/quantity columns describe the SAME rung — the next one.
+           The whole-plan totals ride along as a second line once more than one
+           rung is open, rather than silently replacing the next rung's figure. #}
+        <td class="num">
+          {{- row.next_zone.proceeds_czk | czk if row.next_zone and row.next_zone.proceeds_czk is not none else "–" -}}
+          {%- if row.open_zone_count > 1 and row.proceeds_czk %}
+            <div class="note" title="Součet všech {{ row.open_zone_count }} otevřených zón tohoto titulu.">celý plán {{ row.proceeds_czk | czk }}</div>
+          {%- endif -%}
+        </td>
+        <td class="num">
+          {%- if row.next_zone and row.next_zone.gain_czk is not none -%}
+            <span class="{{ 'neg' if row.next_zone.gain_czk < 0 }}">{{ row.next_zone.gain_czk | czk }}</span>
+          {%- else -%}
+            <span class="muted" title="Bez nabývací ceny lotů nelze zisk spočítat — titul nedržíš, nebo běh nemá lot data.">–</span>
+          {%- endif -%}
+          {%- if row.open_zone_count > 1 and row.plan_gain_czk is not none %}
+            <div class="note {{ 'neg' if row.plan_gain_czk < 0 }}" title="Součet všech {{ row.open_zone_count }} otevřených zón tohoto titulu.">celý plán {{ row.plan_gain_czk | czk }}</div>
+          {%- endif -%}
+        </td>
         <td>{% if row.next_zone %}{{ tt_badge(row.next_zone) }}{% else %}<span class="muted">–</span>{% endif %}</td>
       </tr>
       <tr id="zones-{{ loop.index }}" class="hidden lots-row">
         <td></td>
-        <td colspan="7">{{ zone_forms(row, lots.get(row.symbol, [])) }}</td>
+        <td colspan="8">{{ zone_forms(row, lots.get(row.symbol, [])) }}</td>
       </tr>
     </tbody>
     {% endfor %}
   </table>
   <p class="note">Řazeno podle vzdálenosti k nejbližší zóně.
     <code>% k zóně</code> = (cíl − aktuální cena) / aktuální cena; záporná hodnota
-    znamená, že cena už zónu překonala.
-    <code>Hrubý příjem Kč</code> = kusy × cílová cena, dnešním kurzem ČNB —
-    <strong>celá částka z prodeje, ne zisk</strong>. Zisk by potřeboval nabývací
-    cenu každého lotu přepočtenou kurzem ke dni nákupu; to spočítá tlačítko
-    <code>Daň?</code> u konkrétní zóny, včetně časového testu a odhadu daně.</p>
+    znamená, že cena už zónu překonala. Všechny sloupce se týkají té
+    <strong>nejbližší</strong> zóny; u titulu s víc otevřenými zónami je pod
+    částkou druhým řádkem součet celého žebříku.
+    <code>Hrubý příjem Kč</code> = kusy × cílová cena, tedy
+    <strong>celá částka z prodeje, ne zisk</strong>.
+    <code>Odhad zisku Kč</code> = ten příjem minus nabývací cena právě těch
+    kusů, které zóna prodává (FIFO, nebo navázaný nákup). Obojí dnešním kurzem
+    ČNB a <strong>před daní</strong> — časový test, roční limit a odhad daně
+    ukáže tlačítko <code>Daň?</code> u konkrétní zóny, které počítá ze stejných
+    lotů, takže se čísla nerozejdou.</p>
+  <p class="note">Odhad zisku převádí nabývací cenu dnešním kurzem, ne kurzem
+    ke dni nákupu. U skutečného prodeje se výdaj přepočítává kurzem k datu
+    nabytí (§10, NSS 2 Afs 4/2019-35), takže u starších lotů se odhad o kurzový
+    pohyb liší — stejně jako simulace v <code>Daň?</code>.</p>
   <p class="note">Zóna navázaná na konkrétní nákup si rezervuje právě ten lot,
     zóna s uvedeným počtem kusů si ukrojí z toho, co zbylo — takže se stejné akcie
     nezapočítají dvakrát. Zóna <em>bez</em> počtu kusů nic nerezervuje a ukazuje

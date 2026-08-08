@@ -1,5 +1,5 @@
 <section class="card sim-card">
-  <h2>{{ sim.symbol }} — prodej {{ sim.quantity }} ks @ {{ sim.price | czk }} {{ sim.currency }}
+  <h2>{{ sim.symbol }} — prodej {{ sim.quantity | qty }} ks @ {{ sim.price | czk }} {{ sim.currency }}
     <span class="badge muted">{{ "živá cena" if sim.price_source == "live" else ("cena k 31.12." if sim.price_source == "eoy" else "ruční cena") }}</span>
   </h2>
 
@@ -28,7 +28,7 @@
       {% for lot in sim.consumed %}
       <tr>
         <td>{{ lot.acquisition_date }}{% if lot.estimated %} <span class="badge warn">odhad</span>{% endif %}</td>
-        <td class="num">{{ lot.quantity }}</td>
+        <td class="num">{{ lot.quantity | qty }}</td>
         <td class="num">{{ lot.cost_czk | czk }}</td>
         <td class="num">{{ lot.proceeds_czk | czk }}</td>
         <td class="num {{ 'neg' if lot.gain_czk and lot.gain_czk < 0 }}">{{ lot.gain_czk | czk }}</td>

@@ -16,6 +16,8 @@
         <td class="num">{{ a.quantity or "vše" }}</td>
         <td>{{ (a.reached_at or "")[:16] | replace("T", " ") }}</td>
         <td>
+          {# Three separate <form>s — a flex row keeps them side by side. #}
+          <div class="action-row">
           <form method="post" action="/targets/zone/state" class="inline-form">
             <input type="hidden" name="symbol" value="{{ a.symbol }}">
             <input type="hidden" name="zone_id" value="{{ a.zone_id }}">
@@ -35,6 +37,7 @@
             <button type="submit" class="small"
                     title="Vrátit zónu do hlídání: smaže značku dosažení, takže může spustit alert znovu. Ceny ani kusů se nedotkne.">Zrušit dosažení</button>
           </form>
+          </div>
         </td>
       </tr>
       {% endfor %}
