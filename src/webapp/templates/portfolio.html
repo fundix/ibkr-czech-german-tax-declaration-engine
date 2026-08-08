@@ -79,13 +79,25 @@
         <td></td>
         <td colspan="7">
           <table class="lots">
-            <thead><tr><th>Pořízeno</th><th class="num">Kusů</th><th class="num">Cena/ks EUR</th><th>Osvobozeno od</th><th>Zbývá</th></tr></thead>
+            <thead><tr><th>Pořízeno</th><th class="num">Kusů</th>
+              <th class="num" title="Co jsi za kus skutečně zaplatil, v měně obchodu (včetně komise).">Cena/ks</th>
+              <th class="num" title="Náklad celého lotu v korunách, kurzem ČNB ke dni nabytí — tedy výdaj podle §10. Počítá se přímo z měny obchodu, bez eurového mezikroku.">Náklad Kč</th>
+              <th class="num" title="Interní přepočet enginu. Engine počítá v eurech (vznikl jako německý), takže tohle je tvůj nákup převedený na eura kurzem ke dni nabytí — ne cena, kterou jsi platil.">Cena/ks EUR</th>
+              <th>Osvobozeno od</th><th>Zbývá</th></tr></thead>
             <tbody>
               {% for lot in pos.lots %}
               <tr>
                 <td>{{ lot.acquisition_date }}{% if lot.acquisition_estimated %} <span class="badge warn" title="Syntetické datum ze SOY pozice — skutečné datum nákupu ověřte ručně">odhad</span>{% endif %}</td>
-                <td class="num">{{ lot.quantity }}</td>
-                <td class="num">{{ lot.unit_cost_eur | czk }}</td>
+                <td class="num">{{ lot.quantity | qty }}</td>
+                <td class="num">
+                  {%- if lot.unit_cost_original is not none -%}
+                    {{ lot.unit_cost_original | czk }} <span class="muted">{{ lot.cost_currency }}</span>
+                  {%- else -%}
+                    <span class="muted" title="Tento lot nemá jednu původní cenu — přecenil ho vážený průměr, zdanitelná fúze nebo kapitálová splátka. Platí eurová hodnota vpravo.">–</span>
+                  {%- endif -%}
+                </td>
+                <td class="num">{{ lot.total_cost_czk | czk if lot.total_cost_czk is not none else "–" }}</td>
+                <td class="num muted">{{ lot.unit_cost_eur | czk }}</td>
                 <td>{{ lot.exempt_from or "–" }}</td>
                 <td>
                   {% if lot.tt_status == "exempt" %}<span class="badge ok">osvobozeno ✓</span>
@@ -105,8 +117,17 @@
   </table>
   <p class="note">Ocenění pochází z MarkPrice v souboru pozic (stav k 31. 12.). Odpočet časového testu
     se počítá z FIFO lotů podle §4/1/u ZDP (3 roky; nákupy před 2014 podle 6měsíčního testu) —
-    prodej je osvobozen až PO uvedeném datu. U lotů s odhadnutým datem pořízení test ověřte ručně.
-    Živé ceny a simulace prodeje přijdou v další fázi.</p>
+    prodej je osvobozen až PO uvedeném datu. U lotů s odhadnutým datem pořízení test ověřte ručně.</p>
+  <p class="note">U lotu jsou <strong>tři</strong> nákladové ceny, protože každá
+    odpovídá na jinou otázku. <code>Cena/ks</code> je to, co jsi skutečně zaplatil,
+    v měně obchodu a včetně komise. <code>Náklad Kč</code> je výdaj podle §10 —
+    celý lot kurzem ČNB ke dni nabytí, počítaný <strong>přímo z měny obchodu</strong>,
+    takže obchází eurový mezikrok. <code>Cena/ks EUR</code> je interní hodnota
+    enginu: ten vznikl jako německý a celý FIFO ledger počítá v eurech, takže je
+    to tvůj nákup převedený na eura kurzem ke dni nabytí — ne cena, kterou jsi
+    platil. U lotu přeceněného váženým průměrem, zdanitelnou fúzí nebo kapitálovou
+    splátkou žádná jedna původní cena neexistuje; tam je pomlčka a platí eurová
+    hodnota.</p>
 </section>
 {% endif %}
 {% endblock %}
