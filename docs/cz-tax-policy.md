@@ -17,7 +17,8 @@ Definitive reference for Czech tax rules as implemented in this project. Each ru
 | EUR→CZK for RGL disposals (core pipeline converts to EUR first) | **PARTIAL** — EUR intermediate unavoidable for disposal amounts |
 | Disposal cost basis converted at ACQUISITION-date rate, proceeds at DISPOSAL-date rate (captures FX gain/loss; per NSS 2 Afs 4/2019-35) | **IMPLEMENTED** |
 | Weekend/holiday fallback to last valid rate | **IMPLEMENTED** — `max_fallback_days=7` |
-| Jednotný kurz (annual uniform rate) | **NOT IMPLEMENTED** — `CzFxMode.UNIFORM` raises `NotImplementedError` |
+| Jednotný kurz (annual uniform rate) | **PARTIAL** — `CzFxMode.UNIFORM` uses the GFŘ rates from `uniform_rates.py` (pokyny D-49/D-66/D-75); §10 disposal legs still route through the EUR-enriched amounts, so they inherit the EUR intermediate (M17/M18) |
+| `--cz-fx-mode compare` — both modes scored by final tax | **IMPLEMENTED** — `fx_mode_compare.py` |
 | FxConversionRecord audit trail on every conversion | **IMPLEMENTED** |
 
 ---
@@ -43,6 +44,9 @@ Definitive reference for Czech tax rules as implemented in this project. Each ru
 | Options, CFDs → CZ_10_OPTIONS | **IMPLEMENTED** |
 | Options are derivative instruments, NOT securities under §4/1/u | **IMPLEMENTED** — no time test for options |
 | PrivateSaleAsset → CZ_10_SECURITIES | **IMPLEMENTED** |
+| Lot pairing choice (FIFO / LIFO / weighted average / optimal) | **IMPLEMENTED** — `pairing.py`, `pairing_solver.py`; a private investor may pick, the tool only recommends. `optimal` covers long securities; options, shorts and assets with a mid-year corporate action stay FIFO |
+| Currency disposal (FX conversion) → CZ_10_CURRENCY | **PARTIAL** — each disposal of a foreign currency becomes a `CURRENCY_CONVERSION` item flagged `PENDING_MANUAL_REVIEW`, with the disposed amount at the ČNB daily rate. Outside §10 netting and `included_in_tax_base=False`, so it changes no figure. Conversions *out of* CZK are not disposals — they only establish an acquisition rate |
+| FX gain on a currency disposal (the actual §10 figure) | **NOT IMPLEMENTED** — needs a FIFO over cash. `statement_of_funds_parser.py` reads the opening balances and reassembles the conversions, but nothing consumes it yet, and two tax questions are still open (see `AUDIT_REPORT_2026-07.md` M15) |
 
 ---
 
@@ -61,8 +65,8 @@ confirmed entry cite the paragraph without a letter rather than guessing.
 | Unparseable dates → PENDING_MANUAL_REVIEW | **IMPLEMENTED** |
 | Holding period computed from acquisition_date and event_date when not preset | **IMPLEMENTED** |
 | Time test configurable (enable/disable, custom years) | **IMPLEMENTED** |
-| Pre-2014 acquisition rule (6-month test) | **NOT IMPLEMENTED** |
-| Fund-specific time test rules | **NOT IMPLEMENTED** |
+| Pre-2014 acquisition rule (6-month test) | **PARTIAL** — `pre_2014_rule_enabled`, measured from `holding_period_start` (čl. II bod 5, 344/2013 Sb.); assumes the direct issuer share stayed ≤ 5 %, which the statement cannot confirm — noted on the item |
+| Fund-specific time test rules | **NOT IMPLEMENTED** — fund units take the same 3-year test as any other security |
 
 ---
 
@@ -189,13 +193,14 @@ date is read.
 | Per-country treaty cap: `country_credit_caps` dict | **IMPLEMENTED** — 16 treaties with Sb. citations (12 verified 2026-07-03, SE/CN/HK/KZ added 2026-08-08) |
 | Missing source_country → PENDING_MANUAL_REVIEW, default cap applied | **IMPLEMENTED** |
 | No linked WHT → zero credit record, no crash | **IMPLEMENTED** |
-| Multiple WHT records on one item: first source_country used for cap | **IMPLEMENTED** |
+| Source country for the cap: the item's own `source_country`, else the first WHT record carrying one | **IMPLEMENTED** — the item's country comes from `IssuerCountryCode` and outranks the tax row, which on an ADR names the depositary |
+| Cap rate defaulted rather than verified is flagged (`cap_rate_defaulted`) | **IMPLEMENTED** — 15 % default is indistinguishable from a real 15 % cap otherwise; see below |
 | FTC invariant: `paid = creditable + non_creditable` | **IMPLEMENTED** |
 | Split of `non_creditable` into `treaty_excess_ftc` + `uncredited_ftc` | **IMPLEMENTED** — see below |
 | Final FTC = `min(preliminary, czech_tax_on_foreign_income)` | **IMPLEMENTED** |
 | Czech tax on foreign income: proportional method `gross_tax × (foreign_income / combined_base)` | **IMPLEMENTED** |
 | Per-country FTC aggregation in summary | **IMPLEMENTED** |
-| Treaty-by-treaty verification of cap rates | **IMPLEMENTED** for the 12 treaties in `country_credit_caps`; others fall back to the 15% default |
+| Treaty-by-treaty verification of cap rates | **IMPLEMENTED** for the 16 treaties in `country_credit_caps` (AT, AU, CA, CH, CN, DE, FR, GB, HK, IE, JP, KZ, LU, NL, SE, US); others fall back to the 15 % default |
 
 ### What "not creditable" is made of
 
@@ -255,5 +260,7 @@ cached runs are recomputed rather than served.
 |------|--------|
 | DAP-oriented line codes (CZ_DAP_8_*, CZ_DAP_10_*, etc.) | **IMPLEMENTED** |
 | No recomputation in form mapping layer | **IMPLEMENTED** |
-| Official form line references (ř. XX) | **NOT IMPLEMENTED** — `official_line_ref=None` |
-| PDF/XML DAP generation | **NOT IMPLEMENTED** |
+| Official form line references (ř. XX) | **IMPLEMENTED** — verified 2026-07-03 against DAP vzor č. 30 and Příloha 2/3 vzor č. 21 for period 2025; re-verify when a new vzor is published. `official_line_ref` stays `None` on the lines that have no counterpart on the form |
+| Per-state Příloha 3 sheets (§38f odst. 8) | **IMPLEMENTED** — `per_state_credit` on the liability summary; the sheets sum to ř. 328 |
+| PDF filing-support report | **IMPLEMENTED** — `exporters/pdf_exporter.py`, `--output-pdf`; a podklad for manual filing, not the form itself |
+| Official DAP form (PDF vzor / EPO XML) generation | **NOT IMPLEMENTED** — figures must be typed into the form or EPO by hand |
