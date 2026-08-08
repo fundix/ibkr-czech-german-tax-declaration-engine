@@ -383,7 +383,12 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 #     2025 tax by ~70 CZK); ř. 329 and the per-state sheets changed meaning.
 #     Same inputs, different figures — every earlier run must be recomputed
 #     rather than served from cache.
-_FINGERPRINT_VERSION = "v5"
+# v6: no tax figure changes — the portfolio SNAPSHOT gained fields (each lot's
+#     cost in the currency it was bought in, and in CZK at its acquisition-date
+#     rate). The cache hands back a whole earlier run directory, so without a
+#     bump a recompute would serve a portfolio.json that predates the fields and
+#     the positions page would show dashes forever.
+_FINGERPRINT_VERSION = "v6"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —
@@ -898,7 +903,8 @@ class RunService:
             }
 
         dump_json(
-            self._build_portfolio(processing, tax_year, account_ids=account_ids),
+            self._build_portfolio(processing, tax_year, account_ids=account_ids,
+                                  cz_converter=self._converter_factory()),
             run_dir / "portfolio.json",
         )
 
@@ -1079,13 +1085,17 @@ class RunService:
     _TIME_TEST_CATEGORIES = {"STOCK", "BOND", "INVESTMENT_FUND"}
 
     def _build_portfolio(
-        self, processing, tax_year: int, account_ids: Optional[List[str]] = None
+        self, processing, tax_year: int, account_ids: Optional[List[str]] = None,
+        cz_converter=None,
     ) -> Dict[str, Any]:
         """Distill open FIFO lots into a JSON-safe portfolio snapshot.
 
-        Valuation stays in the position's own currency (EOY mark price from
-        the positions file); cost basis is EUR (engine-internal base). CZK
-        conversion arrives with live quotes in a later phase.
+        Valuation stays in the position's own currency (EOY mark price from the
+        positions file). Cost basis is carried three ways: the engine's EUR
+        figure, what was actually paid in the trade currency, and that amount in
+        CZK at the acquisition-date ČNB rate — computed here, while a converter
+        and the worker's decimal context are already at hand, rather than per
+        request on the portfolio page.
 
         ``account_ids`` tags the snapshot for future multi-account filtering; a
         single-account run stamps every position with that account.
@@ -1093,6 +1103,14 @@ class RunService:
         account_ids = account_ids or [DEFAULT_ACCOUNT]
         single_account = account_ids[0] if len(account_ids) == 1 else None
         cz_cfg = CzTaxConfig()
+        if cz_converter is None:
+            try:
+                cz_converter = self._converter_factory()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"Portfolio snapshot: no ČNB converter ({exc}) — lot costs "
+                    "will carry no CZK figure. Everything else is unaffected."
+                )
         positions = []
         for asset_id, ledger in (processing.fifo_ledgers_by_asset_id or {}).items():
             lots = getattr(ledger, "lots", [])
@@ -1126,6 +1144,15 @@ class RunService:
                     "quantity": lot.quantity,
                     "unit_cost_eur": lot.unit_cost_basis_eur,
                     "total_cost_eur": lot.total_cost_basis_eur,
+                    # What was actually paid, in the currency it was paid in.
+                    # Display and audit only — the engine's figures are all EUR,
+                    # and these are None wherever no single original amount
+                    # exists (weighted average, taxable merger, capital
+                    # repayment). Never feed them into a calculation.
+                    "unit_cost_original": lot.unit_cost_original,
+                    "total_cost_original": lot.total_cost_original,
+                    "cost_currency": lot.cost_currency,
+                    "total_cost_czk": self._lot_cost_czk(cz_converter, lot, acq),
                     "acquisition_estimated": estimated,
                     "holding_period_start_estimated": holding_estimated,
                     # exempt when disposed of strictly AFTER the deadline
@@ -1479,6 +1506,27 @@ class RunService:
             return overview
         return self.runner.run_sync(self._price_options_overview, overview,
                                     timeout=120)
+
+    def _lot_cost_czk(self, converter, lot, acquisition_date) -> Optional[Decimal]:
+        """A lot's cost in CZK at the ČNB rate of its acquisition date.
+
+        Converts **from the trade currency directly** when the lot knows it,
+        which is the §10 treatment of a purchase expense (NSS 2 Afs 4/2019-35)
+        and skips the EUR intermediate the rest of the engine is stuck with. A
+        lot with no original amount — weighted average, taxable merger, capital
+        repayment — falls back to EUR→CZK and inherits that detour; still the
+        right order of magnitude, and better than no figure.
+
+        Display only. The tax layer computes its own expense from the RGL and
+        must not be re-plumbed through this.
+        """
+        if converter is None or acquisition_date is None:
+            return None
+        if lot.total_cost_original is not None and lot.cost_currency:
+            return self._to_czk(converter, lot.total_cost_original,
+                                lot.cost_currency, acquisition_date)
+        return self._to_czk(converter, lot.total_cost_basis_eur, "EUR",
+                            acquisition_date)
 
     def _cz_converter(self):
         """Daily-ČNB converter for 'today' valuations (network-backed cache)."""
@@ -2659,9 +2707,28 @@ class RunService:
                 "acquired": key or None, "quantity": Decimal(0),
                 "cost_eur": Decimal(0), "time_test_deadline": None,
                 "estimated": False,
+                # Merged same-day fills share a currency in practice; a bucket
+                # that somehow mixes two drops the original rather than adding
+                # unlike amounts together.
+                "cost_original": Decimal(0), "cost_currency": None,
+                "cost_czk": Decimal(0), "original_known": True,
             })
             b["quantity"] += qty
             b["cost_eur"] += qty * Decimal(str(lot.get("unit_cost_eur") or 0))
+            original = lot.get("total_cost_original")
+            currency = lot.get("cost_currency")
+            if original is None or not currency:
+                b["original_known"] = False
+            elif b["cost_currency"] in (None, currency):
+                b["cost_currency"] = currency
+                b["cost_original"] += Decimal(str(original))
+            else:
+                b["original_known"] = False
+            czk = lot.get("total_cost_czk")
+            if czk is None:
+                b["cost_czk"] = None
+            elif b["cost_czk"] is not None:
+                b["cost_czk"] += Decimal(str(czk))
             b["estimated"] = b["estimated"] or bool(lot.get("acquisition_estimated"))
             deadline = lot.get("time_test_deadline")
             if deadline:
@@ -2673,6 +2740,11 @@ class RunService:
         out = []
         for b in buckets.values():
             b["unit_cost_eur"] = (b["cost_eur"] / b["quantity"]) if b["quantity"] else None
+            if not b["original_known"] or not b["quantity"]:
+                b["unit_cost_original"] = None
+                b["cost_currency"] = None
+            else:
+                b["unit_cost_original"] = b["cost_original"] / b["quantity"]
             out.append(b)
         out.sort(key=lambda b: b["acquired"] or "")
         return out
