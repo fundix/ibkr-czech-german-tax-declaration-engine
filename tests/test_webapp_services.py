@@ -873,6 +873,26 @@ class TestDividendWithholdingRates:
         assert s["total_creditable_czk"] == Decimal("270.61")
         assert s["total_excess_czk"] == Decimal("209.33")
 
+    def test_a_defaulted_treaty_rate_is_flagged_for_the_page(self, stub_service):
+        """15% is both the default and a real cap, so the column would present
+        an unverified guess exactly like a verified rate."""
+        run = self._run_with(stub_service, [
+            {**self._div("EVO", "1395.52", "418.66", "209.33"),
+             "ftc": {"actual_creditable_czk": "209.33",
+                     "non_creditable_czk": "209.33",
+                     "configured_cap_rate": "0.15",
+                     "cap_rate_defaulted": True}},
+        ])
+        a = stub_service.dividend_summary(run, "daily")["assets"][0]
+        assert a["cap_rate"] == Decimal("0.15")
+        assert a["cap_defaulted"] is True
+
+    def test_a_verified_treaty_rate_is_not_flagged(self, stub_service):
+        run = self._run_with(stub_service, [
+            self._div("PYPL", "408.54", "61.28", "61.28")])
+        assert stub_service.dividend_summary(run, "daily")[
+            "assets"][0]["cap_defaulted"] is False
+
     def test_a_run_without_ftc_records_still_renders(self, stub_service):
         """Older runs predate the per-item ftc block."""
         run = self._run_with(stub_service, [

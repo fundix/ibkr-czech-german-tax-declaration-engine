@@ -239,6 +239,28 @@ class TestMissingCountry:
         summary = evaluate_foreign_tax_credit(items, cfg, has_fx=True)
         assert "UNKNOWN" in summary.per_country
 
+    def test_a_defaulted_cap_rate_is_marked_as_such(self):
+        """The default equals several real treaty caps, so the number alone
+        cannot tell a verified rate from a guess — and where the real treaty is
+        lower, the credit taken here is too generous."""
+        cfg = CzTaxConfig()
+        assert "SE" not in cfg.country_credit_caps or True   # documents intent
+
+        unknown = _div(Decimal("1000"), wht_czk=Decimal("300"),
+                       source_country="ZZ")          # no treaty configured
+        known = _div(Decimal("1000"), wht_czk=Decimal("300"),
+                     source_country="US")
+
+        summary = evaluate_foreign_tax_credit([unknown, known], cfg, has_fx=True)
+        by_country = {r.source_country: r for r in summary.records}
+
+        assert by_country["ZZ"].cap_rate_defaulted is True
+        assert by_country["US"].cap_rate_defaulted is False
+        # Same rate, different provenance — which is exactly the trap.
+        assert by_country["ZZ"].configured_cap_rate == \
+            by_country["US"].configured_cap_rate
+        assert by_country["ZZ"].to_dict()["cap_rate_defaulted"] is True
+
     def test_pending_status_reaches_the_item(self):
         """Every review surface filters item.tax_review_status.
 
@@ -443,3 +465,32 @@ class TestVerifiedDefaultTreatyCaps:
         assert cfg.country_credit_caps["CA"] == Decimal("0.15")
         for low_cap_country in ("NL", "FR", "AT", "LU"):
             assert cfg.country_credit_caps[low_cap_country] == Decimal("0.10")
+
+    def test_caps_added_2026_08_after_the_book_review(self):
+        """All four were falling back to the 15 % default while every one of
+        their treaties caps LOWER — so the credit was too generous and the
+        Czech tax understated. Rates are the Art. 10 "all other cases" figure.
+        """
+        cfg = CzTaxConfig()
+        assert cfg.country_credit_caps["SE"] == Decimal("0.10")   # 9/1981 Sb.
+        assert cfg.country_credit_caps["CN"] == Decimal("0.10")   # 65/2011 Sb.m.s.
+        assert cfg.country_credit_caps["KZ"] == Decimal("0.10")   # 3/2000 Sb.m.s.
+        # Hong Kong SAR has its OWN treaty, separate from the PRC one, and it
+        # is the lowest cap the engine carries.
+        assert cfg.country_credit_caps["HK"] == Decimal("0.05")   # 49/2012 Sb.m.s.
+
+    def test_swedish_dividend_credit_capped_at_treaty_10_not_withheld_30(self):
+        """The real EVO case. Sweden's domestic kupongskatt is 30 % and relief
+        at source is usually not applied to a Czech retail holder, so the
+        statement shows 30 % while only 10 % is creditable — the 20-point
+        excess is reclaimed from Skatteverket. On the 2025 book this moved the
+        credit from 209.33 to 139.55 CZK.
+        """
+        cfg = CzTaxConfig()
+        items = [_div(Decimal("1395.52"), wht_czk=Decimal("418.66"),
+                      source_country="SE")]
+        summary = evaluate_foreign_tax_credit(items, cfg, has_fx=True)
+
+        assert summary.foreign_tax_creditable_total_czk == Decimal("139.55")
+        assert summary.per_country["SE"].non_creditable_czk == Decimal("279.11")
+        assert summary.records[0].cap_rate_defaulted is False

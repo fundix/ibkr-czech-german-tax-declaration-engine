@@ -333,7 +333,13 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 #     lot both change.
 # v4: a stock-for-stock merger is now applied (carry-over or taxable disposal)
 #     instead of aborting the run.
-_FINGERPRINT_VERSION = "v4"
+# v5: option contracts are valued at their multiplier and written legs counted;
+#     a commission rebate lowers the basis instead of raising it; SE/CN/HK/KZ
+#     gained verified treaty caps below the old 15% default (SE alone moves the
+#     2025 tax by ~70 CZK); ř. 329 and the per-state sheets changed meaning.
+#     Same inputs, different figures — every earlier run must be recomputed
+#     rather than served from cache.
+_FINGERPRINT_VERSION = "v5"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —
@@ -3217,7 +3223,7 @@ class RunService:
                 "country": it.get("source_country"), "count": 0,
                 "gross_czk": Decimal(0), "wht_czk": Decimal(0),
                 "creditable_czk": Decimal(0), "excess_czk": Decimal(0),
-                "cap_rate": None,
+                "cap_rate": None, "cap_defaulted": False,
             })
             # The FTC record the engine already attached to the item: how much
             # of the withholding the treaty lets Czechia credit, and what was
@@ -3227,6 +3233,11 @@ class RunService:
             a["excess_czk"] += Decimal(ftc.get("non_creditable_czk") or 0)
             if ftc.get("configured_cap_rate") is not None:
                 a["cap_rate"] = Decimal(ftc["configured_cap_rate"])
+                # A defaulted rate must not be shown as "the treaty rate": the
+                # default equals several real caps, so the number alone hides
+                # whether anyone verified it — and where the real treaty is
+                # lower, the credit taken here is too high.
+                a["cap_defaulted"] = bool(ftc.get("cap_rate_defaulted"))
             total_creditable += Decimal(ftc.get("actual_creditable_czk") or 0)
             total_excess += Decimal(ftc.get("non_creditable_czk") or 0)
             # Backfill: setdefault only looks at the first payment of the year,

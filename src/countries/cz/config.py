@@ -173,6 +173,18 @@ class CzTaxConfig:
         "FR": Decimal("0.10"),  # 79/2005 Sb.m.s.
         "AT": Decimal("0.10"),  # 31/2007 Sb.m.s.
         "LU": Decimal("0.10"),  # 51/2014 Sb.
+        # Added 2026-08-08 after a book review found these four falling back to
+        # the 15 % default while every one of their treaties caps LOWER — so the
+        # credit was too generous and the Czech tax understated. Each rate is
+        # the Art. 10 "all other cases" figure (the retail holder's), read from
+        # the Sbírka text and independently cross-checked.
+        "SE": Decimal("0.10"),  # 9/1981 Sb. — flat 10 %, no two-tier split.
+                                # SE withholds 30 % domestically; the 20-point
+                                # excess is reclaimable from Skatteverket.
+        "CN": Decimal("0.10"),  # 65/2011 Sb.m.s. (5 % only for a company ≥25 %)
+        "HK": Decimal("0.05"),  # 49/2012 Sb.m.s. — Hong Kong SAR has its OWN
+                                # treaty, separate from the PRC one; flat 5 %.
+        "KZ": Decimal("0.10"),  # 3/2000 Sb.m.s.
     })
 
     # --- CNB cache path (anchored to project root — cwd-independent) ---
