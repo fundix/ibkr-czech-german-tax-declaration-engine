@@ -5,7 +5,9 @@ service layer with pinned FX providers). Skipped when the `web` extra is not
 installed — the service layer itself is covered framework-free in
 test_webapp_services.py.
 """
+import json
 import shutil
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -16,13 +18,23 @@ from fastapi.testclient import TestClient  # noqa: E402
 from src.webapp.app import create_app  # noqa: E402
 from src.webapp.services import RunService  # noqa: E402
 from tests.support.golden_fx import GoldenCnbProvider, GoldenEcbProvider  # noqa: E402
-from tests.test_webapp_services import SYNTHETIC, _seed_synthetic_year  # noqa: E402
+from tests.test_webapp_services import (  # noqa: E402
+    SYNTHETIC, StubConverter, StubQuotes, _seed_synthetic_year,
+)
 
 
 @pytest.fixture(scope="module")
 def client(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("webapp")
-    svc = RunService(data_dir=tmp / "data", runs_dir=tmp / "runs")
+    # Stubbed quotes and FX: the live-valuation routes would otherwise reach
+    # Yahoo and ČNB, which is why they had no render test at all — and the
+    # allocation payload they pass to Chart.js changed shape twice recently
+    # with the whole suite staying green.
+    svc = RunService(
+        data_dir=tmp / "data", runs_dir=tmp / "runs",
+        quote_service=StubQuotes({"DIVCO": (Decimal("40"), "USD")}),
+        converter_factory=StubConverter,
+    )
     _seed_synthetic_year(svc)
     svc._execute_run(
         "2024-test", 2024, "daily",
@@ -44,6 +56,60 @@ class TestPages:
         assert "Přehled" in r.text
         assert "2024-test" in r.text          # links to /results/2024-test
         assert "Spustit výpočet" in r.text    # CTA to /runs
+
+    @staticmethod
+    def _assert_json_payloads(html, markers):
+        """Every payload the inline JS parses must be a JSON ARRAY of objects.
+
+        Two ways this breaks silently. `tojson` over a Decimal raises a
+        TypeError, taking the fragment to a 500 — a box that never fills. And
+        handing the wrapper dict where the array was expected still renders and
+        still parses, but `alloc.map(...)` then iterates the keys, so the chart
+        comes out empty with no error anywhere. Asserting the TYPE is what
+        catches the second one; valid-JSON alone does not.
+        """
+        for marker in markers:
+            assert marker in html, marker
+            tail = html.split(marker, 1)[1]
+            depth, end = 0, None
+            for k, ch in enumerate(tail):
+                if ch in "[{":
+                    depth += 1
+                elif ch in "]}":
+                    depth -= 1
+                    if depth == 0:
+                        end = k + 1
+                        break
+            assert end is not None, marker
+            payload = json.loads(tail[:end])
+            assert isinstance(payload, list), f"{marker} is not an array"
+            assert all(isinstance(x, dict) for x in payload), marker
+
+    def test_valuation_fragment_renders_its_chart_payloads(self, client):
+        """The homepage's net-worth box had no render test at all, so the
+        payloads it hands Chart.js changed shape twice with the suite green.
+        """
+        r = client.get("/dashboard/valuation")
+        assert r.status_code == 200
+        assert "Aktuální hodnota" in r.text
+        # Live quote reached the row and was converted (40 USD x 100 x 20);
+        # format_czk uses a non-breaking thousands space.
+        assert "DIVCO" in r.text
+        assert "80\u00a0000,00" in r.text
+        self._assert_json_payloads(
+            r.text, ("const alloc = ", "const snaps = "))
+
+    def test_portfolio_live_fragment_renders_its_chart_payloads(self, client):
+        r = client.get("/results/2024-test/portfolio/live")
+        assert r.status_code == 200
+        assert 'id="portfolio-live-table"' in r.text
+        assert "Váha %" in r.text
+        assert "DIVCO" in r.text
+        self._assert_json_payloads(r.text, (
+            "const alloc = ", "const snaps = ",
+            "doughnut('category-chart', ", "doughnut('currency-chart', ",
+            "doughnut('country-chart', ",
+        ))
 
     def test_runs_page_lists_dataset_and_run(self, client):
         r = client.get("/runs")
