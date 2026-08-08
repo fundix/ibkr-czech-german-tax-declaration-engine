@@ -81,8 +81,18 @@ def _make_rgl(gross, cat=AssetCategory.STOCK, holding_days=200, proceeds=Decimal
     )
 
 
-def _build_test_result() -> TaxResult:
-    """Build a realistic TaxResult with various item types for export testing."""
+def _build_test_result(wht_foreign: Decimal = Decimal("15"),
+                       wht_eur: Decimal = Decimal("13.5"),
+                       wht_currency: str = "USD") -> TaxResult:
+    """Build a realistic TaxResult with various item types for export testing.
+
+    The default withholds exactly the 15% treaty cap, so the treaty excess is
+    zero — pass a larger amount to exercise the over-withheld columns, which
+    otherwise render 0 no matter what label they carry. This fixture aggregates
+    without an FX provider (EUR mode), where the credit cap counts only
+    EUR-denominated withholding, so such a variant also needs
+    ``wht_currency="EUR"`` for the figure to reach the cap at all.
+    """
     resolver = _resolver()
     cfg = CzTaxConfig(annual_exempt_limit_enabled=False)
 
@@ -113,9 +123,9 @@ def _build_test_result() -> TaxResult:
     wht_linked = WithholdingTaxEvent(
         asset_internal_id=div.asset_internal_id,
         event_date="2025-06-15",
-        gross_amount_foreign_currency=Decimal("15"),
-        local_currency="USD",
-        gross_amount_eur=Decimal("13.5"),
+        gross_amount_foreign_currency=wht_foreign,
+        local_currency=wht_currency,
+        gross_amount_eur=wht_eur,
         taxed_income_event_id=div.event_id,
         source_country_code="US",
     )
@@ -162,6 +172,23 @@ class TestJsonExport:
         assert "items" in data
         assert len(data["items"]) > 0
         assert "ftc_summary" in data
+
+    def test_json_per_country_separates_credited_from_over_withheld(self):
+        """Three different amounts used to hide behind two ambiguous keys.
+
+        'creditable' is the preliminary per-item cap, 'credited' is what §38f
+        actually allowed (these sum to ř. 328), and the over-withheld part is a
+        refund claim abroad that never reaches the return at all.
+        """
+        data = json.loads(export_cz_to_json(_build_test_result(
+            wht_foreign=Decimal("27"), wht_eur=Decimal("27"),
+            wht_currency="EUR")))
+        us = data["ftc_summary"]["per_country"]["US"]
+
+        assert Decimal(us["above_treaty_rate"]) > 0
+        assert us["above_treaty_rate"] == us["non_creditable"]   # alias, same value
+        assert "credited" in us
+        assert Decimal(us["credited"]) <= Decimal(us["creditable"])
 
     def test_json_preserves_exempt_items(self):
         json_str = export_cz_to_json(self.result)
@@ -278,8 +305,13 @@ class TestXlsxExport:
         wb = self._export_and_load()
         ws = wb["Dividends"]
         headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
-        for col in ["foreign_tax_paid_czk", "actual_creditable_czk", "non_creditable_czk"]:
+        for col in ["foreign_tax_paid_czk", "actual_creditable_czk",
+                    # Renamed from non_creditable_czk: it is tax withheld above
+                    # the treaty rate, reclaimed abroad — not the §38f shortfall
+                    # on ř. 329, which the old name read like.
+                    "above_treaty_rate_czk"]:
             assert col in headers, f"Dividends sheet missing FTC column: {col}"
+        assert "non_creditable_czk" not in headers
 
     def test_xlsx_wht_sheet_has_linked_and_unlinked(self):
         wb = self._export_and_load()

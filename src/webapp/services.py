@@ -333,7 +333,13 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 #     lot both change.
 # v4: a stock-for-stock merger is now applied (carry-over or taxable disposal)
 #     instead of aborting the run.
-_FINGERPRINT_VERSION = "v4"
+# v5: option contracts are valued at their multiplier and written legs counted;
+#     a commission rebate lowers the basis instead of raising it; SE/CN/HK/KZ
+#     gained verified treaty caps below the old 15% default (SE alone moves the
+#     2025 tax by ~70 CZK); ř. 329 and the per-state sheets changed meaning.
+#     Same inputs, different figures — every earlier run must be recomputed
+#     rather than served from cache.
+_FINGERPRINT_VERSION = "v5"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —
@@ -1286,7 +1292,7 @@ class RunService:
             return None
         return (time.time() - path.stat().st_mtime) / 3600
 
-    def refresh_positions_sync(self, tax_year: int) -> Dict[str, Any]:
+    def refresh_positions_sync(self, tax_year: Optional[int] = None) -> Dict[str, Any]:
         """Download only the positions statement — no engine run.
 
         Positions is its own Flex slot and ``parse_positions_csv`` reads it
@@ -1294,8 +1300,26 @@ class RunService:
         whole pipeline just to see whether a written put has gone in the money
         is slow and beside the point.
 
+        **Only ever writes the current year's slot.** Today's holdings are not
+        the 31 December state of a closed year, and that year's
+        ``positions_end.csv`` is authoritative for three things at once: every
+        re-run of the year reads it as the EOY input, the following year seeds
+        its opening lots from it (there is no separate positions_start file),
+        and its hash goes into the compute-cache fingerprint. Overwriting it
+        with today's snapshot would corrupt all three silently — and the
+        dashboard shows the newest run, which in filing season is the year just
+        closed, so the button sat one click away from doing exactly that.
+
         On the runner so it cannot write the CSV from under a running engine.
         """
+        current = date.today().year
+        if tax_year is not None and tax_year != current:
+            raise ValueError(
+                f"Pozice lze obnovit jen pro běžící rok ({current}). Dnešní "
+                f"snapshot není stavem k 31. 12. {tax_year} — přepsal by "
+                f"závěrečné pozice uzavřeného roku, ze kterých se počítá daň "
+                f"i nabíhají loty roku {tax_year + 1}."
+            )
         cfg = self.get_flex_config()
         query_id = cfg.queries.get("positions")
         if not cfg.token or not query_id:
@@ -1303,7 +1327,7 @@ class RunService:
                 "IBKR Flex Web Service není nastavená pro pozice — vyplňte "
                 "token a query ID slotu „positions“ na stránce Soubory."
             )
-        return self.runner.run_sync(self._download_positions, tax_year,
+        return self.runner.run_sync(self._download_positions, current,
                                     cfg.token, query_id, timeout=300)
 
     def _download_positions(self, tax_year: int, token: str, query_id: str,
@@ -1316,6 +1340,13 @@ class RunService:
         year_dir.mkdir(parents=True, exist_ok=True)
         content = fetch(token, query_id)
         path = year_dir / self._FLEX_SLOT_FILES["positions"]
+        # Keep the previous statement one step from the bin. The year guard
+        # above makes the destructive case unreachable, but this file is a
+        # canonical tax input whose only other copies are buried in old runs'
+        # inputs/ dirs — cheap insurance against a short IBKR answer.
+        if path.is_file():
+            backup = path.with_name(path.name + ".bak")
+            shutil.copy2(path, backup)
         path.write_bytes(content)
         logger.info(f"IBKR Flex: refreshed positions for {tax_year} "
                     f"({len(content)} bytes).")
@@ -3192,7 +3223,7 @@ class RunService:
                 "country": it.get("source_country"), "count": 0,
                 "gross_czk": Decimal(0), "wht_czk": Decimal(0),
                 "creditable_czk": Decimal(0), "excess_czk": Decimal(0),
-                "cap_rate": None,
+                "cap_rate": None, "cap_defaulted": False,
             })
             # The FTC record the engine already attached to the item: how much
             # of the withholding the treaty lets Czechia credit, and what was
@@ -3202,6 +3233,11 @@ class RunService:
             a["excess_czk"] += Decimal(ftc.get("non_creditable_czk") or 0)
             if ftc.get("configured_cap_rate") is not None:
                 a["cap_rate"] = Decimal(ftc["configured_cap_rate"])
+                # A defaulted rate must not be shown as "the treaty rate": the
+                # default equals several real caps, so the number alone hides
+                # whether anyone verified it — and where the real treaty is
+                # lower, the credit taken here is too high.
+                a["cap_defaulted"] = bool(ftc.get("cap_rate_defaulted"))
             total_creditable += Decimal(ftc.get("actual_creditable_czk") or 0)
             total_excess += Decimal(ftc.get("non_creditable_czk") or 0)
             # Backfill: setdefault only looks at the first payment of the year,

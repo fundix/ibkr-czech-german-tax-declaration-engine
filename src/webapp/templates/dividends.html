@@ -64,7 +64,9 @@
         <td class="num">{{ a.gross_czk | czk }}</td>
         <td class="num">{{ a.wht_czk | czk }}</td>
         <td class="num">{{ "%.1f"|format(a.effective_rate * 100) ~ " %" if a.effective_rate is not none else "–" }}</td>
-        <td class="num">{{ "%.0f"|format(a.cap_rate * 100) ~ " %" if a.cap_rate is not none else "–" }}</td>
+        <td class="num">{{ "%.0f"|format(a.cap_rate * 100) ~ " %" if a.cap_rate is not none else "–" }}
+          {%- if a.cap_defaulted %} <span class="badge warn"
+            title="Pro tento stát není v konfiguraci ověřená smluvní sazba — použit výchozí strop 15 %. Pokud je skutečná smluvní sazba nižší, je zápočet nadhodnocený. Ověřte a doplňte do country_credit_caps.">?</span>{% endif %}</td>
         <td class="num">{{ a.creditable_czk | czk }}</td>
         <td class="num {{ 'neg' if a.excess_czk > 0 }}">{{ a.excess_czk | czk }}</td>
       </tr>
@@ -74,6 +76,12 @@
   <p class="note">Sazba nad smluvní strop nejčastěji znamená chybějící formulář u brokera —
     u amerických akcií W-8BEN. Zařídit ho dopředu je cennější než žádat o vrácení zpětně:
     o přeplatek se žádá ve státě zdroje, v přiznání ho uplatnit nelze.</p>
+  {% if assets | selectattr("cap_defaulted") | list %}
+  <p class="note">⚠ U států s <span class="badge warn">?</span> není v konfiguraci ověřená
+    smluvní sazba a použil se výchozí strop 15 %. Kde je skutečná smlouva nižší, je zápočet
+    nadhodnocený a daň podhodnocená — doplňte sazbu do <code>country_credit_caps</code>
+    a rok přepočítejte.</p>
+  {% endif %}
   {% else %}
   <p>V roce {{ meta.tax_year }} žádné dividendy.</p>
   {% endif %}

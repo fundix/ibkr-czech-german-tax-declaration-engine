@@ -77,6 +77,12 @@ class CzForeignTaxCreditRecord:
     max_creditable_czk: Decimal       # cap_rate × gross_income_czk
     actual_creditable_czk: Decimal    # min(paid, max_creditable)
     non_creditable_czk: Decimal       # paid - actual_creditable
+    # True when no treaty rate is configured for this country and the generic
+    # default was applied. The default happens to equal several real treaty
+    # caps, so a display that just prints the number cannot be distinguished
+    # from a verified one — and a treaty that is actually LOWER means the
+    # credit here is too generous.
+    cap_rate_defaulted: bool = False
 
     # Income category ("dividend" | "interest"): drives the §16a separate-base
     # split in the liability layer.
@@ -91,6 +97,7 @@ class CzForeignTaxCreditRecord:
             "gross_income_czk": str(self.gross_income_czk),
             "foreign_tax_paid_czk": str(self.foreign_tax_paid_czk),
             "configured_cap_rate": str(self.configured_cap_rate),
+            "cap_rate_defaulted": self.cap_rate_defaulted,
             "max_creditable_czk": str(self.max_creditable_czk),
             "actual_creditable_czk": str(self.actual_creditable_czk),
             "non_creditable_czk": str(self.non_creditable_czk),
@@ -234,11 +241,15 @@ def evaluate_foreign_tax_credit(
                     source_country = r.source_country.upper()
                     break
 
-        # Determine cap rate
-        if source_country and source_country in config.country_credit_caps:
-            cap_rate = config.country_credit_caps[source_country]
-        else:
-            cap_rate = config.default_max_credit_rate
+        # Determine cap rate. Whether it came from a verified treaty entry or
+        # from the generic default is recorded: the default equals several real
+        # caps, so the number alone cannot tell a reader which it was — and a
+        # country whose actual treaty is lower gets too much credit here.
+        cap_rate_defaulted = not (
+            source_country and source_country in config.country_credit_caps
+        )
+        cap_rate = (config.default_max_credit_rate if cap_rate_defaulted
+                    else config.country_credit_caps[source_country])
 
         # Compute cap. Negative gross income (a reversal/correction) bears no
         # Czech tax, so it can never support a credit — clamp to zero rather
@@ -282,6 +293,7 @@ def evaluate_foreign_tax_credit(
             gross_income_czk=gross,
             foreign_tax_paid_czk=wht_paid,
             configured_cap_rate=cap_rate,
+            cap_rate_defaulted=cap_rate_defaulted,
             max_creditable_czk=max_creditable,
             actual_creditable_czk=actual_creditable,
             non_creditable_czk=non_creditable,

@@ -74,11 +74,17 @@ def export_cz_to_json(
 # Structure builder
 # ---------------------------------------------------------------------------
 
+def _per_state(liability) -> Dict[str, Any]:
+    """Per-state credit after both §38f caps; empty when unavailable."""
+    return getattr(liability, "per_state_credit", None) or {}
+
+
 def _build_json_structure(tax_result: TaxResult) -> Dict[str, Any]:
     cr = tax_result.country_result or {}
     items: list = cr.get("items", [])
     netting = cr.get("netting")
     ftc_summary = cr.get("ftc_summary")
+    liability = cr.get("liability")
     fx_policy = cr.get("fx_policy")
 
     # --- Metadata ---
@@ -132,12 +138,21 @@ def _build_json_structure(tax_result: TaxResult) -> Dict[str, Any]:
             "pending_review_total": str(ftc_summary.pending_review_total_czk),
             "item_count": ftc_summary.item_count,
             "pending_count": ftc_summary.pending_review_count,
+            # "creditable" is the PRELIMINARY per-item cap; "credited" is what
+            # the state actually got after §38f/8 and /1 and is what its
+            # separate Příloha 3 sheet shows (these sum to ř. 328).
+            # "non_creditable" is tax withheld ABOVE the treaty rate — a refund
+            # claim against the source state, never ř. 329; the alias spells
+            # that out for readers who would guess from the older name.
             "per_country": {
                 code: {
                     "gross_income": str(agg.gross_income_czk),
                     "paid": str(agg.foreign_tax_paid_czk),
                     "creditable": str(agg.creditable_czk),
+                    "credited": str(_per_state(liability).get(
+                        code, agg.creditable_czk)),
                     "non_creditable": str(agg.non_creditable_czk),
+                    "above_treaty_rate": str(agg.non_creditable_czk),
                     "item_count": agg.item_count,
                 }
                 for code, agg in sorted(ftc_summary.per_country.items())

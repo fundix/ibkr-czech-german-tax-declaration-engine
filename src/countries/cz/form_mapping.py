@@ -407,17 +407,28 @@ def build_form_mapping(
 
     # Per-country breakdown
     if ftc_summary and ftc_summary.per_country:
+        # The aggregate carries the PRELIMINARY per-item cap; what a state
+        # actually got is decided later by §38f/8 and /1, and only the liability
+        # knows it. Showing the preliminary figure let the separate sheets add
+        # up to more than ř. 328 — a form the taxpayer cannot file.
+        credited = (liability.per_state_credit or {}) if liability else {}
         for code, agg in sorted(ftc_summary.per_country.items()):
+            actual = credited.get(code)
+            capped = actual is not None and actual < agg.creditable_czk
+            note = (f"Zaplaceno {q(agg.foreign_tax_paid_czk)}, "
+                    # Per-country non_creditable is paid - per-item cap, i.e.
+                    # the treaty excess for this state. Named accordingly so it
+                    # is not read as the §38f shortfall on ř. 329.
+                    f"nad smluvní sazbu {q(agg.non_creditable_czk)}")
+            if capped:
+                note += (f"; §38f snížil zápočet z {q(agg.creditable_czk)} "
+                         f"na {q(actual)}")
             sec_ftc.lines.append(CzFormLine(
                 code=f"CZ_DAP_FTC_COUNTRY_{code}",
                 label=f"Země {code} – zaplaceno / započteno",
-                value=q(agg.creditable_czk),
+                value=q(actual if actual is not None else agg.creditable_czk),
                 official_line_ref=f"Příloha 3 – samostatný list za stát {code} (§38f odst. 8)",
-                # Per-country non_creditable is paid - per-item cap, i.e. the
-                # treaty excess for this state. Named accordingly so it is not
-                # read as the §38f shortfall on ř. 329.
-                note=f"Zaplaceno {q(agg.foreign_tax_paid_czk)}, "
-                     f"nad smluvní sazbu {q(agg.non_creditable_czk)}",
+                note=note,
             ))
 
     result.sections.append(sec_ftc)

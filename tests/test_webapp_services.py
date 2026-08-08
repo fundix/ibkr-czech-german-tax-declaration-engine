@@ -873,6 +873,26 @@ class TestDividendWithholdingRates:
         assert s["total_creditable_czk"] == Decimal("270.61")
         assert s["total_excess_czk"] == Decimal("209.33")
 
+    def test_a_defaulted_treaty_rate_is_flagged_for_the_page(self, stub_service):
+        """15% is both the default and a real cap, so the column would present
+        an unverified guess exactly like a verified rate."""
+        run = self._run_with(stub_service, [
+            {**self._div("EVO", "1395.52", "418.66", "209.33"),
+             "ftc": {"actual_creditable_czk": "209.33",
+                     "non_creditable_czk": "209.33",
+                     "configured_cap_rate": "0.15",
+                     "cap_rate_defaulted": True}},
+        ])
+        a = stub_service.dividend_summary(run, "daily")["assets"][0]
+        assert a["cap_rate"] == Decimal("0.15")
+        assert a["cap_defaulted"] is True
+
+    def test_a_verified_treaty_rate_is_not_flagged(self, stub_service):
+        run = self._run_with(stub_service, [
+            self._div("PYPL", "408.54", "61.28", "61.28")])
+        assert stub_service.dividend_summary(run, "daily")[
+            "assets"][0]["cap_defaulted"] is False
+
     def test_a_run_without_ftc_records_still_renders(self, stub_service):
         """Older runs predate the per-item ftc block."""
         run = self._run_with(stub_service, [
@@ -1242,8 +1262,12 @@ class TestOptionsFromPositions:
         out = service.options_from_positions(2099, with_quotes=False)
         assert out["options"] == [] and out["age_hours"] is None
 
-    def test_refresh_writes_the_statement_without_running_the_engine(
-            self, service, monkeypatch):
+    @staticmethod
+    def _this_year():
+        from datetime import date as _date
+        return _date.today().year
+
+    def _arm_flex(self, service, monkeypatch, payload=None):
         from src.webapp import services as services_mod
         from src.webapp.ibkr_flex import FlexConfig, save_flex_config
 
@@ -1253,22 +1277,62 @@ class TestOptionsFromPositions:
 
         def fake_fetch(token, query_id, from_date=None, to_date=None):
             calls.append((token, query_id))
-            return (self.HEADER + "\n"
-                    + self._row("SOFI  280616P00015000", "-1")
-                    + "\n").encode()
+            return payload if payload is not None else (
+                self.HEADER + "\n"
+                + self._row("SOFI  280616P00015000", "-1") + "\n").encode()
 
         monkeypatch.setattr(services_mod, "fetch_statement", fake_fetch)
-        service.refresh_positions_sync(2026)
+        return calls
+
+    def test_refresh_writes_the_statement_without_running_the_engine(
+            self, service, monkeypatch):
+        year = self._this_year()
+        calls = self._arm_flex(service, monkeypatch)
+        service.refresh_positions_sync(year)
 
         assert calls == [("tok", "42")]
-        [row] = service.options_from_positions(2026, with_quotes=False)["options"]
+        [row] = service.options_from_positions(year, with_quotes=False)["options"]
         assert row["quantity_short"] == Decimal("1")
         # No run was created — the tax figures are untouched.
         assert service.list_runs() == []
 
+    def test_a_closed_year_is_refused_before_anything_is_fetched(
+            self, service, monkeypatch):
+        """The dashboard shows the newest run, which in filing season is the
+        year just closed. Its positions_end.csv is the EOY input for every
+        re-run, the seed for the next year's opening lots and part of the
+        cache fingerprint — today's holdings must never land on it."""
+        calls = self._arm_flex(service, monkeypatch)
+        closed = self._this_year() - 1
+
+        with pytest.raises(ValueError, match=str(closed)):
+            service.refresh_positions_sync(closed)
+        assert calls == []                      # refused before the round trip
+
+    def test_omitting_the_year_refreshes_the_current_one(
+            self, service, monkeypatch):
+        self._arm_flex(service, monkeypatch)
+        out = service.refresh_positions_sync()
+        assert out["tax_year"] == self._this_year()
+
+    def test_the_previous_statement_is_kept_as_a_backup(
+            self, service, monkeypatch):
+        year = self._this_year()
+        year_dir = service.data_dir / str(year)
+        year_dir.mkdir(parents=True, exist_ok=True)
+        original = year_dir / "positions_end.csv"
+        original.write_text("PŮVODNÍ", encoding="utf-8")
+
+        self._arm_flex(service, monkeypatch)
+        service.refresh_positions_sync(year)
+
+        assert original.read_text(encoding="utf-8") != "PŮVODNÍ"
+        assert (year_dir / "positions_end.csv.bak").read_text(
+            encoding="utf-8") == "PŮVODNÍ"
+
     def test_refresh_without_a_positions_query_explains_itself(self, service):
         with pytest.raises(ValueError, match="positions"):
-            service.refresh_positions_sync(2026)
+            service.refresh_positions_sync(self._this_year())
 
 
 class TestAssignmentRisk:

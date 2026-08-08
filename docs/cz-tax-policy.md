@@ -186,7 +186,7 @@ date is read.
 |------|--------|
 | Per-item preliminary cap: `min(wht_paid, cap_rate × gross_income)` | **IMPLEMENTED** |
 | Default cap rate: 15% (`default_max_credit_rate`) | **IMPLEMENTED** |
-| Per-country treaty cap: `country_credit_caps` dict | **IMPLEMENTED** — 12 treaties with Sb. citations, verified 2026-07-03 (`config.py`) |
+| Per-country treaty cap: `country_credit_caps` dict | **IMPLEMENTED** — 16 treaties with Sb. citations (12 verified 2026-07-03, SE/CN/HK/KZ added 2026-08-08) |
 | Missing source_country → PENDING_MANUAL_REVIEW, default cap applied | **IMPLEMENTED** |
 | No linked WHT → zero credit record, no crash | **IMPLEMENTED** |
 | Multiple WHT records on one item: first source_country used for cap | **IMPLEMENTED** |
@@ -211,6 +211,25 @@ The two always sum back to `non_creditable_ftc`. Mapping the *total* onto
 ř. 329 — as the engine did before — contradicts that line's own definition
 and would let over-withheld foreign tax be carried forward as if it were a
 Czech credit.
+
+### A missing treaty cap understates the tax
+
+A country absent from `country_credit_caps` falls back to
+`default_max_credit_rate` (15 %). That default equals several real caps, so the
+displayed number cannot be told apart from a verified one — which is why the
+FTC record carries `cap_rate_defaulted` and the dividends page marks such rows.
+
+Where the real treaty caps **lower**, the fallback credits too much and the
+Czech tax comes out too low. Found on the real book 2026-08-08: SE, CN, HK and
+KZ were all defaulting to 15 % against treaty caps of 10 / 10 / 5 / 10 %.
+Sweden is the case that bit — its domestic kupongskatt is 30 % and relief at
+source is usually not applied to a Czech retail holder, so the statement showed
+30 % withheld and 15 % was being credited where the treaty allows 10 %. Fixing
+it moved the 2025 credit from 209,33 to 139,55 CZK and the final tax from
+28 850 to 28 920 CZK.
+
+Adding a cap therefore changes filed figures: bump `_FINGERPRINT_VERSION` so
+cached runs are recomputed rather than served.
 
 ---
 

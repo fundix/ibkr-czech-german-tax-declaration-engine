@@ -98,14 +98,19 @@ def _options_ctx(svc, overview: dict, tax_year) -> dict:
 
 
 @router.post("/dashboard/options/refresh", response_class=HTMLResponse)
-def refresh_positions(request: Request, tax_year: Optional[int] = Form(None)):
+def refresh_positions(request: Request):
     """Pull today's positions statement and re-render just the options table.
 
     No engine run: positions is its own Flex slot, so the contracts and their
     moneyness refresh in one request while the tax figures stay as computed.
+
+    The year is taken from the calendar, never from the form. The dashboard
+    renders the newest run, which in filing season is the year just closed —
+    posting that year back would have written today's holdings over its
+    authoritative 31 December statement.
     """
     svc = _svc(request)
-    year = tax_year or date.today().year
+    year = date.today().year
     try:
         svc.refresh_positions_sync(year)
         overview = svc.options_from_positions(year)
