@@ -65,7 +65,8 @@
             {% for b in row_lots %}
             <option value="{{ b.acquired }}" {{ "selected" if z.lot_acquired == b.acquired }}>
               {{ b.acquired }} · {{ b.quantity | qty }} ks
-              {%- if b.unit_cost_eur %} · {{ "%.2f"|format(b.unit_cost_eur) }} EUR{% endif %}
+              {%- if b.unit_cost_original is not none %} · {{ "%.2f"|format(b.unit_cost_original) }} {{ b.cost_currency }}
+              {%- elif b.unit_cost_eur %} · {{ "%.2f"|format(b.unit_cost_eur) }} EUR{% endif %}
               {%- if b.exempt is true %} · osvobozeno{% elif b.exempt is none %} · ?{% endif %}
             </option>
             {% endfor %}
@@ -136,7 +137,8 @@
             <option value="">— kterýkoli lot (FIFO) —</option>
             {% for b in row_lots %}
             <option value="{{ b.acquired }}">{{ b.acquired }} · {{ b.quantity | qty }} ks
-              {%- if b.unit_cost_eur %} · {{ "%.2f"|format(b.unit_cost_eur) }} EUR{% endif %}</option>
+              {%- if b.unit_cost_original is not none %} · {{ "%.2f"|format(b.unit_cost_original) }} {{ b.cost_currency }}
+              {%- elif b.unit_cost_eur %} · {{ "%.2f"|format(b.unit_cost_eur) }} EUR{% endif %}</option>
             {% endfor %}
           </select>
           <input type="text" name="note" placeholder="poznámka" size="16">

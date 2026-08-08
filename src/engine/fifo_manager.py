@@ -37,6 +37,39 @@ SOY_FALLBACK_PREFIX = "SOY_FALLBACK"
 SOY_SNAPSHOT_PREFIX = "SOY_SNAPSHOT"
 
 
+def _original_cost_of_buy(trade_event) -> Tuple[Optional[Decimal], Optional[str]]:
+    """What a BUY cost in its own currency, or ``(None, None)``.
+
+    Mirrors the EUR formula in ``enrichment`` term for term — gross plus the
+    commission, the commission being signed as a cost (positive when charged, so
+    a rebate lowers the basis) — so the two costs on a lot can only ever be the
+    same amount in two currencies, never two different amounts. The gross already
+    carries an option's multiplier: ``domain_event_factory`` applies it when it
+    computes ``gross_amount_foreign_currency``, which is why the price is not
+    re-multiplied here.
+
+    Gives up rather than guessing when:
+
+    * the gross or the trade currency is missing;
+    * the commission was billed in a **different** currency than the trade.
+      Adding it would silently mix two currencies into one figure; dropping it
+      would produce a cost that disagrees with the EUR one by the fee. Neither is
+      a number worth showing, so the lot reports no original cost and callers
+      fall back to EUR.
+    """
+    gross = getattr(trade_event, "gross_amount_foreign_currency", None)
+    currency = getattr(trade_event, "local_currency", None)
+    if gross is None or not currency:
+        return None, None
+
+    commission = getattr(trade_event, "commission_foreign_currency", None) or Decimal(0)
+    commission_currency = getattr(trade_event, "commission_currency", None)
+    if commission != Decimal(0) and (commission_currency or "").upper() != currency.upper():
+        return None, None
+
+    return gross.copy_abs() + commission, currency.upper()
+
+
 def _long_lot_sort_key(lot: "FifoLot"):
     """Consumption order for long lots.
 
@@ -247,7 +280,51 @@ class FifoLot:
     # which the FIFO tie-break compares. Read by nothing that computes a figure.
     carried_from: Optional[str] = None
 
+    # What the lot cost in the currency it was actually bought in. The engine
+    # computes everything in EUR (it began as a German tool), so a USD holding
+    # otherwise reports a cost the owner never paid, in a currency they never
+    # touched. The original is carried alongside for display and audit only —
+    # NOTHING that computes a tax figure may read these two fields.
+    #
+    # The TOTAL is stored rather than a unit price, deliberately: it is what the
+    # EUR side treats as authoritative too (`unit` is derived as total /
+    # quantity), so every proportional change — a partial sale, a split rescale,
+    # a carry-over — keeps the two in step by construction, instead of needing a
+    # mirrored edit at each of the dozen sites that touch the basis.
+    #
+    # ``None`` wherever no single original amount exists: a weighted-average
+    # re-pricing, a lot valued in EUR by a taxable merger, a zero-cost stock
+    # dividend, or a trade whose commission was billed in a third currency.
+    # Callers fall back to the EUR figure; a wrong number would be worse.
+    total_cost_original: Optional[Decimal] = None
+    cost_currency: Optional[str] = None
+
+    @property
+    def unit_cost_original(self) -> Optional[Decimal]:
+        """Per-unit original cost, or None when the total is unknown."""
+        if self.total_cost_original is None or not self.quantity:
+            return None
+        return self.total_cost_original / self.quantity
+
+    def rescaled_original(self, new_quantity: Decimal) -> Optional[Decimal]:
+        """The original total belonging to ``new_quantity`` of this lot.
+
+        Used when a lot is partially consumed: the EUR total is recomputed as
+        unit x remaining, so the original has to shrink by the same ratio or the
+        two costs drift apart on every partial sale.
+        """
+        if self.total_cost_original is None or not self.quantity:
+            return None
+        return self.total_cost_original * (new_quantity / self.quantity)
+
     def __post_init__(self):
+        if (self.total_cost_original is not None) != bool(self.cost_currency):
+            raise ValueError(
+                "FifoLot.total_cost_original and cost_currency must be set "
+                f"together — got {self.total_cost_original!r} / "
+                f"{self.cost_currency!r}. An amount without its currency is "
+                "not a cost, and a currency without an amount reads as zero."
+            )
         if not isinstance(self.quantity, Decimal) or not self.quantity.is_finite() or self.quantity <= Decimal(0):
             raise ValueError(f"FifoLot quantity must be a positive finite Decimal: {self.quantity} (type: {type(self.quantity)})")
         if not isinstance(self.unit_cost_basis_eur, Decimal) or not self.unit_cost_basis_eur.is_finite() or self.unit_cost_basis_eur < Decimal(0): # Renamed
@@ -537,6 +614,15 @@ class FifoLedger:
                             holding_period_start=lot.holding_period_start,
                             acquisition_date_estimated=lot.acquisition_date_estimated,
                             holding_period_start_estimated=lot.holding_period_start_estimated,
+                            # Same proportional trim the EUR total gets above.
+                            # Dropping it here is what left 27 of the real book's
+                            # 91 lots with no original cost while every unit test
+                            # passed: this rebuild, not add_long_lot, is what
+                            # produces the surviving lots of a prior year.
+                            total_cost_original=lot.rescaled_original(qty_from_this_lot),
+                            cost_currency=(lot.cost_currency
+                                           if lot.total_cost_original is not None
+                                           else None),
                         )
                         self.lots.append(final_lot)
                         qty_to_assign -= qty_from_this_lot
@@ -705,6 +791,12 @@ class FifoLedger:
                     unit_cost_basis_eur=unit, total_cost_basis_eur=amount_eur,
                     source_transaction_id=source_id,
                     acquisition_date_estimated=acq_estimated,
+                    # The snapshot states the basis in its own currency, so this
+                    # is the original itself, not a back-conversion. `amount_eur`
+                    # above is what was derived FROM it.
+                    total_cost_original=self.ctx.create_decimal(
+                        lot.cost_basis_amount).copy_abs(),
+                    cost_currency=lot.cost_basis_currency.upper(),
                     # Pass the start EXPLICITLY even though it equals the
                     # acquisition date: leaving it None takes the defaulting
                     # branch of __post_init__, which overwrites the flag below
@@ -754,10 +846,23 @@ class FifoLedger:
                 total_cost_basis_eur = self.ctx.create_decimal(Decimal(0))
         cost_per_unit = self.ctx.divide(total_cost_basis_eur, quantity) if quantity != Decimal(0) else Decimal(0)
         acquisition_date_str = f"{tax_year-1}-12-31"
+        # The statement's own currency and amount, when both survived the branches
+        # above — a zeroed basis has no original to report. Tied to
+        # total_cost_basis_eur being non-zero rather than to the inputs, so the
+        # fallbacks that zero it out cannot leave a stale original behind.
+        original_total = original_currency = None
+        if (total_cost_basis_eur != Decimal(0)
+                and asset.soy_cost_basis_amount is not None
+                and asset.soy_cost_basis_currency):
+            original_total = self.ctx.create_decimal(
+                asset.soy_cost_basis_amount).copy_abs()
+            original_currency = asset.soy_cost_basis_currency.upper()
         fallback_lot = FifoLot(
             acquisition_date=acquisition_date_str, quantity=quantity,
             unit_cost_basis_eur=cost_per_unit, total_cost_basis_eur=total_cost_basis_eur, # Renamed
-            source_transaction_id=self.soy_fallback_lot_source_tx_id
+            source_transaction_id=self.soy_fallback_lot_source_tx_id,
+            total_cost_original=original_total,
+            cost_currency=original_currency,
         )
         self.lots.append(fallback_lot)
         logger.info(
@@ -892,6 +997,10 @@ class FifoLedger:
                     quantity=new_qty,
                     unit_cost_basis_eur=self.ctx.divide(lot.total_cost_basis_eur, new_qty),
                     total_cost_basis_eur=lot.total_cost_basis_eur,
+                    # Carried verbatim, like the EUR total: a carry-over changes
+                    # how many shares the same money bought, not the money.
+                    total_cost_original=lot.total_cost_original,
+                    cost_currency=lot.cost_currency,
                     source_transaction_id=source_transaction_id,
                     holding_period_start=lot.holding_period_start,
                     holding_period_start_estimated=lot.holding_period_start_estimated,
@@ -1069,11 +1178,15 @@ class FifoLedger:
             return
         cost_basis_eur_per_unit = self.ctx.divide(total_cost_basis_eur, lot_qty_contracts_or_units)
 
+        original_total, original_currency = _original_cost_of_buy(trade_event)
+
         new_lot = FifoLot(
             acquisition_date=trade_event.event_date, quantity=lot_qty_contracts_or_units,
             unit_cost_basis_eur=cost_basis_eur_per_unit, # Renamed
             total_cost_basis_eur=total_cost_basis_eur,
-            source_transaction_id=trade_event.ibkr_transaction_id
+            source_transaction_id=trade_event.ibkr_transaction_id,
+            total_cost_original=original_total,
+            cost_currency=original_currency,
         )
         self.lots.append(new_lot)
         self.lots.sort(key=_long_lot_sort_key)
@@ -1167,7 +1280,10 @@ class FifoLedger:
                 lots_to_remove_indices.append(i)
             else:
                 quantity_from_this_lot = quantity_remaining_to_realize
-                current_lot.quantity = self.ctx.subtract(current_lot.quantity, quantity_from_this_lot)
+                remaining_qty = self.ctx.subtract(current_lot.quantity, quantity_from_this_lot)
+                # Rescale the display-only original before the quantity moves.
+                current_lot.total_cost_original = current_lot.rescaled_original(remaining_qty)
+                current_lot.quantity = remaining_qty
                 current_lot.total_cost_basis_eur = self.ctx.multiply(current_lot.quantity, current_lot.unit_cost_basis_eur) # Renamed
 
             quantity_remaining_to_realize = self.ctx.subtract(quantity_remaining_to_realize, quantity_from_this_lot)
@@ -1213,6 +1329,12 @@ class FifoLedger:
             for lot in self.lots:
                 lot.unit_cost_basis_eur = pool_avg_unit_cost
                 lot.total_cost_basis_eur = self.ctx.multiply(lot.quantity, pool_avg_unit_cost)
+                # Re-priced to a blended pool average: no single original
+                # purchase corresponds to it any more, and rescaling the old
+                # figure would invent an exchange rate. Drop it and let the
+                # caller show the EUR average it actually is.
+                lot.total_cost_original = None
+                lot.cost_currency = None
 
         small_tolerance_qty = Decimal('1e-10')
         if quantity_remaining_to_realize.copy_abs() > small_tolerance_qty:
@@ -1476,7 +1598,12 @@ class FifoLedger:
             else:
                 quantity_from_this_lot = qty_remaining
                 cost_basis_for_portion = self.ctx.multiply(quantity_from_this_lot, current_lot.unit_cost_basis_eur)
-                current_lot.quantity = self.ctx.subtract(current_lot.quantity, quantity_from_this_lot)
+                remaining_qty = self.ctx.subtract(current_lot.quantity, quantity_from_this_lot)
+                # Shrink the display-only original by the same ratio, before the
+                # quantity changes underneath it — otherwise the two costs on the
+                # lot drift apart on every partial sale.
+                current_lot.total_cost_original = current_lot.rescaled_original(remaining_qty)
+                current_lot.quantity = remaining_qty
                 current_lot.total_cost_basis_eur = self.ctx.multiply(current_lot.quantity, current_lot.unit_cost_basis_eur)
             qty_remaining = self.ctx.subtract(qty_remaining, quantity_from_this_lot)
 
@@ -1594,7 +1721,10 @@ class FifoLedger:
                 logger.debug(f"  Fully consuming long option lot (Src: {current_lot.source_transaction_id}, Acq: {current_lot.acquisition_date}) Qty Contracts: {qty_consumed_from_this_lot}")
             else:
                 qty_consumed_from_this_lot = quantity_remaining_to_consume
-                current_lot.quantity = self.ctx.subtract(current_lot.quantity, qty_consumed_from_this_lot)
+                remaining_contracts = self.ctx.subtract(current_lot.quantity, qty_consumed_from_this_lot)
+                # Rescale the display-only original before the quantity moves.
+                current_lot.total_cost_original = current_lot.rescaled_original(remaining_contracts)
+                current_lot.quantity = remaining_contracts
                 current_lot.total_cost_basis_eur = self.ctx.multiply(current_lot.quantity, current_lot.unit_cost_basis_eur) # Renamed
                 logger.debug(f"  Partially consuming long option lot (Src: {current_lot.source_transaction_id}, Acq: {current_lot.acquisition_date}) Qty Contracts: {qty_consumed_from_this_lot}. Remaining Qty Contracts: {current_lot.quantity}")
 
@@ -1714,6 +1844,13 @@ class FifoLedger:
                 return
             lot.total_cost_basis_eur = self.ctx.subtract(lot.total_cost_basis_eur, reduction)
             lot.unit_cost_basis_eur = self.ctx.divide(lot.total_cost_basis_eur, lot.quantity) if lot.quantity > Decimal('0') else Decimal('0')
+            # The reduction is an EUR amount. Subtracting it from a USD original
+            # would need a rate this function has no business choosing, and
+            # scaling by the EUR ratio would invent one — so the original is
+            # dropped and the caller falls back to the EUR basis, which is the
+            # only figure that reflects the repayment.
+            lot.total_cost_original = None
+            lot.cost_currency = None
             remaining_repayment = self.ctx.subtract(remaining_repayment, reduction)
 
         # Pass 1: pro-rata by quantity.
