@@ -45,9 +45,13 @@ _ITEM_COLUMNS = [
     "fx_source", "fx_policy", "fx_rate", "fx_date_used",
 ]
 
+# "above_treaty_rate_czk" was called non_creditable_czk. It is tax withheld
+# ABOVE the treaty rate: never creditable here and never ř. 329 either, because
+# it did not enter ř. 323 — it is reclaimed from the source state. The old name
+# read like the §38f shortfall, which is a different amount entirely.
 _FTC_COLUMNS = [
     "foreign_tax_paid_czk", "configured_credit_cap_rate",
-    "max_creditable_czk", "actual_creditable_czk", "non_creditable_czk",
+    "max_creditable_czk", "actual_creditable_czk", "above_treaty_rate_czk",
     "ftc_review_status", "ftc_review_note",
 ]
 
@@ -100,7 +104,7 @@ def export_cz_to_xlsx(
             d["configured_credit_cap_rate"] = str(ftc_rec.configured_cap_rate)
             d["max_creditable_czk"] = str(ftc_rec.max_creditable_czk)
             d["actual_creditable_czk"] = str(ftc_rec.actual_creditable_czk)
-            d["non_creditable_czk"] = str(ftc_rec.non_creditable_czk)
+            d["above_treaty_rate_czk"] = str(ftc_rec.non_creditable_czk)
             d["ftc_review_status"] = ftc_rec.review_status
             d["ftc_review_note"] = ftc_rec.review_note
         return d

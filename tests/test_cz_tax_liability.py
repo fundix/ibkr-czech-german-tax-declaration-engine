@@ -293,6 +293,65 @@ class TestNonCreditableSplit:
         assert (result.treaty_excess_ftc + result.uncredited_ftc
                 == result.non_creditable_ftc)
 
+    def test_per_state_credits_sum_to_the_final_credit(self):
+        """The separate Příloha 3 sheets must reconcile against ř. 328.
+
+        The per-country FTC aggregate holds the PRELIMINARY per-item cap; what a
+        state actually gets is decided later by §38f/8, so the sheets could add
+        up to more than the total they belong to.
+        """
+        from src.countries.cz.foreign_tax_credit import CzCountryCreditAggregate
+
+        cfg = CzTaxConfig()
+        ftc = _ftc(paid=Decimal("235.12"), creditable=Decimal("217.43"),
+                   foreign_income=Decimal("3311.40"))
+        ftc.per_country = {
+            "US": CzCountryCreditAggregate(
+                country="US", gross_income_czk=Decimal("3000"),
+                foreign_tax_paid_czk=Decimal("187.16"),
+                creditable_czk=Decimal("169.47")),
+            "IE": CzCountryCreditAggregate(
+                country="IE", gross_income_czk=Decimal("311.40"),
+                foreign_tax_paid_czk=Decimal("47.96"),
+                creditable_czk=Decimal("47.96")),
+        }
+        result = compute_tax_liability(
+            taxable_dividends=Decimal("3311.40"), taxable_interest=ZERO,
+            netting=_netting(), ftc_summary=ftc, config=cfg,
+        )
+
+        assert sum(result.per_state_credit.values()) == result.final_creditable_ftc
+        # IE is the state the per-state cap bit into, not US.
+        assert result.per_state_credit["US"] == Decimal("169.47")
+        assert result.per_state_credit["IE"] < Decimal("47.96")
+
+    def test_the_aggregate_cap_scales_the_states_down_exactly(self):
+        """When §38f/1 bites on top of §38f/8 the states are scaled to match —
+        rounding residue included, or the sheets drift by a heller."""
+        from src.countries.cz.foreign_tax_credit import CzCountryCreditAggregate
+
+        cfg = CzTaxConfig()
+        # Domestic income dominates, so CZ tax on foreign income is tiny and
+        # the aggregate cap binds well below the sum of the per-state caps.
+        ftc = _ftc(paid=Decimal("900"), creditable=Decimal("900"),
+                   foreign_income=Decimal("3000"))
+        ftc.per_country = {
+            c: CzCountryCreditAggregate(
+                country=c, gross_income_czk=Decimal("1000"),
+                foreign_tax_paid_czk=Decimal("300"),
+                creditable_czk=Decimal("300"))
+            for c in ("US", "IE", "DE")
+        }
+        result = compute_tax_liability(
+            taxable_dividends=Decimal("3000"), taxable_interest=ZERO,
+            netting=_netting(sec_gains=Decimal("97000")), ftc_summary=ftc,
+            config=cfg,
+        )
+
+        assert result.final_creditable_ftc < Decimal("900")
+        assert sum(result.per_state_credit.values()) == result.final_creditable_ftc
+        assert all(v >= ZERO for v in result.per_state_credit.values())
+
     def test_both_causes_at_once(self):
         """The shape the real 2026 run hit, where ř. 329 read 18.94.
 

@@ -81,6 +81,11 @@ class CzTaxLiabilitySummary:
     # Treaty-eligible credit lost to the §38f/1 or §38f/8 caps. This is the
     # real ř. 329, and the part that §24 odst. 2 písm. ch) can carry.
     uncredited_ftc: Decimal = ZERO
+    # What each state actually got AFTER both §38f caps, keyed by country code.
+    # The per-country FTC aggregate holds the PRELIMINARY figure, which is what
+    # the separate Příloha 3 sheets used to show — so they could exceed ř. 328.
+    # Sums exactly to final_creditable_ftc.
+    per_state_credit: Dict[str, Decimal] = field(default_factory=dict)
 
     # --- Final ---
     final_czech_tax_after_credit: Decimal = ZERO
@@ -222,10 +227,12 @@ def _finalize_ftc(
     per_country: List[tuple],
     notes: List[str],
     label: str = "",
-) -> tuple[Decimal, Decimal]:
+) -> tuple[Decimal, Decimal, Dict[str, Decimal]]:
     """Finalize the §38f simple credit for one tax base.
 
-    Returns ``(czech_tax_on_foreign_income, final_creditable_ftc)``.
+    Returns ``(czech_tax_on_foreign_income, final_creditable_ftc,
+    per_state_credit)`` — the last being what each state actually got AFTER
+    both caps, which is what its separate Příloha 3 sheet must show.
 
     Applies the proportional §38f/1 cap (CZ tax attributable to foreign
     income) and, when a ``per_country`` breakdown ``[(code, gross, creditable)]``
@@ -241,6 +248,7 @@ def _finalize_ftc(
     else:
         cz_tax_on_foreign = ZERO
 
+    per_state: Dict[str, Decimal] = {}
     if per_country and base > ZERO:
         per_state_credit = ZERO
         for country, gross_income, creditable in sorted(per_country):
@@ -249,6 +257,7 @@ def _finalize_ftc(
             state_ratio = min(gross_income / base, Decimal("1"))
             state_cap = (gross_tax * state_ratio).quantize(TWO, rounding=ROUND_HALF_UP)
             state_credit = min(creditable, state_cap)
+            per_state[country] = state_credit
             per_state_credit += state_credit
             if creditable > state_cap:
                 notes.append(
@@ -256,9 +265,40 @@ def _finalize_ftc(
                     f"{state_cap} (preliminary {creditable})"
                 )
         final_creditable = min(per_state_credit, cz_tax_on_foreign)
+        # The §38f/1 aggregate cap can bite on top of the per-state ones. When
+        # it does, scale the states down proportionally so the separate sheets
+        # still add up to ř. 328 — a form whose parts exceed its total is one
+        # the taxpayer cannot file.
+        if per_state_credit > final_creditable and per_state_credit > ZERO:
+            per_state = _scale_to_total(per_state, final_creditable)
+            notes.append(
+                f"FTC{label}: §38f/1 limits the total to {final_creditable}; "
+                "per-state amounts scaled proportionally to match."
+            )
     else:
         final_creditable = min(preliminary_creditable, cz_tax_on_foreign)
-    return cz_tax_on_foreign, final_creditable
+    return cz_tax_on_foreign, final_creditable, per_state
+
+
+def _scale_to_total(amounts: Dict[str, Decimal], total: Decimal) -> Dict[str, Decimal]:
+    """Scale *amounts* proportionally so they sum EXACTLY to *total*.
+
+    Rounding each share independently would leave a heller of drift, and the
+    per-state sheets have to reconcile against ř. 328 to the last one — so the
+    largest share absorbs the residue rather than spreading it.
+    """
+    subtotal = sum(amounts.values(), ZERO)
+    if subtotal <= ZERO:
+        return dict(amounts)
+    scaled = {
+        code: (value / subtotal * total).quantize(TWO, rounding=ROUND_HALF_UP)
+        for code, value in amounts.items()
+    }
+    residue = total - sum(scaled.values(), ZERO)
+    if residue != ZERO:
+        biggest = max(scaled, key=lambda c: scaled[c])
+        scaled[biggest] += residue
+    return scaled
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +423,8 @@ def compute_tax_liability(
         (c, a.gross_income_czk, a.creditable_czk)
         for c, a in ftc_summary.per_country.items()
     ]
-    result.czech_tax_on_foreign_income, result.final_creditable_ftc = _finalize_ftc(
+    (result.czech_tax_on_foreign_income, result.final_creditable_ftc,
+     result.per_state_credit) = _finalize_ftc(
         result.gross_czech_tax,
         result.combined_taxable_base,
         result.foreign_income_total,
@@ -476,7 +517,7 @@ def _compute_separate_base(
         (c, a.interest_gross_income_czk, a.interest_creditable_czk)
         for c, a in ftc_summary.per_country.items()
     ]
-    _, cmp.separate_general_base_ftc = _finalize_ftc(
+    _, cmp.separate_general_base_ftc, _ = _finalize_ftc(
         cmp.separate_general_base_tax,
         gen_base,
         ftc_summary.interest_income_total_czk,
@@ -500,7 +541,7 @@ def _compute_separate_base(
         (c, a.dividend_gross_income_czk, a.dividend_creditable_czk)
         for c, a in ftc_summary.per_country.items()
     ]
-    _, cmp.separate_dividend_ftc = _finalize_ftc(
+    _, cmp.separate_dividend_ftc, _ = _finalize_ftc(
         cmp.separate_dividend_gross_tax,
         div_base,
         ftc_summary.dividend_income_total_czk,

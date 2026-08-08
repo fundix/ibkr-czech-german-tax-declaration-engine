@@ -190,6 +190,7 @@ class _CzPdfBuilder:
         self.items: list = cr.get("items", [])
         self.netting = cr.get("netting")
         self.ftc_summary = cr.get("ftc_summary")
+        self.liability = cr.get("liability")
         self.form_mapping = cr.get("form_mapping")
         self.fx_policy = cr.get("fx_policy")
         self.currency = cr.get("currency", "EUR")
@@ -465,22 +466,37 @@ class _CzPdfBuilder:
             "Podklad pro Přílohu 3 — samostatný list za každý stát "
             "(§38f odst. 8 ZDP).", "note",
         ))
+        # "Započteno" must be what the state actually got after §38f/8 and /1,
+        # which only the liability knows; the aggregate holds the preliminary
+        # per-item cap and its sum can exceed ř. 328.
+        credited = getattr(self.liability, "per_state_credit", None) or {}
         rows = []
         for code, agg in sorted(ftc.per_country.items()):
+            actual = credited.get(code)
             rows.append([
                 code,
                 _fmt_money(agg.gross_income_czk),
                 _fmt_money(agg.foreign_tax_paid_czk),
-                _fmt_money(agg.creditable_czk),
+                _fmt_money(actual if actual is not None else agg.creditable_czk),
                 _fmt_money(agg.non_creditable_czk),
                 str(agg.item_count),
             ])
         story.append(self._table(
-            ["Stát", "Hrubý příjem", "Daň zaplacená", "Započitatelná (cap)",
-             "Nezapočitatelná", "Počet"],
+            # The last money column is tax withheld ABOVE the treaty rate. It is
+            # NOT ř. 329: it never entered ř. 323, so it cannot leave through
+            # 329 — it is reclaimed from the source state. Labelling it
+            # "Nezapočitatelná" invited exactly that misreading.
+            ["Stát", "Hrubý příjem", "Daň zaplacená", "Započteno (§38f)",
+             "Nad smluvní sazbu", "Počet"],
             rows,
-            col_widths=[50, 90, 90, 100, 90, 50],
+            col_widths=[50, 88, 88, 95, 95, 44],
             right_cols=[1, 2, 3, 4, 5],
+        ))
+        story.append(self._para(
+            "Sloupec „Započteno“ je částka po stropech §38f odst. 8 i odst. 1 — "
+            "jejich součet odpovídá ř. 328. „Nad smluvní sazbu“ je daň sražená "
+            "nad rámec smlouvy: do přiznání nepatří (ani na ř. 329), žádá se "
+            "o ni ve státě zdroje.", "note",
         ))
         return story
 

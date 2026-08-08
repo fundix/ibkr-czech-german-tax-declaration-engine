@@ -25,7 +25,7 @@ from src.countries.cz.exporters.pdf_exporter import (
     _fmt_money,
     export_cz_to_pdf,
 )
-from tests.test_cz_exporters import _build_test_result
+from tests.test_cz_exporters import _build_test_result  # noqa: E402
 
 
 def _pdf_text(result: TaxResult, **kwargs) -> str:
@@ -71,6 +71,22 @@ class TestPdfContent:
     def test_ftc_per_country_table(self, pdf_text):
         assert "Zápočet zahraniční daně po státech" in pdf_text
         assert "US" in pdf_text
+
+    def test_over_withheld_column_is_not_called_non_creditable(self):
+        """Tax withheld above the treaty rate is a refund claim abroad, not the
+        §38f shortfall on ř. 329 — it never entered ř. 323, so it cannot leave
+        through 329. The old header invited a preparer to copy it there.
+
+        The default fixture withholds exactly the 15% cap, so this column read 0
+        whatever it was labelled; 30 on 100 makes the figure real.
+        """
+        text = _pdf_text(_build_test_result(wht_foreign=Decimal("30"),
+                                           wht_eur=Decimal("27")))
+        assert "Nad smluvní sazbu" in text
+        assert "Nezapočitatelná" not in text
+        # And the credited column is now labelled as post-§38f, not as the cap.
+        assert "Započteno" in text
+        assert "do přiznání nepatří" in text
 
     def test_item_details_and_regimes(self, pdf_text):
         assert "Prodeje cenných papírů — detail" in pdf_text

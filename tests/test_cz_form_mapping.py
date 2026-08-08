@@ -270,6 +270,59 @@ class TestFtcMapping:
         # Deliberately no official_line_ref — it does not belong on the return.
         assert excess.official_line_ref is None
 
+    def test_per_country_lines_show_what_was_actually_credited(self):
+        """A separate sheet showing the preliminary cap can exceed ř. 328.
+
+        The 2026 book did exactly that: the US sheet said 169.47 while §38f/8
+        had cut it to 167.59, so the sheets summed to 217.43 against a ř. 328
+        of 215.55.
+        """
+        from src.countries.cz.foreign_tax_credit import CzCountryCreditAggregate
+
+        ftc = _ftc(paid=Decimal("235.12"), creditable=Decimal("217.43"),
+                   foreign_income=Decimal("3311.40"))
+        ftc.per_country = {
+            "US": CzCountryCreditAggregate(
+                country="US", gross_income_czk=Decimal("3000"),
+                foreign_tax_paid_czk=Decimal("187.16"),
+                creditable_czk=Decimal("169.47")),
+            "IE": CzCountryCreditAggregate(
+                country="IE", gross_income_czk=Decimal("311.40"),
+                foreign_tax_paid_czk=Decimal("47.96"),
+                creditable_czk=Decimal("47.96")),
+        }
+        liability = _liability(div=Decimal("3311.40"), ftc=ftc)
+        mapping = build_form_mapping(
+            liability=liability, netting=_netting(), ftc_summary=ftc,
+            taxable_dividends=Decimal("3311.40"), taxable_interest=ZERO,
+            currency="CZK",
+        )
+
+        states = [ln for sec in mapping.sections for ln in sec.lines
+                  if ln.code.startswith("CZ_DAP_FTC_COUNTRY_")]
+        assert sum(ln.value for ln in states) == \
+            mapping.get_line("CZ_DAP_FTC_FINAL").value
+        # The capped state says so, with both figures, instead of quietly
+        # publishing the one that was not granted.
+        ie = mapping.get_line("CZ_DAP_FTC_COUNTRY_IE")
+        assert ie.value < Decimal("47.96")
+        assert "§38f snížil zápočet" in ie.note
+
+    def test_an_uncapped_country_line_stays_quiet(self):
+        ftc = _ftc(paid=Decimal("1000"), creditable=Decimal("1000"),
+                   foreign_income=Decimal("10000"),
+                   countries={"US": {"paid": Decimal("1000"),
+                                     "creditable": Decimal("1000"),
+                                     "non_creditable": Decimal("0")}})
+        liability = _liability(div=Decimal("10000"), ftc=ftc)
+        mapping = build_form_mapping(
+            liability=liability, netting=_netting(), ftc_summary=ftc,
+            taxable_dividends=Decimal("10000"), taxable_interest=ZERO,
+            currency="CZK",
+        )
+        assert "§38f snížil" not in (
+            mapping.get_line("CZ_DAP_FTC_COUNTRY_US").note or "")
+
     def test_no_treaty_excess_line_when_nothing_was_over_withheld(self):
         ftc = _ftc(paid=Decimal("1000"), creditable=Decimal("1000"),
                    foreign_income=Decimal("10000"))
