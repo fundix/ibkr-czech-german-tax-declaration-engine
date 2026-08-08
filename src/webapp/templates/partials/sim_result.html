@@ -5,8 +5,10 @@
 
   <section class="cards-row">
     <div class="card stat">
-      <h3>Hrubý výnos</h3>
+      <h3>Hrubý příjem</h3>
       <p class="big">{{ sim.proceeds_czk | czk }} Kč</p>
+      <p class="muted">celá částka z prodeje ({{ sim.quantity | qty }} × {{ sim.price | czk }} {{ sim.currency }}),
+        nabývací cena se neodečítá</p>
     </div>
     <div class="card stat">
       <h3>Zdanitelný zisk</h3>
@@ -23,7 +25,7 @@
   </section>
 
   <table class="items">
-    <thead><tr><th>Lot (pořízen)</th><th class="num">Kusů</th><th class="num">Náklady Kč</th><th class="num">Výnos Kč</th><th class="num">Zisk Kč</th><th>Časový test</th></tr></thead>
+    <thead><tr><th>Lot (pořízen)</th><th class="num">Kusů</th><th class="num">Náklady Kč</th><th class="num">Příjem Kč</th><th class="num">Zisk Kč</th><th>Časový test</th></tr></thead>
     <tbody>
       {% for lot in sim.consumed %}
       <tr>

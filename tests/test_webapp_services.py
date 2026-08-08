@@ -2070,3 +2070,35 @@ class TestDisposalsAndCompare:
 
     def test_disposal_summary_missing_run_returns_none(self, service):
         assert service.disposal_summary("nope", "daily") is None
+
+
+class TestProceedsAreCalledPrijem:
+    """Gross sale proceeds are labelled "příjem", never "výnos".
+
+    §10 calls what you receive on a transfer a *příjem*; "výnos" is a finance
+    word that most often means yield or return, so on a figure that is the whole
+    sale amount it reads as the profit. It misled the tool's own author twice —
+    once in the sell planner, and again on the simulation card where "Hrubý
+    výnos" sat directly beside "Zdanitelný zisk" and the contrast was supposed
+    to carry the meaning. It did not.
+
+    Only the LABELS are constrained. The word is fine in prose, and in another
+    sense entirely (a bond's yield) it would be the correct one.
+    """
+
+    _LABELS = re.compile(
+        r"<(?:th|h3)[^>]*>\s*((?:Hrubý\s+)?[Vv]ýnos[^<]*)</(?:th|h3)>")
+
+    def test_no_column_or_stat_is_labelled_vynos(self):
+        templates = (Path(__file__).resolve().parent.parent
+                     / "src" / "webapp" / "templates")
+        offenders = []
+        for path in templates.rglob("*.html"):
+            text = path.read_text(encoding="utf-8")
+            for match in self._LABELS.finditer(text):
+                line = text[:match.start()].count("\n") + 1
+                offenders.append(f"{path.name}:{line} labels a figure "
+                                 f"{match.group(1).strip()!r}")
+        assert not offenders, (
+            "Proceeds must be labelled 'příjem' (the §10 term), not 'výnos':\n"
+            + "\n".join(offenders))

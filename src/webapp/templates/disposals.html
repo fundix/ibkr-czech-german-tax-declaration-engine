@@ -15,7 +15,7 @@
     <div class="card stat">
       <h3>Zisk/ztráta celkem</h3>
       <p class="big {{ 'neg' if t.gain_loss_czk and t.gain_loss_czk < 0 }}">{{ t.gain_loss_czk | czk if t.gain_loss_czk is not none else "–" }} Kč</p>
-      <p class="muted">{{ t.count or 0 }} prodejů · výnos {{ t.proceeds_czk | czk if t.proceeds_czk is not none else "–" }} Kč
+      <p class="muted">{{ t.count or 0 }} prodejů · příjem {{ t.proceeds_czk | czk if t.proceeds_czk is not none else "–" }} Kč
         · náklady {{ t.cost_basis_czk | czk if t.cost_basis_czk is not none else "–" }} Kč</p>
     </div>
     <div class="card stat">
@@ -35,7 +35,7 @@
       <select name="sort" onchange="this.form.submit()">
         {% set sort_labels = {
           "gain_desc": "nejvyšší zisk", "gain_asc": "nejvyšší ztráta",
-          "abs_desc": "největší pohyb", "proceeds_desc": "největší výnos",
+          "abs_desc": "největší pohyb", "proceeds_desc": "největší příjem",
           "symbol": "podle symbolu"} %}
         {% for key in sorts %}
         <option value="{{ key }}" {{ 'selected' if key == sort }}>{{ sort_labels.get(key, key) }}</option>
@@ -62,7 +62,7 @@
     <thead>
       <tr>
         <th>Symbol</th><th>Druh</th><th class="num">Prodejů</th>
-        <th class="num">Množství</th><th class="num">Výnos Kč</th>
+        <th class="num">Množství</th><th class="num">Příjem Kč</th>
         <th class="num">Náklady Kč</th><th class="num">Zisk/ztráta Kč</th>
         <th class="num">Zdanitelné Kč</th><th class="num">Osvobozeno Kč</th>
         <th>Období</th>
@@ -98,7 +98,7 @@
     <thead>
       <tr>
         <th>Symbol</th><th>Prodáno</th><th>Pořízeno</th><th class="num">Drženo dní</th>
-        <th class="num">Množství</th><th class="num">Výnos Kč</th>
+        <th class="num">Množství</th><th class="num">Příjem Kč</th>
         <th class="num">Náklady Kč</th><th class="num">Zisk/ztráta Kč</th><th data-no-sort>Stav</th>
       </tr>
     </thead>
