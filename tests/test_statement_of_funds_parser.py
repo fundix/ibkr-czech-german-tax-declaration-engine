@@ -132,6 +132,64 @@ class TestConversions:
         assert [c.amount for c in conv.charges] == [Decimal("-40.818")]
         assert conv.disposed.amount == Decimal("-11706.87")
 
+    def _synthetic_trade(self, pair_symbol, pair_currency, pair_amount,
+                         pair_commission, leg_currency, leg_amount,
+                         fee_currency, fee_amount, order):
+        """Build one FOREX trade from three rows, emitted in a chosen order."""
+        import copy
+        recs = parse_statement_of_funds_csv(FIXTURE)
+        template = next(r for r in recs if r.activity_code == "FOREX")
+
+        def row(currency, amount, symbol="", desc="Traded Currency Leg from Forex Trade",
+                commission=None):
+            r = copy.deepcopy(template)
+            r.trade_id, r.transaction_id = "8000", "9800"
+            r.currency_primary, r.amount, r.symbol = currency, amount, symbol
+            r.activity_description = desc
+            r.trade_commission = commission
+            return r
+
+        parts = {
+            "pair": row(pair_currency, pair_amount, pair_symbol,
+                        f"Trading Currency Leg from Forex Trade: {pair_symbol}",
+                        pair_commission),
+            "leg": row(leg_currency, leg_amount),
+            "fee": row(fee_currency, fee_amount, desc="Commission from Forex Trade"),
+        }
+        rows = [parts[k] for k in order]
+        return next(c for c in conversions(recs + rows) if c.trade_id == "8000")
+
+    def test_a_fee_in_the_other_legs_currency_never_becomes_a_leg(self):
+        """A pair whose base is the settlement currency, e.g. CZK.JPY: the fee
+        is billed in CZK, which is also the other leg's currency, so selecting
+        the leg by currency alone let iteration order decide. Fee-first, the fee
+        became the disposed leg — a nonsense rate, the real disposal filed as a
+        charge, and the conversion still reporting itself complete.
+        """
+        for order in (("pair", "leg", "fee"), ("pair", "fee", "leg"),
+                      ("fee", "pair", "leg"), ("fee", "leg", "pair")):
+            conv = self._synthetic_trade(
+                pair_symbol="CZK.JPY", pair_currency="JPY",
+                pair_amount=Decimal("30000"), pair_commission=Decimal("-2"),
+                leg_currency="CZK", leg_amount=Decimal("-5000"),
+                fee_currency="CZK", fee_amount=Decimal("-2"), order=order)
+
+            assert conv.is_complete, order
+            assert {l.currency_primary for l in conv.legs} == {"CZK", "JPY"}, order
+            assert conv.disposed.amount == Decimal("-5000"), order
+            assert [c.amount for c in conv.charges] == [Decimal("-2")], order
+
+    def test_a_zero_commission_does_not_make_a_zero_leg_a_charge(self):
+        """The amount signal must not fire on 0 — a leg can be zero too."""
+        conv = self._synthetic_trade(
+            pair_symbol="EUR.USD", pair_currency="USD",
+            pair_amount=Decimal("1100"), pair_commission=Decimal("0"),
+            leg_currency="EUR", leg_amount=Decimal("0"),
+            fee_currency="CZK", fee_amount=Decimal("-1"),
+            order=("pair", "leg", "fee"))
+        assert conv.is_complete
+        assert {l.currency_primary for l in conv.legs} == {"EUR", "USD"}
+
     def test_only_forex_rows_are_considered(self):
         for conv in conversions(parse_statement_of_funds_csv(FIXTURE)):
             for row in conv.legs + conv.charges:
