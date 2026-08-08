@@ -1165,13 +1165,26 @@ class RunService:
         the moneyness arithmetic, and the fetch pool must not be scheduled from
         the worker it would otherwise block. Pass ``with_quotes=False`` for the
         cheap offline shape.
+
+        **A closed year's book is never priced.** Its ``days_to_expiry`` is
+        frozen at 31 December by design, so pairing it with today's spot would
+        produce a live-looking verdict out of two unrelated moments: a contract
+        expiring in January still reads "16 days left" in February, and a put
+        closed or assigned months ago would be badged "hrozí přiřazení" —
+        prompting action on a position that may not exist. The expiry list
+        stays; the moneyness and risk columns stay empty.
         """
         pf = self.load_portfolio(run_id)
         if pf is None:
-            return {"as_of": None, "tax_year": None, "options": []}
+            return {"as_of": None, "tax_year": None, "options": [],
+                    "historical": False}
         if not with_quotes:
             return self._compute_options_overview(pf, quotes={})
         rows = self._compute_options_overview(pf, quotes=None)
+        if rows.get("historical"):
+            for row in rows["options"]:          # keep the shape, leave it blank
+                self._annotate_moneyness(row, {})
+            return rows
         return self.runner.run_sync(self._price_options_overview, rows, timeout=120)
 
     def _price_options_overview(self, overview: Dict[str, Any]) -> Dict[str, Any]:
@@ -1283,7 +1296,10 @@ class RunService:
         if quotes is not None:
             for row in rows:
                 self._annotate_moneyness(row, quotes)
-        return {"as_of": ref.isoformat(), "tax_year": tax_year, "options": rows}
+        return {"as_of": ref.isoformat(), "tax_year": tax_year, "options": rows,
+                # A closed year's book is a record of 31 December, not a live
+                # position — see options_overview for why that bars pricing.
+                "historical": ref < today}
 
     # ------------------------------------------------------------------
     # Live valuation (quotes + today's CZK), sale simulator, snapshots

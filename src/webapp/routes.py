@@ -91,6 +91,7 @@ def _options_ctx(svc, overview: dict, tax_year) -> dict:
         "options_at_risk": overview.get("at_risk"),
         "options_source": overview.get("source"),
         "options_age_hours": overview.get("age_hours"),
+        "options_historical": overview.get("historical"),
         "options_tax_year": tax_year,
         "assignment_near_days": ASSIGNMENT_NEAR_DAYS,
         "positions_refreshable": bool(

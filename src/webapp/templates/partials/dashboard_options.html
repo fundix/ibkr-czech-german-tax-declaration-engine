@@ -8,6 +8,13 @@
       Výpis udává jednu čistou pozici na kontrakt, takže současný long i short v témže
       kontraktu tady vidět není.</p>
     {% endif %}
+    {% if options_historical %}
+    <p class="note">Kniha uzavřeného roku {{ options_tax_year }} — stav k 31. 12.
+      Cena podkladu ani riziko přiřazení se nepočítají: sloupec <em>Zbývá</em> je
+      zamrzlý na konci roku, takže spolu s dnešní cenou by dával živě vypadající
+      verdikt o pozici, která už nemusí existovat. Pro aktuální stav si načtěte
+      pozice z IBKR nebo přepočítejte běžící rok.</p>
+    {% endif %}
     {% if options_at_risk %}
     <p class="note">⚠ {{ options_at_risk }} vypsaných kontraktů je v penězích s expirací do
       {{ assignment_near_days }} dní — u nich hrozí přiřazení podkladu.</p>

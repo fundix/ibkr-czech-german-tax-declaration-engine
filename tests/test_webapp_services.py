@@ -1217,7 +1217,7 @@ class TestOptionsOverview:
 
     def test_options_overview_missing_run_is_empty(self, service):
         assert service.options_overview("does-not-exist") == {
-            "as_of": None, "tax_year": None, "options": []}
+            "as_of": None, "tax_year": None, "options": [], "historical": False}
 
 
 class TestOptionKeyParsing:
@@ -1497,6 +1497,46 @@ class TestAssignmentRisk:
         assert row["in_the_money"] is None
         assert row["assignment_risk"] is None
         assert ov["quotes_ok"] == 0
+
+    def test_a_closed_years_book_is_never_priced(self, tmp_path):
+        """days_to_expiry is frozen at 31 December by design, so pairing it with
+        today's spot yields a live-looking verdict out of two unrelated moments:
+        a January expiry still reads "16 days left" in February, and a put
+        closed months ago would be badged 'hrozí přiřazení'."""
+        from datetime import date as _date
+        from src.webapp.serializers import dump_json
+
+        quotes = _CountingQuotes(
+            lambda s: SimpleNamespace(ibkr_symbol=s, yahoo_symbol=s,
+                                      price=Decimal("20"), currency="USD",
+                                      fetched_at=0.0))
+        svc = RunService(data_dir=tmp_path / "d", runs_dir=tmp_path / "r",
+                         quote_service=quotes, converter_factory=StubConverter)
+        run_dir = svc.runs_dir / "old-run"
+        run_dir.mkdir(parents=True)
+        closed = _date.today().year - 1
+        dump_json({"tax_year": closed, "positions": [
+            self._contract("P25", "P", "25", "1", days=3),
+        ]}, run_dir / "portfolio.json")
+        try:
+            ov = svc.options_overview("old-run")
+        finally:
+            svc.runner.shutdown(wait=False)
+
+        assert ov["historical"] is True
+        assert quotes.calls == []                 # no round trip at all
+        [row] = ov["options"]
+        assert row["underlying_price"] is None
+        assert row["moneyness_pct"] is None
+        assert row["assignment_risk"] is None
+        # The expiry record itself survives — that is what the book is for.
+        assert row["symbol"] == "P25" and row["expiry_date"]
+
+    def test_the_running_year_is_still_priced(self, tmp_path):
+        ov = self._rows(tmp_path, [
+            self._contract("P25", "P", "25", "1", days=3)])
+        assert ov["historical"] is False
+        assert ov["options"][0]["assignment_risk"] == "high"
 
     def test_one_request_per_underlying_not_per_contract(self, tmp_path):
         quotes = _CountingQuotes(
