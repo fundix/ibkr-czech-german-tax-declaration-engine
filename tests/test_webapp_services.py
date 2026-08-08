@@ -1689,6 +1689,35 @@ class TestDisposalsAndCompare:
         assert self._symbols(service, run, category="CFD",
                              date_from="2026-06-01") == ["CFD1"]
 
+    def test_a_shortened_date_refuses_instead_of_emptying_the_result(self, service):
+        """The window compares as text, so "2026-03" sorts below every day in
+        March: as date_to it would exclude the whole month and answer "you sold
+        nothing", which an MCP client cannot tell from the truth."""
+        run = self._mixed_run(service, "run-d1")
+        with pytest.raises(ValueError, match="YYYY-MM-DD"):
+            service.disposal_summary(run, "daily", date_to="2026-03")
+        with pytest.raises(ValueError, match="YYYY-MM-DD"):
+            service.disposal_summary(run, "daily", date_from="not-a-date")
+
+    def test_a_compact_iso_date_is_canonicalised_not_passed_through(self, service):
+        """"20260315" is a valid ISO date but a wrong comparison key — it sorts
+        above every hyphenated one, so it would match nothing."""
+        run = self._mixed_run(service, "run-d2")
+        assert self._symbols(service, run, date_from="20260501") == \
+            self._symbols(service, run, date_from="2026-05-01")
+        assert self._symbols(service, run, date_from="20260501") != []
+
+    def test_an_inverted_window_is_refused(self, service):
+        run = self._mixed_run(service, "run-d3")
+        with pytest.raises(ValueError, match="date_from"):
+            service.disposal_summary(run, "daily", date_from="2026-06-01",
+                                     date_to="2026-01-01")
+
+    def test_a_bad_bound_is_refused_even_without_a_run(self, service):
+        """The caller's mistake should be named whether or not the run exists."""
+        with pytest.raises(ValueError, match="YYYY-MM-DD"):
+            service.disposal_summary("no-such-run", "daily", date_to="2026-03")
+
     def test_totals_follow_the_filter(self, service):
         """The headline numbers are of the filtered set, not the whole year."""
         run = self._mixed_run(service, "run-f4")

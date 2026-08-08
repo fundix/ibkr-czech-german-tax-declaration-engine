@@ -137,6 +137,46 @@ def item_matches(it: Dict[str, Any], *, category: Optional[str] = None,
     return True
 
 
+def parse_date_bound(value: Optional[str], field: str) -> Optional[str]:
+    """Validate one inclusive date bound and return it canonicalised.
+
+    The window is compared as TEXT, which is exact for ``YYYY-MM-DD`` and
+    silently wrong for anything else. ``"2026-03"`` sorts below every day in
+    March, so passing it as ``date_to`` excludes the whole month and the caller
+    is told there were no disposals — an answer indistinguishable from the truth,
+    and an MCP client has no way to notice it asked wrongly. So a malformed
+    bound raises rather than quietly emptying the result.
+
+    ``"20260315"`` is a valid ISO date but a WRONG comparison key (it sorts
+    above every hyphenated one), which is why the parsed date is re-rendered
+    rather than the input passed through.
+    """
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        raise ValueError(
+            f"{field} musí být datum ve formátu YYYY-MM-DD — dostal jsem "
+            f"{text!r}. Zkrácený zápis jako '2026-03' by tiše vyprázdnil "
+            f"výsledek, proto ho neberu."
+        ) from None
+
+
+def parse_date_window(date_from: Optional[str], date_to: Optional[str]
+                      ) -> Tuple[Optional[str], Optional[str]]:
+    """Both bounds validated, and refused if they exclude everything."""
+    start = parse_date_bound(date_from, "date_from")
+    end = parse_date_bound(date_to, "date_to")
+    if start and end and start > end:
+        raise ValueError(
+            f"date_from ({start}) je po date_to ({end}) — takové okno nemůže "
+            f"nic obsahovat."
+        )
+    return start, end
+
+
 def _qty_display(value: Any) -> str:
     """FIFO quantities carry eight tail zeros; "5.00000000" reads as noise.
 
@@ -3396,7 +3436,13 @@ class RunService:
         the exact asset symbol and the options written on that underlying
         (see ``symbol_matches``); ``category`` and the date window come from
         ``item_matches``. The per-lot rows always show exact symbols.
+
+        Raises ``ValueError`` on a malformed date bound rather than returning an
+        empty result that reads like "you sold nothing then".
         """
+        # Validated BEFORE the run is loaded: a bad bound is the caller's error
+        # and should say so whether or not the run exists.
+        date_from, date_to = parse_date_window(date_from, date_to)
         result = self.load_result(run_id, mode)
         if result is None:
             return None

@@ -15,7 +15,7 @@ from src.webapp import settings
 from src.webapp.jobs import JobStatus
 from src.webapp.services import (
     ASSIGNMENT_NEAR_DAYS, DEFAULT_DISPOSAL_SORT, DISPOSAL_SORTS, item_matches,
-    symbol_matches,
+    parse_date_window, symbol_matches,
 )
 
 logger = logging.getLogger(__name__)
@@ -220,6 +220,12 @@ def items(request: Request, run_id: str, mode: Optional[str] = None,
     if ctx is None:
         return RedirectResponse("/", status_code=303)
     meta, modes, active = ctx
+    try:
+        date_from, date_to = parse_date_window(date_from, date_to)
+    except ValueError as exc:
+        # A hand-edited URL, not a form submission — the date inputs cannot
+        # produce this. Say what is wrong rather than rendering zero rows.
+        return _tpl(request, "partials/job_error.html", error=str(exc))
     result = svc.load_result(run_id, active) or {}
     rows = result.get("items", [])
     # Options offered before filtering, so narrowing never empties the pickers.
@@ -263,11 +269,14 @@ def disposals(request: Request, run_id: str, mode: Optional[str] = None,
     if ctx is None:
         return RedirectResponse("/", status_code=303)
     meta, modes, active = ctx
-    summary = svc.disposal_summary(
-        run_id, active, symbol=symbol or None, sort=sort,
-        category=category or None, date_from=date_from or None,
-        date_to=date_to or None,
-    ) or {}
+    try:
+        summary = svc.disposal_summary(
+            run_id, active, symbol=symbol or None, sort=sort,
+            category=category or None, date_from=date_from or None,
+            date_to=date_to or None,
+        ) or {}
+    except ValueError as exc:
+        return _tpl(request, "partials/job_error.html", error=str(exc))
     # Unfiltered so narrowing by category never empties its own dropdown.
     categories = sorted({it.get("asset_category")
                          for it in (svc.load_result(run_id, active) or {}).get("items", [])

@@ -157,6 +157,14 @@ class TestPages:
         body = r.text.split('id="items-table"', 1)[1]
         assert "ALPHA" not in body and "OLDCO" not in body
 
+    def test_a_malformed_date_says_so_instead_of_showing_zero_rows(self, client):
+        """Only reachable by hand-editing the URL — the date inputs cannot
+        produce it — but an empty table would read as "nothing sold then"."""
+        for path in ("items", "disposals"):
+            r = client.get(f"/results/2024-test/{path}?date_to=2024-03")
+            assert r.status_code == 200
+            assert "YYYY-MM-DD" in r.text
+
     def test_items_symbol_filter_pulls_in_the_options_on_it(self, client):
         """Typing a ticker means the same thing here as on the disposals page."""
         r = client.get("/results/2024-test/items?symbol=UNDR")
