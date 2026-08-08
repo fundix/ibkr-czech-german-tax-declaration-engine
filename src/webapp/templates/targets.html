@@ -187,7 +187,7 @@
         <th data-no-sort></th><th>Titul</th>
         <th class="num">Cena teď</th><th class="num">Příští zóna</th>
         <th class="num">% k zóně</th><th class="num">Ks</th>
-        <th class="num">Výnos Kč</th>
+        <th class="num" title="Celá částka, kterou za prodej dostanete (kusy × cíl), ne zisk. Zisk a daň spočítá tlačítko „Daň?“ u zóny — potřebuje k tomu nabývací cenu každého lotu.">Hrubý příjem Kč</th>
         <th data-no-sort>Časový test</th>
       </tr>
     </thead>
@@ -240,7 +240,11 @@
   </table>
   <p class="note">Řazeno podle vzdálenosti k nejbližší zóně.
     <code>% k zóně</code> = (cíl − aktuální cena) / aktuální cena; záporná hodnota
-    znamená, že cena už zónu překonala. Výnos je hrubý, dnešním kurzem ČNB.</p>
+    znamená, že cena už zónu překonala.
+    <code>Hrubý příjem Kč</code> = kusy × cílová cena, dnešním kurzem ČNB —
+    <strong>celá částka z prodeje, ne zisk</strong>. Zisk by potřeboval nabývací
+    cenu každého lotu přepočtenou kurzem ke dni nákupu; to spočítá tlačítko
+    <code>Daň?</code> u konkrétní zóny, včetně časového testu a odhadu daně.</p>
   <p class="note">Zóna navázaná na konkrétní nákup si rezervuje právě ten lot,
     zóna s uvedeným počtem kusů si ukrojí z toho, co zbylo — takže se stejné akcie
     nezapočítají dvakrát. Zóna <em>bez</em> počtu kusů nic nerezervuje a ukazuje
