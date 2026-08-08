@@ -190,6 +190,27 @@ Bezpodmínečné `copy_abs()` pro každý WHT řádek → kladný refund (běžn
 > *vypůjčená* měna, ne chyba. Plný výpočet proto potřebuje nejdřív nový Flex
 > slot (**Statement of Funds** nebo alespoň **Forex Balances**) a pak
 > rozhodnutí, zda je pozbytím i zaplacení cenného papíru cizí měnou.
+>
+> **Stav 2026-08-08 — datová blokace odpadla, výpočet pořád není.**
+> Flex slot **Statement of Funds** existuje (query 5 v
+> [docs/ibkr-flex-query-setup.md](docs/ibkr-flex-query-setup.md)) a
+> `src/parsers/statement_of_funds_parser.py` z něj čte přesně to, co chybělo:
+> počáteční zůstatek každé měny z řádků `Starting Balance` a konverze
+> složené zpátky z jejich dvou či tří řádků. Na reálném běhu 2026-01-01:
+> CHF −395,40 · GBP 82 · EUR 0,24 · USD −4 505,20 · CZK +11 792,39 ·
+> SEK −7 448,71 — záporné zůstatky potvrzují, že FIFO musí umět vypůjčenou
+> měnu, ne ji clampovat na nulu.
+>
+> **Co zbývá:** parser nemá produkčního konzumenta — soubor se stahuje
+> a ukládá, ale žádný engine ho nečte, takže daňově se nic nezměnilo
+> (položky jsou dál `PENDING_MANUAL_REVIEW` mimo základ). A pořád platí obě
+> daňové otázky, na kterých to viselo od začátku: je pozbytím i zaplacení
+> cenného papíru cizí měnou, a jaký je režim vypůjčené měny. Bez odpovědí
+> nemá smysl FIFO psát — určují, co je vůbec realizace.
+>
+> Provozně navíc chybí backfill: bootstrap přeskakuje roky, které už jsou
+> `run_ready`, takže 2024 a 2025 si `statement_of_funds.csv` samy nikdy
+> nestáhnou a historie nabývacích kurzů pro ně nebude.
 
 **M16 — Zaplacené Stückzinsen v CZ tiše zmizí → úroky §8 nadhodnoceny** — [item_builder.py:180-184](src/countries/cz/item_builder.py:180). INTEREST_PAID_STUECKZINSEN spadne do `continue`. **Oprava:** záporná položka CZ_8_INTEREST nebo PENDING.
 
