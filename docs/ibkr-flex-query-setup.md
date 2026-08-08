@@ -23,9 +23,13 @@ Vytvoříte **pět samostatných query** (každá právě jedna sekce!) — engi
 čte každý dataset jako samostatné CSV. Jedna query s více sekcemi by
 vyrobila slepený soubor, který parser nepřečte.
 
-Query 1–4 jsou povinné. Query 5 (Statement of Funds) je potřeba jen pro
-kurzové rozdíly z konverzí měn — bez ní engine funguje, jen ty konverze
-neumí spočítat a jen je označí k ruční kontrole.
+Query 1–4 jsou povinné. Query 5 (Statement of Funds) je **volitelná a zatím
+do daně nic nepřináší**: engine bez ní funguje úplně stejně a konverze měn
+tak či tak jen označí k ruční kontrole (§10 kurzový zisk se ještě nepočítá,
+chybí FIFO na hotovosti). Pořizuje se dopředu, protože je to jediný výpis,
+který nese hotovostní zůstatky — a nabývací kurz pozbyté měny může být
+z dřívějšího roku, takže historii je potřeba mít stáhnutou, než se výpočet
+doplní.
 
 ## Společná konfigurace (všechny query)
 
@@ -204,10 +208,15 @@ Ověřeno na skutečném běhu za červenec 2026 (24 sloupců, jedna hlavička):
   takže k rozlišení neslouží.
 - `Amount == Debit + Credit` (ověřeno na všech řádcích); `Debit` je záporný,
   `Credit` kladný.
-- **Konverze měn = dvě řádky se stejným `TradeID` i `TransactionID`**, jedna
-  za každou nohu. `ActivityCode` je `FOREX`. Pozor, popis se mezi nohama
-  liší („Trad**ed** Currency Leg" vs „Trad**ing** Currency Leg"), takže se
-  na něj nedá spoléhat — párovat se musí přes ID.
+- **Konverze měn = dvě NEBO TŘI řádky se stejným `TradeID`** — jedna za každou
+  měnovou nohu a většinou ještě komise, účtovaná v té měně, ve které ji IBKR
+  fakturuje. `ActivityCode` je `FOREX` na všech.
+  `TransactionID` **spojovací klíč není**: komise má na některých obchodech
+  vlastní a na jiných stejné jako nohy (reálné obchody 1466896593 a
+  1295097860), takže seskupení podle něj udělalo z 17 konverzí 26. Popis taky
+  ne — nohy se mezi sebou samy liší („Trad**ed** Currency Leg" vs
+  „Trad**ing** Currency Leg"). Nohy pozná jen **symbol páru**, který jedna
+  z nich vždycky nese: `USD.CZK` jmenuje obě měny.
 - `ActivityCode` viděné v praxi: `BUY`, `SELL`, `FOREX`, `DINT` (debetní
   úrok), `DIV`, `PIL` (payment in lieu), `OFEE`, `FRTAX` (srážková daň
   a její opravy), prázdný u zůstatků.
