@@ -598,6 +598,74 @@ class TestLivePortfolio:
         assert Decimal(snaps[0]["total_value_czk"]) == Decimal("8200")
 
 
+class TestSnapshotSeries:
+    """One line must not be drawn out of incompatible series.
+
+    The real portfolio.db held both: 2025-book rows (809k) chronologically
+    interleaved with 2026 rows (1.19M), plotted as a 32% crash; and a formula
+    change worth ~+11% (1 353 459 -> 1 504 177 overnight) with nothing marking
+    the step.
+    """
+
+    def _write(self, svc, rows):
+        """rows = [(taken_at, tax_year, value, formula_version)]"""
+        from src.webapp.services import VALUATION_FORMULA_VERSION  # noqa: F401
+        with svc._snapshot_db() as conn:
+            conn.executemany(
+                "INSERT INTO snapshots (taken_at, tax_year, total_value_czk,"
+                " total_cost_czk, quotes_ok, formula_version)"
+                " VALUES (?, ?, ?, '', 1, ?)", rows)
+
+    def test_a_different_tax_year_is_left_out(self, stub_service):
+        from src.webapp.services import VALUATION_FORMULA_VERSION as V
+        self._write(stub_service, [
+            ("2026-07-03T10:00:00", 2025, "809647", V),
+            ("2026-07-04T10:00:00", 2026, "1185834", V),
+            ("2026-07-05T10:00:00", 2026, "1190000", V),
+        ])
+        s = stub_service.snapshot_series(2026)
+        assert [p["total_value_czk"] for p in s["points"]] == ["1185834", "1190000"]
+        assert s["excluded_other_years"] == 1
+        assert s["excluded_older_formula"] == 0
+
+    def test_an_older_valuation_formula_is_left_out(self, stub_service):
+        from src.webapp.services import VALUATION_FORMULA_VERSION as V
+        self._write(stub_service, [
+            ("2026-08-06T10:00:00", 2026, "1367530", "v1"),
+            ("2026-08-07T10:00:00", 2026, "1353459", None),   # pre-column rows
+            ("2026-08-08T10:00:00", 2026, "1504177", V),
+        ])
+        s = stub_service.snapshot_series(2026)
+        assert [p["total_value_czk"] for p in s["points"]] == ["1504177"]
+        assert s["excluded_older_formula"] == 2
+
+    def test_points_stay_in_chronological_order(self, stub_service):
+        from src.webapp.services import VALUATION_FORMULA_VERSION as V
+        self._write(stub_service, [
+            ("2026-08-08T10:00:00", 2026, "300", V),
+            ("2026-08-06T10:00:00", 2026, "100", V),
+            ("2026-08-07T10:00:00", 2026, "200", V),
+        ])
+        s = stub_service.snapshot_series(2026)
+        assert [p["total_value_czk"] for p in s["points"]] == ["100", "200", "300"]
+
+    def test_new_snapshots_carry_the_current_formula_version(self, stub_service):
+        from src.webapp.services import VALUATION_FORMULA_VERSION as V
+        stub_service._compute_live_portfolio(
+            {"tax_year": 2025, "positions": [
+                {**_sim_position(), "total_cost_eur": "280"}]})
+        with stub_service._snapshot_db() as conn:
+            versions = [r[0] for r in conn.execute(
+                "SELECT formula_version FROM snapshots")]
+        assert versions == [V]
+
+    def test_an_unreadable_database_is_empty_not_an_error(self, stub_service):
+        stub_service.data_dir.mkdir(parents=True, exist_ok=True)
+        (stub_service.data_dir / "portfolio.db").write_bytes(b"not a database")
+        assert stub_service.snapshot_series(2026) == {
+            "points": [], "excluded_other_years": 0, "excluded_older_formula": 0}
+
+
 class TestAllocationSlices:
     """Chart.js normalises its input to a full circle, so a bare top-N lied."""
 
@@ -1149,7 +1217,7 @@ class TestOptionsOverview:
 
     def test_options_overview_missing_run_is_empty(self, service):
         assert service.options_overview("does-not-exist") == {
-            "as_of": None, "tax_year": None, "options": []}
+            "as_of": None, "tax_year": None, "options": [], "historical": False}
 
 
 class TestOptionKeyParsing:
@@ -1430,6 +1498,46 @@ class TestAssignmentRisk:
         assert row["assignment_risk"] is None
         assert ov["quotes_ok"] == 0
 
+    def test_a_closed_years_book_is_never_priced(self, tmp_path):
+        """days_to_expiry is frozen at 31 December by design, so pairing it with
+        today's spot yields a live-looking verdict out of two unrelated moments:
+        a January expiry still reads "16 days left" in February, and a put
+        closed months ago would be badged 'hrozí přiřazení'."""
+        from datetime import date as _date
+        from src.webapp.serializers import dump_json
+
+        quotes = _CountingQuotes(
+            lambda s: SimpleNamespace(ibkr_symbol=s, yahoo_symbol=s,
+                                      price=Decimal("20"), currency="USD",
+                                      fetched_at=0.0))
+        svc = RunService(data_dir=tmp_path / "d", runs_dir=tmp_path / "r",
+                         quote_service=quotes, converter_factory=StubConverter)
+        run_dir = svc.runs_dir / "old-run"
+        run_dir.mkdir(parents=True)
+        closed = _date.today().year - 1
+        dump_json({"tax_year": closed, "positions": [
+            self._contract("P25", "P", "25", "1", days=3),
+        ]}, run_dir / "portfolio.json")
+        try:
+            ov = svc.options_overview("old-run")
+        finally:
+            svc.runner.shutdown(wait=False)
+
+        assert ov["historical"] is True
+        assert quotes.calls == []                 # no round trip at all
+        [row] = ov["options"]
+        assert row["underlying_price"] is None
+        assert row["moneyness_pct"] is None
+        assert row["assignment_risk"] is None
+        # The expiry record itself survives — that is what the book is for.
+        assert row["symbol"] == "P25" and row["expiry_date"]
+
+    def test_the_running_year_is_still_priced(self, tmp_path):
+        ov = self._rows(tmp_path, [
+            self._contract("P25", "P", "25", "1", days=3)])
+        assert ov["historical"] is False
+        assert ov["options"][0]["assignment_risk"] == "high"
+
     def test_one_request_per_underlying_not_per_contract(self, tmp_path):
         quotes = _CountingQuotes(
             lambda s: SimpleNamespace(ibkr_symbol=s, yahoo_symbol=s,
@@ -1580,6 +1688,35 @@ class TestDisposalsAndCompare:
                              date_from="2026-06-01") == []
         assert self._symbols(service, run, category="CFD",
                              date_from="2026-06-01") == ["CFD1"]
+
+    def test_a_shortened_date_refuses_instead_of_emptying_the_result(self, service):
+        """The window compares as text, so "2026-03" sorts below every day in
+        March: as date_to it would exclude the whole month and answer "you sold
+        nothing", which an MCP client cannot tell from the truth."""
+        run = self._mixed_run(service, "run-d1")
+        with pytest.raises(ValueError, match="YYYY-MM-DD"):
+            service.disposal_summary(run, "daily", date_to="2026-03")
+        with pytest.raises(ValueError, match="YYYY-MM-DD"):
+            service.disposal_summary(run, "daily", date_from="not-a-date")
+
+    def test_a_compact_iso_date_is_canonicalised_not_passed_through(self, service):
+        """"20260315" is a valid ISO date but a wrong comparison key — it sorts
+        above every hyphenated one, so it would match nothing."""
+        run = self._mixed_run(service, "run-d2")
+        assert self._symbols(service, run, date_from="20260501") == \
+            self._symbols(service, run, date_from="2026-05-01")
+        assert self._symbols(service, run, date_from="20260501") != []
+
+    def test_an_inverted_window_is_refused(self, service):
+        run = self._mixed_run(service, "run-d3")
+        with pytest.raises(ValueError, match="date_from"):
+            service.disposal_summary(run, "daily", date_from="2026-06-01",
+                                     date_to="2026-01-01")
+
+    def test_a_bad_bound_is_refused_even_without_a_run(self, service):
+        """The caller's mistake should be named whether or not the run exists."""
+        with pytest.raises(ValueError, match="YYYY-MM-DD"):
+            service.disposal_summary("no-such-run", "daily", date_to="2026-03")
 
     def test_totals_follow_the_filter(self, service):
         """The headline numbers are of the filtered set, not the whole year."""

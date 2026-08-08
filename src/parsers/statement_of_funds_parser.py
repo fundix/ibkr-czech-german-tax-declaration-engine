@@ -175,13 +175,38 @@ def conversions(records: List[RawStatementOfFundsRecord]) -> List[Conversion]:
             continue
 
         base, _, quote = (pair.symbol or "").partition(".")
-        wanted = {base.strip().upper(), quote.strip().upper()}
+        other_currency = ({base.strip().upper(), quote.strip().upper()}
+                          - {pair.currency_primary.upper()})
         conv.legs.append(pair)
+
+        def _is_charge(r: RawStatementOfFundsRecord) -> bool:
+            """A fee booked to this trade rather than one of its currency sides.
+
+            Two independent signals, because neither has to carry it alone: the
+            fee equals the pair row's own ``trade_commission`` (structural, and
+            true for 10 of 10 such rows on the real book), and IBKR labels it
+            (uniform across all 17). A zero commission is not a signal — a leg
+            can be zero too.
+            """
+            comm = pair.trade_commission
+            if comm and r.amount == comm:
+                return True
+            return "COMMISSION" in (r.activity_description or "").upper()
+
+        # Charges are taken out FIRST. Selecting the second leg by "currency is
+        # the other side of the pair" alone meant that a fee billed in exactly
+        # that currency competed for the slot, and iteration order decided the
+        # winner: the fee could become the disposed leg, yielding a nonsense
+        # rate while the real disposal was filed as a charge and the pair still
+        # looked complete. Latent on this book (0 occurrences) — but a pair
+        # whose base is the settlement currency, e.g. CZK.JPY, produces it.
         for r in rows:
             if r is pair:
                 continue
-            other = wanted - {pair.currency_primary.upper()}
-            if r.currency_primary.upper() in other and len(conv.legs) < 2:
+            if _is_charge(r):
+                conv.charges.append(r)
+            elif (r.currency_primary.upper() in other_currency
+                  and len(conv.legs) < 2):
                 conv.legs.append(r)
             else:
                 conv.charges.append(r)

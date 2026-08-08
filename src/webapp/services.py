@@ -137,6 +137,46 @@ def item_matches(it: Dict[str, Any], *, category: Optional[str] = None,
     return True
 
 
+def parse_date_bound(value: Optional[str], field: str) -> Optional[str]:
+    """Validate one inclusive date bound and return it canonicalised.
+
+    The window is compared as TEXT, which is exact for ``YYYY-MM-DD`` and
+    silently wrong for anything else. ``"2026-03"`` sorts below every day in
+    March, so passing it as ``date_to`` excludes the whole month and the caller
+    is told there were no disposals — an answer indistinguishable from the truth,
+    and an MCP client has no way to notice it asked wrongly. So a malformed
+    bound raises rather than quietly emptying the result.
+
+    ``"20260315"`` is a valid ISO date but a WRONG comparison key (it sorts
+    above every hyphenated one), which is why the parsed date is re-rendered
+    rather than the input passed through.
+    """
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        raise ValueError(
+            f"{field} musí být datum ve formátu YYYY-MM-DD — dostal jsem "
+            f"{text!r}. Zkrácený zápis jako '2026-03' by tiše vyprázdnil "
+            f"výsledek, proto ho neberu."
+        ) from None
+
+
+def parse_date_window(date_from: Optional[str], date_to: Optional[str]
+                      ) -> Tuple[Optional[str], Optional[str]]:
+    """Both bounds validated, and refused if they exclude everything."""
+    start = parse_date_bound(date_from, "date_from")
+    end = parse_date_bound(date_to, "date_to")
+    if start and end and start > end:
+        raise ValueError(
+            f"date_from ({start}) je po date_to ({end}) — takové okno nemůže "
+            f"nic obsahovat."
+        )
+    return start, end
+
+
 def _qty_display(value: Any) -> str:
     """FIFO quantities carry eight tail zeros; "5.00000000" reads as noise.
 
@@ -167,6 +207,12 @@ QUOTE_FETCH_WORKERS = 8
 # Slices the allocation doughnut draws before folding the rest into "ostatní".
 # 12 keeps the legend readable; the book runs to 36 rows, so the fold matters.
 ALLOCATION_SLICES = 12
+
+# Bumped whenever the live-valuation total changes meaning, so stored snapshots
+# computed the old way are never charted next to new ones. v2: option contracts
+# are valued at their multiplier and written legs subtract — worth ~+11% on the
+# real book, which the trend chart drew as an overnight gain.
+VALUATION_FORMULA_VERSION = "v2"
 
 # How far a payer's effective withholding rate may sit above its treaty cap
 # before the dividends page calls it over-withheld. Half a point: the per-item
@@ -1159,13 +1205,26 @@ class RunService:
         the moneyness arithmetic, and the fetch pool must not be scheduled from
         the worker it would otherwise block. Pass ``with_quotes=False`` for the
         cheap offline shape.
+
+        **A closed year's book is never priced.** Its ``days_to_expiry`` is
+        frozen at 31 December by design, so pairing it with today's spot would
+        produce a live-looking verdict out of two unrelated moments: a contract
+        expiring in January still reads "16 days left" in February, and a put
+        closed or assigned months ago would be badged "hrozí přiřazení" —
+        prompting action on a position that may not exist. The expiry list
+        stays; the moneyness and risk columns stay empty.
         """
         pf = self.load_portfolio(run_id)
         if pf is None:
-            return {"as_of": None, "tax_year": None, "options": []}
+            return {"as_of": None, "tax_year": None, "options": [],
+                    "historical": False}
         if not with_quotes:
             return self._compute_options_overview(pf, quotes={})
         rows = self._compute_options_overview(pf, quotes=None)
+        if rows.get("historical"):
+            for row in rows["options"]:          # keep the shape, leave it blank
+                self._annotate_moneyness(row, {})
+            return rows
         return self.runner.run_sync(self._price_options_overview, rows, timeout=120)
 
     def _price_options_overview(self, overview: Dict[str, Any]) -> Dict[str, Any]:
@@ -1277,7 +1336,10 @@ class RunService:
         if quotes is not None:
             for row in rows:
                 self._annotate_moneyness(row, quotes)
-        return {"as_of": ref.isoformat(), "tax_year": tax_year, "options": rows}
+        return {"as_of": ref.isoformat(), "tax_year": tax_year, "options": rows,
+                # A closed year's book is a record of 31 December, not a live
+                # position — see options_overview for why that bars pricing.
+                "historical": ref < today}
 
     # ------------------------------------------------------------------
     # Live valuation (quotes + today's CZK), sale simulator, snapshots
@@ -1989,6 +2051,11 @@ class RunService:
             " total_cost_czk TEXT,"
             " quotes_ok INTEGER)"
         )
+        # Added later; rows written before it are NULL, which is what marks them
+        # as computed by an unknown (older) formula.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(snapshots)")}
+        if "formula_version" not in cols:
+            conn.execute("ALTER TABLE snapshots ADD COLUMN formula_version TEXT")
         return conn
 
     def _maybe_save_snapshot(self, tax_year, live: Dict[str, Any]) -> None:
@@ -2013,30 +2080,64 @@ class RunService:
 
     def _insert_snapshot(self, conn, tax_year, live: Dict[str, Any]) -> None:
         conn.execute(
-            "INSERT INTO snapshots (taken_at, tax_year, total_value_czk, total_cost_czk, quotes_ok)"
-            " VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO snapshots (taken_at, tax_year, total_value_czk,"
+            " total_cost_czk, quotes_ok, formula_version)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
             (
                 datetime.now(timezone.utc).isoformat(),
                 tax_year,
                 str(live.get("total_value_czk")),
                 str(live.get("total_cost_czk") or ""),
                 live.get("quotes_ok") or 0,
+                VALUATION_FORMULA_VERSION,
             ),
         )
 
-    def list_snapshots(self, limit: int = 365) -> List[Dict[str, Any]]:
+    def snapshot_series(self, tax_year: Optional[int] = None,
+                        limit: int = 365) -> Dict[str, Any]:
+        """Net-worth points that are actually comparable, plus what was left out.
+
+        Two things made one line out of three incompatible series:
+
+        * **The book.** Rows carry the tax year whose run produced them, and
+          ``_maybe_save_snapshot`` records whichever run's live view is opened
+          first that day — so opening a 2025 result once put an 809k row between
+          1.19M rows of 2026 and the chart drew a 32% crash that never happened.
+        * **The formula.** Valuing option contracts at their multiplier and
+          counting written legs moved the total by ~+11% overnight (1 353 459 →
+          1 504 177 on the real book) with nothing marking the step.
+
+        So a series is one tax year at one formula version. Older rows are
+        reported rather than silently dropped, so the page can say why its chart
+        starts where it does.
+        """
         try:
             with self._snapshot_db() as conn:
                 rows = conn.execute(
-                    "SELECT taken_at, total_value_czk FROM snapshots ORDER BY taken_at DESC LIMIT ?",
+                    "SELECT taken_at, total_value_czk, tax_year, formula_version"
+                    " FROM snapshots ORDER BY taken_at DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
-            return [
-                {"taken_at": r[0], "total_value_czk": r[1]}
-                for r in reversed(rows)
-            ]
         except Exception:
-            return []
+            return {"points": [], "excluded_other_years": 0,
+                    "excluded_older_formula": 0}
+
+        points, other_years, older_formula = [], 0, 0
+        for taken_at, value, row_year, version in reversed(rows):
+            if tax_year is not None and row_year != tax_year:
+                other_years += 1
+                continue
+            if version != VALUATION_FORMULA_VERSION:
+                older_formula += 1
+                continue
+            points.append({"taken_at": taken_at, "total_value_czk": value})
+        return {"points": points, "excluded_other_years": other_years,
+                "excluded_older_formula": older_formula}
+
+    def list_snapshots(self, tax_year: Optional[int] = None,
+                       limit: int = 365) -> List[Dict[str, Any]]:
+        """Comparable points only — see ``snapshot_series`` for what that means."""
+        return self.snapshot_series(tax_year, limit)["points"]
 
     # ------------------------------------------------------------------
     # Asset classification (non-interactive cache editor)
@@ -3335,7 +3436,13 @@ class RunService:
         the exact asset symbol and the options written on that underlying
         (see ``symbol_matches``); ``category`` and the date window come from
         ``item_matches``. The per-lot rows always show exact symbols.
+
+        Raises ``ValueError`` on a malformed date bound rather than returning an
+        empty result that reads like "you sold nothing then".
         """
+        # Validated BEFORE the run is loaded: a bad bound is the caller's error
+        # and should say so whether or not the run exists.
+        date_from, date_to = parse_date_window(date_from, date_to)
         result = self.load_result(run_id, mode)
         if result is None:
             return None

@@ -15,7 +15,7 @@ from src.webapp import settings
 from src.webapp.jobs import JobStatus
 from src.webapp.services import (
     ASSIGNMENT_NEAR_DAYS, DEFAULT_DISPOSAL_SORT, DISPOSAL_SORTS, item_matches,
-    symbol_matches,
+    parse_date_window, symbol_matches,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,7 +78,8 @@ def dashboard_valuation(request: Request):
     opt = svc.options_overview(data["run_id"])
     return _tpl(request, "partials/dashboard_valuation.html",
                 run_id=data["run_id"], meta=data["meta"], live=live,
-                allocation=allocation, snapshots=svc.list_snapshots(),
+                allocation=allocation,
+                snapshots=svc.snapshot_series(live["tax_year"]),
                 **_options_ctx(svc, opt, live["tax_year"]))
 
 
@@ -90,6 +91,7 @@ def _options_ctx(svc, overview: dict, tax_year) -> dict:
         "options_at_risk": overview.get("at_risk"),
         "options_source": overview.get("source"),
         "options_age_hours": overview.get("age_hours"),
+        "options_historical": overview.get("historical"),
         "options_tax_year": tax_year,
         "assignment_near_days": ASSIGNMENT_NEAR_DAYS,
         "positions_refreshable": bool(
@@ -218,6 +220,12 @@ def items(request: Request, run_id: str, mode: Optional[str] = None,
     if ctx is None:
         return RedirectResponse("/", status_code=303)
     meta, modes, active = ctx
+    try:
+        date_from, date_to = parse_date_window(date_from, date_to)
+    except ValueError as exc:
+        # A hand-edited URL, not a form submission — the date inputs cannot
+        # produce this. Say what is wrong rather than rendering zero rows.
+        return _tpl(request, "partials/job_error.html", error=str(exc))
     result = svc.load_result(run_id, active) or {}
     rows = result.get("items", [])
     # Options offered before filtering, so narrowing never empties the pickers.
@@ -261,11 +269,14 @@ def disposals(request: Request, run_id: str, mode: Optional[str] = None,
     if ctx is None:
         return RedirectResponse("/", status_code=303)
     meta, modes, active = ctx
-    summary = svc.disposal_summary(
-        run_id, active, symbol=symbol or None, sort=sort,
-        category=category or None, date_from=date_from or None,
-        date_to=date_to or None,
-    ) or {}
+    try:
+        summary = svc.disposal_summary(
+            run_id, active, symbol=symbol or None, sort=sort,
+            category=category or None, date_from=date_from or None,
+            date_to=date_to or None,
+        ) or {}
+    except ValueError as exc:
+        return _tpl(request, "partials/job_error.html", error=str(exc))
     # Unfiltered so narrowing by category never empties its own dropdown.
     categories = sorted({it.get("asset_category")
                          for it in (svc.load_result(run_id, active) or {}).get("items", [])
@@ -353,7 +364,7 @@ def portfolio_live(request: Request, run_id: str):
         return _tpl(request, "partials/job_error.html", error=f"Ocenění selhalo: {exc}")
     if live is None:
         return HTMLResponse("")
-    snapshots = svc.list_snapshots()
+    snapshots = svc.snapshot_series(live["tax_year"])
     allocation = svc.allocation_slices(live["positions"])
     return _tpl(request, "partials/portfolio_live.html", run_id=run_id, live=live,
                 allocation=allocation, snapshots=snapshots)
