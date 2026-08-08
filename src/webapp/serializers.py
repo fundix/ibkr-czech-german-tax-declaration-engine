@@ -40,3 +40,21 @@ def format_czk(value: Any) -> str:
         return str(value)
     formatted = f"{dec:,.2f}"
     return formatted.replace(",", " ").replace(".", ",")
+
+
+def format_quantity(value: Any) -> str:
+    """A share count without the FIFO tail: "10.00000000" -> "10".
+
+    Fractional holdings are real (IBKR sells them, and a corporate action can
+    leave one behind), so decimals are dropped only when they are ALL zero —
+    the point is to remove eight zeros of noise, never to round a position away.
+
+    ``format`` rather than a bare ``normalize()``, which renders
+    ``Decimal("100")`` as "1E+2".
+    """
+    if value is None or value == "":
+        return "–"
+    try:
+        return format(Decimal(str(value)).normalize(), "f")
+    except Exception:
+        return str(value)

@@ -551,6 +551,12 @@ table.classify-table td {
 table.classify-table tr.attention td {
     background: var(--warn-bg);
 }
+/* Stays block-level `flex`: these forms hold several fields that must lay out in
+   a row and wrap as a group. Making it `inline-flex` looks like the fix for
+   sibling forms stacking, but an inline box shrinks to fit — a wrapping flex
+   container then collapses toward its widest item and puts every field on its
+   own line. Siblings that should sit side by side go in an `.action-row`
+   instead, which works whatever the children's own display is. */
 .inline-form {
     display: flex;
     align-items: center;
@@ -566,8 +572,27 @@ table.classify-table tr.attention td {
     font-size: 0.9rem;
     background: #fff;
 }
-.inline-form input[type="text"] {
+/* Only fields that did not ask for a width: a `size` attribute is a deliberate
+   choice and 12rem was overriding it, stretching a 7-character quantity box to
+   the width of the note field. */
+.inline-form input[type="text"]:not([size]) {
     min-width: 12rem;
+}
+
+/* A row of sibling actions — each is its own one-button <form>, and without a
+   flex parent every one of them claimed a line, so the buttons came out stacked
+   in a column. Children become flex items here regardless of their own display,
+   which is why this works where changing `.inline-form` does not. The gap does
+   the spacing, so the forms' own bottom margin would add a ragged gutter. */
+.action-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.15rem;
+}
+.action-row .inline-form {
+    margin-bottom: 0;
 }
 
 /* Dashboard extras */

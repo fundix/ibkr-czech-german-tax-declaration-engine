@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from src.webapp.routes import router
-from src.webapp.serializers import format_czk
+from src.webapp.serializers import format_czk, format_quantity
 from src.webapp.services import RunService
 
 _HERE = Path(__file__).resolve().parent
@@ -27,6 +27,7 @@ def create_app(services: Optional[RunService] = None) -> FastAPI:
 
     templates = Jinja2Templates(directory=str(_HERE / "templates"))
     templates.env.filters["czk"] = format_czk
+    templates.env.filters["qty"] = format_quantity
     templates.env.globals["today_year"] = lambda: date.today().year
     app.state.templates = templates
 

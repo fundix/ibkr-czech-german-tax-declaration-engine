@@ -58,7 +58,7 @@ from src.webapp.ibkr_flex import (
     save_flex_config,
 )
 from src.webapp.jobs import JobRunner, JobState, engine_file_lock
-from src.webapp.serializers import dump_json, load_json
+from src.webapp.serializers import dump_json, format_quantity, load_json
 
 logger = logging.getLogger(__name__)
 
@@ -180,15 +180,13 @@ def parse_date_window(date_from: Optional[str], date_to: Optional[str]
 def _qty_display(value: Any) -> str:
     """FIFO quantities carry eight tail zeros; "5.00000000" reads as noise.
 
-    ``format`` rather than a bare ``normalize()``, which renders Decimal("100")
-    as "1E+2".
+    Same formatting as the ``qty`` template filter, but **empty** rather than a
+    dash for a missing value: this one is baked into the options payload, where
+    the card renders it bare.
     """
     if value in (None, ""):
         return ""
-    try:
-        return format(Decimal(str(value)).normalize(), "f")
-    except (InvalidOperation, ValueError):
-        return str(value)
+    return format_quantity(value)
 
 # Sell-target ladder ("prodejní zóny") — user state, not a run artifact.
 SELL_TARGETS_FILE = "sell_targets.json"
@@ -2765,20 +2763,24 @@ class RunService:
         unsized = [z for z in open_zones
                    if not z.get("lot_acquired") and not z.get("quantity")]
 
+        # None for an option the run never gave a multiplier: the zone views
+        # then report no money rather than a figure 100x light.
+        size = self._contract_size(pos) if pos else Decimal(1)
+
         views: Dict[str, Dict[str, Any]] = {}
         for zone in pinned + sized:
             views[zone["id"]] = self._zone_view(
                 zone, pool, applies, today, live_price, live_currency,
-                converter, consume=True)
+                converter, consume=True, size=size)
         for zone in unsized:
             views[zone["id"]] = self._zone_view(
                 zone, pool, applies, today, live_price, live_currency,
-                converter, consume=False)
+                converter, consume=False, size=size)
         for zone in target["zones"]:
             if zone.get("done_at"):
                 views[zone["id"]] = self._zone_view(
                     zone, [], applies, today, live_price, live_currency,
-                    converter, consume=False)
+                    converter, consume=False, size=size)
 
         zone_views = [views[z["id"]] for z in target["zones"]]
         open_views = [v for v in zone_views if not v["done_at"]]
@@ -2810,14 +2812,34 @@ class RunService:
             "over_allocated": bool(
                 pos and sum((v["wanted"] for v in open_views
                              if v["consumes"]), Decimal(0)) > held),
+            # Whole-plan totals across every open rung. The table's price,
+            # distance, quantity, proceeds and gain columns all describe the
+            # NEXT rung — these are what the ladder adds up to, shown alongside
+            # once a symbol has more than one rung open. Reporting a plan total
+            # in a row of next-rung columns is how the proceeds column came to
+            # sit next to a quantity it did not belong to.
             "proceeds_czk": sum((v["proceeds_czk"] for v in open_views
                                  if v["proceeds_czk"] is not None), Decimal(0)) or None,
+            "plan_gain_czk": sum((v["gain_czk"] for v in open_views
+                                  if v["gain_czk"] is not None), Decimal(0)) or None,
+            "open_zone_count": len(open_views),
         }
 
     def _zone_view(self, zone: Dict[str, Any], pool: List[Dict[str, Any]],
                    applies: bool, today: date, live_price: Optional[Decimal],
                    live_currency: Optional[str], converter,
-                   consume: bool = True) -> Dict[str, Any]:
+                   consume: bool = True,
+                   size: Optional[Decimal] = Decimal(1)) -> Dict[str, Any]:
+        """One rung of the ladder, priced.
+
+        ``size`` is shares per unit held — 1 for stock, the multiplier for an
+        option. The zone price is quoted per underlying share while a lot's cost
+        is already per contract, so omitting it puts the two legs 100x apart,
+        the same trap ``_compute_simulation`` guards. Passing **None** means the
+        multiplier is unknown (an option from a run that never recorded one);
+        money figures then come back ``None`` rather than 100x light. The
+        default is the stock case, for direct callers.
+        """
         price = Decimal(str(zone["price"]))
         pinned_to = zone.get("lot_acquired")
 
@@ -2836,6 +2858,9 @@ class RunService:
         remaining = wanted
         consumed, exempt_qty, unknown_qty = Decimal(0), Decimal(0), Decimal(0)
         wait_until = None
+        # Cost of exactly the shares this rung takes, so the gain is measured on
+        # the same lots the rung claims — not on the position average.
+        cost_eur, cost_known = Decimal(0), True
         for bucket in take_from:
             if remaining <= 0:
                 break
@@ -2846,6 +2871,11 @@ class RunService:
                 bucket["quantity"] -= take      # the cursor: later rungs see less
             remaining -= take
             consumed += take
+            unit_cost = bucket.get("unit_cost_eur")
+            if unit_cost is None:
+                cost_known = False              # one blind lot voids the gain
+            else:
+                cost_eur += take * Decimal(str(unit_cost))
             state = _lot_is_exempt({"time_test_deadline": bucket["time_test_deadline"]},
                                    applies, today)
             if state is True:
@@ -2863,10 +2893,21 @@ class RunService:
         if live_price and live_price > 0 and not currency_mismatch:
             distance_pct = (price - live_price) / live_price * Decimal(100)
 
-        proceeds_ccy = consumed * price if consumed else None
+        proceeds_ccy = (consumed * price * size
+                        if consumed and size is not None else None)
         proceeds_czk = (self._to_czk(converter, proceeds_ccy,
                                      zone.get("currency") or live_currency or "USD", today)
                         if proceeds_ccy else None)
+        # Same two conversions `_compute_simulation` performs, so the row and
+        # the "Daň?" card can never disagree about the same shares: proceeds
+        # from the trading currency, cost from the pipeline's EUR basis, both at
+        # today's rate. NOT the tax treatment of a real disposal, which converts
+        # the cost at its own acquisition date (§10, NSS 2 Afs 4/2019-35) —
+        # a plan is an estimate, and the two figures must at least match.
+        cost_czk = (self._to_czk(converter, cost_eur, "EUR", today)
+                    if cost_known and consumed and size is not None else None)
+        gain_czk = (proceeds_czk - cost_czk
+                    if proceeds_czk is not None and cost_czk is not None else None)
         return {
             **zone,
             "price_d": price,
@@ -2888,6 +2929,8 @@ class RunService:
                               if wait_until else None,
             "proceeds_ccy": proceeds_ccy,
             "proceeds_czk": proceeds_czk,
+            "cost_czk": cost_czk,
+            "gain_czk": gain_czk,
             "is_next": False,
         }
 

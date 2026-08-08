@@ -63,12 +63,14 @@
       <button type="submit" class="small">Uložit</button>
     </form>
     {% if row.cached_value %}
-    <form method="post" action="/classify/delete" class="inline-form"
-          onsubmit="return confirm('Smazat zařazení {{ row.key }} z paměti? Při dalším výpočtu se určí znovu heuristikou.');">
-      <input type="hidden" name="year" value="{{ year }}">
-      <input type="hidden" name="key" value="{{ row.key }}">
-      <button type="submit" class="small danger">Smazat</button>
-    </form>
+    <div class="action-row">
+      <form method="post" action="/classify/delete" class="inline-form"
+            onsubmit="return confirm('Smazat zařazení {{ row.key }} z paměti? Při dalším výpočtu se určí znovu heuristikou.');">
+        <input type="hidden" name="year" value="{{ year }}">
+        <input type="hidden" name="key" value="{{ row.key }}">
+        <button type="submit" class="small danger">Smazat</button>
+      </form>
+    </div>
     {% endif %}
   </td>
 </tr>

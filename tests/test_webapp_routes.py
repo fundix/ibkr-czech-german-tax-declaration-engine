@@ -466,3 +466,83 @@ class TestIbkrFlexRoutes:
                 assert "není nastavená" in r.text
         finally:
             svc.runner.shutdown(wait=False)
+
+
+class TestSellPlannerMarkup:
+    """Structure of the zone editor, which has no other render coverage.
+
+    Uses the module-scoped client, so it saves a zone on the synthetic holding
+    and removes it again — no other test reads /targets.
+    """
+
+    SYMBOL = "DIVCO"
+
+    @staticmethod
+    def _forms_without_a_flex_parent(html):
+        """Elements holding two or more sibling `inline-form`s directly.
+
+        Each action is its own one-button <form>, and `.inline-form` is a
+        block-level flex container — so siblings with no flex parent each claim
+        a line and the buttons come out stacked in a column. `.action-row` is
+        what puts them in a row; anything else holding several of them is the
+        bug. Checked structurally because CSS layout itself is not testable
+        here, and this is the condition the CSS depends on.
+        """
+        from html.parser import HTMLParser
+
+        class Scan(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.stack = []          # (tag, classes, inline_form_children)
+                self.bad = []
+
+            def handle_starttag(self, tag, attrs):
+                cls = dict(attrs).get("class", "")
+                if tag == "form" and "inline-form" in cls and self.stack:
+                    self.stack[-1][2].append(1)
+                if tag in ("form", "input", "br", "img", "hr"):
+                    if tag != "form":
+                        return
+                self.stack.append([tag, cls, []])
+
+            def handle_endtag(self, tag):
+                for i in range(len(self.stack) - 1, -1, -1):
+                    if self.stack[i][0] == tag:
+                        frame = self.stack.pop(i)
+                        if (len(frame[2]) > 1
+                                and "action-row" not in frame[1]):
+                            self.bad.append(f"<{frame[0]} class={frame[1]!r}> "
+                                            f"holds {len(frame[2])} inline-forms")
+                        del self.stack[i:]
+                        return
+
+        scan = Scan()
+        scan.feed(html)
+        return scan.bad
+
+    def test_action_buttons_sit_in_a_flex_row(self, client):
+        client.post("/targets/zone", data={"symbol": self.SYMBOL, "price": "50",
+                                           "quantity": "10"},
+                    follow_redirects=False)
+        try:
+            r = client.get("/targets")
+            assert r.status_code == 200
+            assert 'class="action-row"' in r.text
+            assert self._forms_without_a_flex_parent(r.text) == []
+        finally:
+            client.post("/targets/symbol/delete", data={"symbol": self.SYMBOL},
+                        follow_redirects=False)
+
+    def test_quantities_render_without_the_fifo_tail(self, client):
+        """"10.00000000" is eight zeros of noise in a column of share counts."""
+        client.post("/targets/zone", data={"symbol": self.SYMBOL, "price": "50",
+                                           "quantity": "10"},
+                    follow_redirects=False)
+        try:
+            r = client.get("/targets")
+            assert "Odhad zisku" in r.text          # the gain column exists
+            assert "10.00000000" not in r.text
+            assert "0.00000000" not in r.text
+        finally:
+            client.post("/targets/symbol/delete", data={"symbol": self.SYMBOL},
+                        follow_redirects=False)

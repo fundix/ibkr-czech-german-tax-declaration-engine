@@ -729,6 +729,7 @@ class TestLiveOverview:
         [row] = live_service.sell_targets_overview("r1")["rows"]
         assert row["zones"][0]["proceeds_czk"] == Decimal("14000")   # 10*70*20
 
+
     def test_done_zone_leaves_the_plan(self, live_service):
         zid = live_service.save_sell_zone("PYPL", "70", "40")
         live_service.save_sell_zone("PYPL", "85", "40")
@@ -805,6 +806,146 @@ class TestLiveOverview:
         service.save_sell_zone("PYPL", "70")
         out = service.sell_targets_overview(None)
         assert out["rows"][0]["status"] == "not_held"
+
+
+class TestZoneGain:
+    """The estimated gain per rung — proceeds minus the cost of exactly the
+    shares that rung sells.
+
+    The ladder fixture is built for this: the FIFO-first 40 shares cost 78 EUR
+    each (bought high, now a loss at the target) and the 20 behind them cost 34
+    (a gain). A rung that takes 10 must be measured on the expensive lot alone,
+    not on the position average — averaging would report a profit where the
+    shares actually being sold lose money.
+    """
+
+    def test_first_rung_is_measured_on_the_lots_it_actually_takes(self, live_service):
+        live_service.save_sell_zone("PYPL", "70", "10")
+        [row] = live_service.sell_targets_overview("r1")["rows"]
+        z = row["zones"][0]
+        # proceeds 10*70*20 = 14 000; cost 10*78*25 = 19 500
+        assert z["cost_czk"] == Decimal("19500")
+        assert z["gain_czk"] == Decimal("-5500")
+
+    def test_a_later_rung_sees_the_cheaper_lot_the_cursor_left(self, live_service):
+        """Rung 1 eats the 40 expensive shares, so rung 2 is costed on the
+        cheap ones — the cursor must carry into the cost, not just the count."""
+        live_service.save_sell_zone("PYPL", "70", "40")
+        live_service.save_sell_zone("PYPL", "85", "20")
+        [row] = live_service.sell_targets_overview("r1")["rows"]
+        z70, z85 = row["zones"]
+        # 40 @78 EUR: 40*70*20 = 56 000 vs 40*78*25 = 78 000 → loss
+        assert z70["gain_czk"] == Decimal("-22000")
+        # 20 @34 EUR: 20*85*20 = 34 000 vs 20*34*25 = 17 000 → gain
+        assert z85["gain_czk"] == Decimal("17000")
+
+    def test_a_rung_spanning_both_lots_sums_their_real_costs(self, live_service):
+        live_service.save_sell_zone("PYPL", "70", "50")
+        [row] = live_service.sell_targets_overview("r1")["rows"]
+        z = row["zones"][0]
+        # 40 @78 + 10 @34 = 3460 EUR * 25 = 86 500; proceeds 50*70*20 = 70 000
+        assert z["cost_czk"] == Decimal("86500")
+        assert z["gain_czk"] == Decimal("-16500")
+
+    def test_the_gain_agrees_with_what_the_tax_button_reports(self, live_service):
+        """The row and the „Daň?" card must never disagree about the same
+        shares — a second, differently-computed estimate would be worse than
+        none. Both are proceeds − cost over the identical lots.
+        """
+        zid = live_service.save_sell_zone("PYPL", "70", "10")
+        [row] = live_service.sell_targets_overview("r1")["rows"]
+        impact = live_service.zone_tax_impact("r1", "PYPL", zid)
+        sim = impact["sim"]
+        assert (sim["exempt_gain_czk"] + sim["taxable_gain_czk"]
+                == row["zones"][0]["gain_czk"])
+        assert sim["proceeds_czk"] == row["zones"][0]["proceeds_czk"]
+
+    def test_plan_totals_ride_alongside_the_next_rung(self, live_service):
+        """The table's columns describe the NEXT rung; the row-level totals are
+        the whole ladder. Both must be present, because the proceeds column used
+        to show the plan total in a row of next-rung columns."""
+        live_service.save_sell_zone("PYPL", "70", "40")
+        live_service.save_sell_zone("PYPL", "85", "20")
+        [row] = live_service.sell_targets_overview("r1")["rows"]
+        assert row["open_zone_count"] == 2
+        assert row["next_zone"]["gain_czk"] == Decimal("-22000")     # rung only
+        assert row["plan_gain_czk"] == Decimal("-5000")              # -22000 + 17000
+        assert row["proceeds_czk"] == Decimal("90000")               # 56000 + 34000
+
+    def test_a_holding_without_lot_costs_reports_no_gain(self, live_service):
+        """Better a dash than a gain measured against a cost of zero, which
+        would render the whole proceeds figure as pure profit."""
+        live_service.save_sell_zone("GHOST", "10", "5")
+        row = next(r for r in live_service.sell_targets_overview("r1")["rows"]
+                   if r["symbol"] == "GHOST")
+        assert row["zones"][0]["gain_czk"] is None
+        assert row["plan_gain_czk"] is None
+
+
+class TestOptionZoneCarriesTheMultiplier:
+    """A zone on an option must apply the contract size.
+
+    Options are kept out of the *import* resolver but the manual zone form takes
+    any symbol, and `_build_target_row` has always had an "option" status — so a
+    ladder rung on a contract is reachable. Its price is quoted per underlying
+    share while its FIFO cost is per contract, which puts the two legs 100x
+    apart if the multiplier is left out. That is the same trap that once made
+    the whole option book read 100x light.
+    """
+
+    OPTION = {
+        "symbol": "SOFI  280616P00015000", "description": "SOFI 15 PUT",
+        "category": "OPTION", "time_test_applicable": False,
+        "quantity_long": "2", "multiplier": 100,
+        "eoy_currency": "USD", "eoy_market_price": "3",
+        "lots": [{"acquisition_date": "2026-01-05", "quantity": "2",
+                  "unit_cost_eur": "250", "acquisition_estimated": False,
+                  "time_test_deadline": None}],
+    }
+
+    def _svc(self, tmp_path, pos):
+        svc = RunService(data_dir=tmp_path / "d", runs_dir=tmp_path / "r",
+                         quote_service=StubQuotes({}), converter_factory=StubConverter)
+        run_dir = svc.runs_dir / "r1"
+        run_dir.mkdir(parents=True)
+        from src.webapp.serializers import dump_json
+        dump_json({"run_id": "r1", "tax_year": 2026, "modes": ["daily"],
+                   "created_at": "2026-01-01T00:00:00+00:00"}, run_dir / "meta.json")
+        dump_json({"tax_year": 2026, "positions": [pos]}, run_dir / "portfolio.json")
+        return svc
+
+    def test_proceeds_and_gain_include_the_contract_size(self, tmp_path):
+        svc = self._svc(tmp_path, self.OPTION)
+        try:
+            svc.save_sell_zone("SOFI  280616P00015000", "5", "2")
+            [row] = svc.sell_targets_overview("r1")["rows"]
+            z = row["zones"][0]
+            assert row["status"] == "option"
+            # 2 contracts x 5 USD x 100 shares = 1000 USD x 20 = 20 000 CZK.
+            # Without the multiplier this was 200 CZK.
+            assert z["proceeds_czk"] == Decimal("20000")
+            # cost is already per contract: 2 x 250 EUR x 25 = 12 500
+            assert z["cost_czk"] == Decimal("12500")
+            assert z["gain_czk"] == Decimal("7500")
+        finally:
+            svc.runner.shutdown(wait=False)
+
+    def test_an_option_without_a_multiplier_reports_no_money_at_all(self, tmp_path):
+        """A run that never recorded the multiplier cannot be priced. Reporting
+        nothing is right; reporting a figure 100x light is not."""
+        pos = {k: v for k, v in self.OPTION.items() if k != "multiplier"}
+        svc = self._svc(tmp_path, pos)
+        try:
+            svc.save_sell_zone("SOFI  280616P00015000", "5", "2")
+            [row] = svc.sell_targets_overview("r1")["rows"]
+            z = row["zones"][0]
+            assert z["proceeds_czk"] is None
+            assert z["gain_czk"] is None
+            assert row["proceeds_czk"] is None
+            # The rung still reports the shares it is about — only money is void.
+            assert z["sellable"] == Decimal("2")
+        finally:
+            svc.runner.shutdown(wait=False)
 
 
 class TestLotPinning:
