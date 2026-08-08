@@ -2029,6 +2029,13 @@ class RunService:
                 "combined_czk": combined,
                 "threshold_czk": threshold,
                 "under_limit": under_limit,
+                # The letter was renumbered and the engine cited the wrong one
+                # until an advisor corrected it (limit = t, time test = u), so
+                # it is never spelled out in a template — it comes from the
+                # year-mapped table. A simulated sale happens today, so today's
+                # year selects the designation.
+                "citation": CzTaxConfig().paragraph_4_citation(
+                    "annual_limit", today.year),
             },
             "estimated_tax_czk": tax,
             "wait_until": (

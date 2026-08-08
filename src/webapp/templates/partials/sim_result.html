@@ -43,7 +43,7 @@
   </table>
 
   <div class="sim-notes">
-    <p class="note">Roční limit §4/1/x: letos realizované příjmy {{ sim.annual_limit.existing_czk | czk }} Kč
+    <p class="note">Roční limit {{ sim.annual_limit.citation or "§4 odst. 1 ZDP" }}: letos realizované příjmy {{ sim.annual_limit.existing_czk | czk }} Kč
       + simulace {{ sim.proceeds_czk | czk }} Kč = {{ sim.annual_limit.combined_czk | czk }} Kč
       ({{ "POD" if sim.annual_limit.under_limit else "nad" }} limitem {{ sim.annual_limit.threshold_czk | czk }} Kč).</p>
     {% if sim.wait_until %}

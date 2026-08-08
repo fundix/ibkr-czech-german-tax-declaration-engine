@@ -5,6 +5,7 @@ dataset (data/synthetic_2024) with pinned FX providers. The end-to-end run
 must reproduce the same figures test_golden_e2e_cz.py pins (final tax
 3 604 CZK), proving the GUI path computes exactly what the CLI does.
 """
+import re
 import shutil
 import threading
 from decimal import Decimal
@@ -565,6 +566,72 @@ class TestSimulator:
         with pytest.raises(ValueError, match="multiplier"):
             stub_service._compute_simulation(
                 pos, Decimal("1"), None, _result_with_proceeds())
+
+    def test_annual_limit_citation_comes_from_the_year_table(self, stub_service):
+        """The §4 odst. 1 letter must never be spelled out by hand.
+
+        It was renumbered, the engine cited písm. w) until an advisor corrected
+        it (limit = t, time test = u), and the simulation template had drifted to
+        a third letter entirely — „§4/1/x", which is neither. Only
+        ``paragraph_4_citation`` knows the year-mapped designation.
+        """
+        from datetime import date as _date
+
+        from src.countries.cz.config import CzTaxConfig
+
+        sim = stub_service._compute_simulation(
+            _sim_position(), Decimal("10"), Decimal("12"), _result_with_proceeds())
+        citation = sim["annual_limit"]["citation"]
+        assert citation == CzTaxConfig().paragraph_4_citation(
+            "annual_limit", _date.today().year)
+        # The annual limit is písm. t); u) is the time test, and mixing them up
+        # is the specific error this guards.
+        assert "písm. t)" in citation
+        assert "písm. u)" not in citation
+
+
+class TestParagraph4CitationsInTemplates:
+    """No template may invent a §4 odst. 1 letter.
+
+    The letter was renumbered, the engine cited písm. w) until an advisor
+    corrected it on 2026-08-05, and `paragraph_4_citation` exists so exactly one
+    place knows the year-mapped answer. A template that spells a letter out is
+    outside that mechanism — which is how „§4/1/x" survived in the simulation
+    card, a letter belonging to neither rule.
+
+    Citing the paragraph WITHOUT a letter stays allowed: that is the deliberate
+    fallback for years whose designation is unverified.
+    """
+
+    _PATTERNS = (
+        re.compile(r"§\s*4\s*/\s*1\s*/\s*([a-zA-Z])"),
+        re.compile(r"§\s*4\s+odst\.\s*1\s+písm\.\s*([a-zA-Z])\)"),
+    )
+
+    def _known_letters(self):
+        from src.countries.cz.config import CzTaxConfig
+
+        return {letter
+                for kinds in CzTaxConfig().paragraph_4_letters_by_year.values()
+                for letter in kinds.values()}
+
+    def test_every_hardcoded_letter_is_one_the_config_knows(self):
+        known = self._known_letters()
+        templates = (Path(__file__).resolve().parent.parent
+                     / "src" / "webapp" / "templates")
+        offenders = []
+        for path in templates.rglob("*.html"):
+            text = path.read_text(encoding="utf-8")
+            for pattern in self._PATTERNS:
+                for match in pattern.finditer(text):
+                    if match.group(1) not in known:
+                        line = text[:match.start()].count("\n") + 1
+                        offenders.append(
+                            f"{path.name}:{line} cites písm. {match.group(1)}) "
+                            f"— not among {sorted(known)}")
+        assert not offenders, (
+            "Hardcoded §4 odst. 1 letters that the config does not recognise:\n"
+            + "\n".join(offenders))
 
 
 class TestLivePortfolio:
