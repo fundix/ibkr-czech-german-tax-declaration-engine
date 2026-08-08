@@ -598,6 +598,74 @@ class TestLivePortfolio:
         assert Decimal(snaps[0]["total_value_czk"]) == Decimal("8200")
 
 
+class TestSnapshotSeries:
+    """One line must not be drawn out of incompatible series.
+
+    The real portfolio.db held both: 2025-book rows (809k) chronologically
+    interleaved with 2026 rows (1.19M), plotted as a 32% crash; and a formula
+    change worth ~+11% (1 353 459 -> 1 504 177 overnight) with nothing marking
+    the step.
+    """
+
+    def _write(self, svc, rows):
+        """rows = [(taken_at, tax_year, value, formula_version)]"""
+        from src.webapp.services import VALUATION_FORMULA_VERSION  # noqa: F401
+        with svc._snapshot_db() as conn:
+            conn.executemany(
+                "INSERT INTO snapshots (taken_at, tax_year, total_value_czk,"
+                " total_cost_czk, quotes_ok, formula_version)"
+                " VALUES (?, ?, ?, '', 1, ?)", rows)
+
+    def test_a_different_tax_year_is_left_out(self, stub_service):
+        from src.webapp.services import VALUATION_FORMULA_VERSION as V
+        self._write(stub_service, [
+            ("2026-07-03T10:00:00", 2025, "809647", V),
+            ("2026-07-04T10:00:00", 2026, "1185834", V),
+            ("2026-07-05T10:00:00", 2026, "1190000", V),
+        ])
+        s = stub_service.snapshot_series(2026)
+        assert [p["total_value_czk"] for p in s["points"]] == ["1185834", "1190000"]
+        assert s["excluded_other_years"] == 1
+        assert s["excluded_older_formula"] == 0
+
+    def test_an_older_valuation_formula_is_left_out(self, stub_service):
+        from src.webapp.services import VALUATION_FORMULA_VERSION as V
+        self._write(stub_service, [
+            ("2026-08-06T10:00:00", 2026, "1367530", "v1"),
+            ("2026-08-07T10:00:00", 2026, "1353459", None),   # pre-column rows
+            ("2026-08-08T10:00:00", 2026, "1504177", V),
+        ])
+        s = stub_service.snapshot_series(2026)
+        assert [p["total_value_czk"] for p in s["points"]] == ["1504177"]
+        assert s["excluded_older_formula"] == 2
+
+    def test_points_stay_in_chronological_order(self, stub_service):
+        from src.webapp.services import VALUATION_FORMULA_VERSION as V
+        self._write(stub_service, [
+            ("2026-08-08T10:00:00", 2026, "300", V),
+            ("2026-08-06T10:00:00", 2026, "100", V),
+            ("2026-08-07T10:00:00", 2026, "200", V),
+        ])
+        s = stub_service.snapshot_series(2026)
+        assert [p["total_value_czk"] for p in s["points"]] == ["100", "200", "300"]
+
+    def test_new_snapshots_carry_the_current_formula_version(self, stub_service):
+        from src.webapp.services import VALUATION_FORMULA_VERSION as V
+        stub_service._compute_live_portfolio(
+            {"tax_year": 2025, "positions": [
+                {**_sim_position(), "total_cost_eur": "280"}]})
+        with stub_service._snapshot_db() as conn:
+            versions = [r[0] for r in conn.execute(
+                "SELECT formula_version FROM snapshots")]
+        assert versions == [V]
+
+    def test_an_unreadable_database_is_empty_not_an_error(self, stub_service):
+        stub_service.data_dir.mkdir(parents=True, exist_ok=True)
+        (stub_service.data_dir / "portfolio.db").write_bytes(b"not a database")
+        assert stub_service.snapshot_series(2026) == {
+            "points": [], "excluded_other_years": 0, "excluded_older_formula": 0}
+
+
 class TestAllocationSlices:
     """Chart.js normalises its input to a full circle, so a bare top-N lied."""
 

@@ -78,7 +78,8 @@ def dashboard_valuation(request: Request):
     opt = svc.options_overview(data["run_id"])
     return _tpl(request, "partials/dashboard_valuation.html",
                 run_id=data["run_id"], meta=data["meta"], live=live,
-                allocation=allocation, snapshots=svc.list_snapshots(),
+                allocation=allocation,
+                snapshots=svc.snapshot_series(live["tax_year"]),
                 **_options_ctx(svc, opt, live["tax_year"]))
 
 
@@ -353,7 +354,7 @@ def portfolio_live(request: Request, run_id: str):
         return _tpl(request, "partials/job_error.html", error=f"Ocenění selhalo: {exc}")
     if live is None:
         return HTMLResponse("")
-    snapshots = svc.list_snapshots()
+    snapshots = svc.snapshot_series(live["tax_year"])
     allocation = svc.allocation_slices(live["positions"])
     return _tpl(request, "partials/portfolio_live.html", run_id=run_id, live=live,
                 allocation=allocation, snapshots=snapshots)

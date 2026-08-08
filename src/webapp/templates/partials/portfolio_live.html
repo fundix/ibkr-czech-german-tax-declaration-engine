@@ -16,10 +16,18 @@
     </div>
     <div class="card stat">
       <h3>Vývoj hodnoty</h3>
-      {% if snapshots | length > 1 %}
+      {% if snapshots.points | length > 1 %}
       <canvas id="value-chart" height="70"></canvas>
       {% else %}
-      <p class="muted">Zatím {{ snapshots | length }} snímek — graf se objeví s dalšími dny.</p>
+      <p class="muted">Zatím {{ snapshots.points | length }} snímek — graf se objeví s dalšími dny.</p>
+      {% endif %}
+      {%- set hidden = (snapshots.excluded_other_years or 0) + (snapshots.excluded_older_formula or 0) %}
+      {% if hidden %}
+      <p class="note">Graf ukazuje jen srovnatelné snímky tohoto roku —
+        {%- if snapshots.excluded_other_years %} {{ snapshots.excluded_other_years }} z jiného daňového roku{% endif %}
+        {%- if snapshots.excluded_other_years and snapshots.excluded_older_formula %},{% endif %}
+        {%- if snapshots.excluded_older_formula %} {{ snapshots.excluded_older_formula }} se starším oceněním opcí{% endif %}
+        vynecháno. Jinak by kreslil skok, který se nestal.</p>
       {% endif %}
       <form method="post" action="/results/{{ run_id }}/portfolio/snapshot" style="margin-top:.4rem">
         <button type="submit" class="small">Uložit snímek hodnoty</button>
@@ -186,7 +194,7 @@
     doughnut('category-chart', {{ (live.breakdown.by_category if live.breakdown else []) | tojson }});
     doughnut('currency-chart', {{ (live.breakdown.by_currency if live.breakdown else []) | tojson }});
     doughnut('country-chart', {{ (live.breakdown.country.by_country if live.breakdown else []) | tojson }});
-    const snaps = {{ snapshots | tojson }};
+    const snaps = {{ snapshots.points | tojson }};
     const el = document.getElementById('value-chart');
     if (el && snaps.length > 1 && window.Chart) {
       new Chart(el, {

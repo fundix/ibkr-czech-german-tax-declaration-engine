@@ -168,6 +168,12 @@ QUOTE_FETCH_WORKERS = 8
 # 12 keeps the legend readable; the book runs to 36 rows, so the fold matters.
 ALLOCATION_SLICES = 12
 
+# Bumped whenever the live-valuation total changes meaning, so stored snapshots
+# computed the old way are never charted next to new ones. v2: option contracts
+# are valued at their multiplier and written legs subtract — worth ~+11% on the
+# real book, which the trend chart drew as an overnight gain.
+VALUATION_FORMULA_VERSION = "v2"
+
 # How far a payer's effective withholding rate may sit above its treaty cap
 # before the dividends page calls it over-withheld. Half a point: the per-item
 # cap is rounded to whole hellers, so several small payouts can land a few
@@ -1989,6 +1995,11 @@ class RunService:
             " total_cost_czk TEXT,"
             " quotes_ok INTEGER)"
         )
+        # Added later; rows written before it are NULL, which is what marks them
+        # as computed by an unknown (older) formula.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(snapshots)")}
+        if "formula_version" not in cols:
+            conn.execute("ALTER TABLE snapshots ADD COLUMN formula_version TEXT")
         return conn
 
     def _maybe_save_snapshot(self, tax_year, live: Dict[str, Any]) -> None:
@@ -2013,30 +2024,64 @@ class RunService:
 
     def _insert_snapshot(self, conn, tax_year, live: Dict[str, Any]) -> None:
         conn.execute(
-            "INSERT INTO snapshots (taken_at, tax_year, total_value_czk, total_cost_czk, quotes_ok)"
-            " VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO snapshots (taken_at, tax_year, total_value_czk,"
+            " total_cost_czk, quotes_ok, formula_version)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
             (
                 datetime.now(timezone.utc).isoformat(),
                 tax_year,
                 str(live.get("total_value_czk")),
                 str(live.get("total_cost_czk") or ""),
                 live.get("quotes_ok") or 0,
+                VALUATION_FORMULA_VERSION,
             ),
         )
 
-    def list_snapshots(self, limit: int = 365) -> List[Dict[str, Any]]:
+    def snapshot_series(self, tax_year: Optional[int] = None,
+                        limit: int = 365) -> Dict[str, Any]:
+        """Net-worth points that are actually comparable, plus what was left out.
+
+        Two things made one line out of three incompatible series:
+
+        * **The book.** Rows carry the tax year whose run produced them, and
+          ``_maybe_save_snapshot`` records whichever run's live view is opened
+          first that day — so opening a 2025 result once put an 809k row between
+          1.19M rows of 2026 and the chart drew a 32% crash that never happened.
+        * **The formula.** Valuing option contracts at their multiplier and
+          counting written legs moved the total by ~+11% overnight (1 353 459 →
+          1 504 177 on the real book) with nothing marking the step.
+
+        So a series is one tax year at one formula version. Older rows are
+        reported rather than silently dropped, so the page can say why its chart
+        starts where it does.
+        """
         try:
             with self._snapshot_db() as conn:
                 rows = conn.execute(
-                    "SELECT taken_at, total_value_czk FROM snapshots ORDER BY taken_at DESC LIMIT ?",
+                    "SELECT taken_at, total_value_czk, tax_year, formula_version"
+                    " FROM snapshots ORDER BY taken_at DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
-            return [
-                {"taken_at": r[0], "total_value_czk": r[1]}
-                for r in reversed(rows)
-            ]
         except Exception:
-            return []
+            return {"points": [], "excluded_other_years": 0,
+                    "excluded_older_formula": 0}
+
+        points, other_years, older_formula = [], 0, 0
+        for taken_at, value, row_year, version in reversed(rows):
+            if tax_year is not None and row_year != tax_year:
+                other_years += 1
+                continue
+            if version != VALUATION_FORMULA_VERSION:
+                older_formula += 1
+                continue
+            points.append({"taken_at": taken_at, "total_value_czk": value})
+        return {"points": points, "excluded_other_years": other_years,
+                "excluded_older_formula": older_formula}
+
+    def list_snapshots(self, tax_year: Optional[int] = None,
+                       limit: int = 365) -> List[Dict[str, Any]]:
+        """Comparable points only — see ``snapshot_series`` for what that means."""
+        return self.snapshot_series(tax_year, limit)["points"]
 
     # ------------------------------------------------------------------
     # Asset classification (non-interactive cache editor)
