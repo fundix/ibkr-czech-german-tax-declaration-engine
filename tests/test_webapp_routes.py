@@ -186,12 +186,44 @@ class TestPages:
                 (header + "\n" + row + "\n").encode())
 
         runs_before = len(svc.list_runs())
-        r = client.post("/dashboard/options/refresh", data={"tax_year": 2026})
+        r = client.post("/dashboard/options/refresh")
         assert r.status_code == 200
         assert 'id="dash-options"' in r.text
         assert "SOFI  280616P00015000" in r.text
         assert "výpisu pozic" in r.text          # says where the numbers came from
         assert len(svc.list_runs()) == runs_before
+        # Written into the current year, never the run's (2024) year.
+        from datetime import date
+        assert (svc.data_dir / str(date.today().year) / "positions_end.csv").is_file()
+        assert not (svc.data_dir / "2024" / "positions_end.csv.bak").exists()
+
+    def test_a_posted_year_cannot_steer_the_refresh(self, client, monkeypatch):
+        """The 2024 run is on screen, so a form-carried year would have aimed
+        the write at a closed year's authoritative statement."""
+        from datetime import date
+
+        from src.webapp import services as services_mod
+        from src.webapp.ibkr_flex import FlexConfig, save_flex_config
+
+        svc = client.app.state.services
+        save_flex_config(svc.flex_config_path,
+                         FlexConfig(token="tok", queries={"positions": "42"}))
+        header = ("ClientAccountID,CurrencyPrimary,AssetClass,SubCategory,Symbol,"
+                  "Description,Conid,ISIN,UnderlyingSymbol,Multiplier,Quantity,"
+                  "MarkPrice,PositionValue,CostBasisMoney,UnderlyingConid,"
+                  "LevelOfDetail,OpenDateTime,HoldingPeriodDateTime")
+        monkeypatch.setattr(
+            services_mod, "fetch_statement",
+            lambda token, query_id, from_date=None, to_date=None:
+                (header + "\n").encode())
+
+        before = (svc.data_dir / "2024" / "positions_end.csv").read_bytes()
+        r = client.post("/dashboard/options/refresh", data={"tax_year": 2024})
+        assert r.status_code == 200
+        # The closed year's statement is byte-identical afterwards.
+        assert (svc.data_dir / "2024" / "positions_end.csv").read_bytes() == before
+        assert (svc.data_dir / str(date.today().year)
+                / "positions_end.csv").is_file()
 
     def test_positions_refresh_surfaces_a_failure_as_a_card(
             self, client, monkeypatch):
@@ -199,7 +231,7 @@ class TestPages:
 
         svc = client.app.state.services
         save_flex_config(svc.flex_config_path, FlexConfig(token="", queries={}))
-        r = client.post("/dashboard/options/refresh", data={"tax_year": 2026})
+        r = client.post("/dashboard/options/refresh")
         assert r.status_code == 200
         assert "Načtení pozic selhalo" in r.text
 

@@ -88,9 +88,11 @@
       {% if options | selectattr("expiry_date", "none") | list %}Některé kontrakty nemají datum expirace —
       přepočítejte rok pro doplnění.{% endif %}</p>
     {% if positions_refreshable %}
+    {# No year is posted: the refresh always fetches today's holdings into the
+       current year. Sending the displayed run's year would, in filing season,
+       overwrite a closed year's authoritative 31 December statement. #}
     <form hx-post="/dashboard/options/refresh" hx-target="#dash-options" hx-swap="outerHTML"
           class="run-form">
-      <input type="hidden" name="tax_year" value="{{ options_tax_year }}">
       <button type="submit">Načíst aktuální pozice z IBKR</button>
     </form>
     {% endif %}
