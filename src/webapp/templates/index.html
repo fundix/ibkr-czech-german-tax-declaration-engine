@@ -56,11 +56,24 @@
     {% else %}Data roku {{ current_year }} jsou {{ "%.0f"|format(dataset_age) }} h stará.{% endif %}
   </p>
   {% if flex_configured %}
-  <form hx-post="/ibkr/fetch" hx-target="#job-status" hx-swap="innerHTML">
+  {% if not running_job %}
+  <form hx-post="/ibkr/fetch" hx-target="#job-slot" hx-swap="innerHTML"
+        hx-disabled-elt="find button">
     <input type="hidden" name="tax_year" value="{{ current_year }}">
-    <button type="submit">Stáhnout z IBKR a přepočítat ({{ current_year }})</button>
+    <button type="submit">Stáhnout z IBKR a přepočítat ({{ current_year }})
+      <span class="htmx-indicator"><span class="spinner"></span></span>
+    </button>
   </form>
-  <div id="job-status"></div>
+  {% endif %}
+  {# The slot has its own id: the status partial carries id="job-status" and
+     replaces ITSELF on every poll, so reusing that id here would nest two.
+     A download in flight is picked up on load, so reloading mid-fetch — or
+     opening a second tab — shows the progress instead of losing it. #}
+  <div id="job-slot">
+    {%- if running_job %}{% with job_id = running_job %}
+      {% include "partials/job_status.html" %}
+    {% endwith %}{% endif %}
+  </div>
   {% endif %}
   <p style="margin-top:.6rem">
     <a href="/runs" class="btn-link">Spustit výpočet →</a>

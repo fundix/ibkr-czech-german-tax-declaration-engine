@@ -8,6 +8,7 @@ must reproduce the same figures test_golden_e2e_cz.py pins (final tax
 import re
 import shutil
 import threading
+import time
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -1410,7 +1411,7 @@ class TestOptionsFromPositions:
                          FlexConfig(token="tok", queries={"positions": "42"}))
         calls = []
 
-        def fake_fetch(token, query_id, from_date=None, to_date=None):
+        def fake_fetch(token, query_id, from_date=None, to_date=None, report=None):
             calls.append((token, query_id))
             return payload if payload is not None else (
                 self.HEADER + "\n"
@@ -1468,6 +1469,47 @@ class TestOptionsFromPositions:
     def test_refresh_without_a_positions_query_explains_itself(self, service):
         with pytest.raises(ValueError, match="positions"):
             service.refresh_positions_sync(self._this_year())
+
+    def test_the_refresh_job_finishes_on_the_single_worker_thread(
+            self, service, monkeypatch):
+        """The job runs ON the one worker thread, so every step inside it must
+        call the plain helper. Reaching for runner.run_sync from there submits
+        to the executor the job itself occupies — the job would hang forever
+        and the card would poll a spinner until the browser was closed."""
+        from src.webapp.jobs import JobStatus
+
+        self._arm_flex(service, monkeypatch)
+        job_id = service.start_positions_refresh(self._this_year())
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            state = service.get_job(job_id)
+            if state.status in (JobStatus.DONE, JobStatus.FAILED):
+                break
+            time.sleep(0.02)
+        assert state.status == JobStatus.DONE, state.error
+        assert state.result["downloaded_bytes"] > 0
+        assert state.result["refreshed_at"]
+        assert state.result["options"]
+        # And the queue is free again for the next piece of work.
+        assert service.runner.run_sync(lambda: "free", timeout=5) == "free"
+
+    def test_the_refresh_job_reports_its_two_phases(self, service, monkeypatch):
+        self._arm_flex(service, monkeypatch)
+        seen = []
+        service._refresh_positions_job(
+            self._this_year(), "tok", "42",
+            report=lambda **kw: seen.append(kw))
+        labels = [kw["label"] for kw in seen if kw.get("label")]
+        assert labels == ["Načítám pozice z IBKR", "Zjišťuji ceny podkladů"]
+        assert {kw["total"] for kw in seen if "total" in kw} == {2}
+
+    def test_a_closed_year_is_refused_before_a_job_exists(self, service, monkeypatch):
+        """Validated in start_..., so the user gets the error card straight
+        away instead of a progress card that fails on its first poll."""
+        self._arm_flex(service, monkeypatch)
+        with pytest.raises(ValueError, match=str(self._this_year() - 1)):
+            service.start_positions_refresh(self._this_year() - 1)
+        assert service.runner.get("anything") is None
 
 
 class TestAssignmentRisk:

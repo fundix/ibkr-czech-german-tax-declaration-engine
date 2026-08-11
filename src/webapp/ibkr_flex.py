@@ -42,6 +42,17 @@ _UA = {"User-Agent": "ibkr-tax-engine (local)"}
 FLEX_SLOTS = ("trades", "cash", "positions", "corp_actions",
               "statement_of_funds")
 
+# Short Czech names for progress lines. settings.SLOT_LABELS is keyed by
+# dataset FILE slot (positions_start/positions_end) and is too long for a
+# one-line status, so the Flex vocabulary carries its own.
+FLEX_SLOT_LABELS = {
+    "trades": "obchody",
+    "cash": "cash transakce",
+    "positions": "pozice",
+    "corp_actions": "korporátní akce",
+    "statement_of_funds": "hotovostní kniha",
+}
+
 # Friendly messages for the documented Flex error codes.
 _ERROR_HINTS = {
     "1012": "Token vypršel — vygenerujte v Client Portalu nový (Flex Web Service).",
@@ -138,6 +149,7 @@ def fetch_statement(
     sleep: Callable[[float], None] = time.sleep,
     from_date: Optional[str] = None,
     to_date: Optional[str] = None,
+    report: Optional[Callable[[str], None]] = None,
 ) -> bytes:
     """Download one Flex Query statement (CSV bytes). Raises FlexFetchError.
 
@@ -149,13 +161,19 @@ def fetch_statement(
     IBKR throttles per-token request bursts (error 1018) — both protocol
     steps treat 1018 as RETRYABLE with a longer backoff instead of failing
     the whole download.
+
+    ``report(detail)`` is called before every wait. Nearly all of the wall
+    clock here is spent sleeping between polls, so without it the caller's
+    status display sits unchanged for a minute at a time and reads as hung.
     """
+    say = report or (lambda _detail: None)
     request_params = {"t": token, "q": query_id, "v": "3"}
     if from_date and to_date:
         request_params["fd"] = from_date
         request_params["td"] = to_date
 
     ref = None
+    say("žádám IBKR o vygenerování výpisu…")
     for attempt in range(_RATE_LIMIT_RETRIES):
         body = http_get(SEND_REQUEST_URL, request_params).decode(
             "utf-8", errors="replace"
@@ -166,6 +184,9 @@ def fetch_statement(
                 f"Flex query {query_id}: rate limited (attempt {attempt + 1}), "
                 f"waiting {_RATE_LIMIT_DELAY_S:.0f} s…"
             )
+            say(f"IBKR hlásí příliš mnoho dotazů — čekám "
+                f"{_RATE_LIMIT_DELAY_S:.0f} s (pokus {attempt + 1}/"
+                f"{_RATE_LIMIT_RETRIES})…")
             sleep(_RATE_LIMIT_DELAY_S)
             continue
         if err:
@@ -182,6 +203,8 @@ def fetch_statement(
         )
 
     for attempt in range(_POLL_ATTEMPTS):
+        say("stahuji výpis…" if attempt == 0
+            else f"stahuji výpis (pokus {attempt + 1}/{_POLL_ATTEMPTS})…")
         statement = http_get(GET_STATEMENT_URL, {"t": token, "q": ref, "v": "3"})
         head = statement[:500].decode("utf-8", errors="replace")
         if "<FlexStatementResponse" in head or "<ErrorCode>" in head:
@@ -192,6 +215,10 @@ def fetch_statement(
                     f"Flex statement {query_id} not ready "
                     f"(code {err[0]}, attempt {attempt + 1}), waiting {delay:.0f} s…"
                 )
+                say(("IBKR hlásí příliš mnoho dotazů" if err[0] == "1018"
+                     else "výpis se na straně IBKR ještě generuje")
+                    + f" — čekám {delay:.0f} s "
+                      f"(pokus {attempt + 1}/{_POLL_ATTEMPTS})…")
                 sleep(delay)
                 continue
             raise FlexFetchError(

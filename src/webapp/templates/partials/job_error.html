@@ -1,9 +1,12 @@
-<div id="job-status">
-  <div class="job failed">
-    <strong>Běh selhal:</strong> {{ error }}
-    {% if log_tail %}
-    <pre class="log-tail">{% for line in log_tail %}{{ line }}
+{# No id: this partial is swapped in by several targets (a poller replacing
+   itself via outerHTML, the valuation card, the items/disposals pages). It
+   used to hardcode id="job-status" and so planted a duplicate of the
+   dashboard's own status box wherever it landed — the fetch button's progress
+   card then swapped into the failed valuation card instead. #}
+<div class="job failed">
+  <strong>Běh selhal:</strong> {{ error }}
+  {% if log_tail %}
+  <pre class="log-tail">{% for line in log_tail %}{{ line }}
 {% endfor %}</pre>
-    {% endif %}
-  </div>
+  {% endif %}
 </div>

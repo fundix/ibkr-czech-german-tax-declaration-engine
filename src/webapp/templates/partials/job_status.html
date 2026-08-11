@@ -1,12 +1,17 @@
 <div id="job-status" hx-get="/runs/{{ job_id }}/status" hx-trigger="every 1.5s" hx-swap="outerHTML">
   <div class="job running">
     <span class="spinner"></span>
-    <strong>Výpočet běží…</strong>
+    {% with fallback_label = "Startuje…" %}
+      {% include "partials/job_progress.html" %}
+    {% endwith %}
     {% if state and state.log_tail %}
+    {# Always visible, never a <details>: this box is re-swapped every 1.5 s,
+       so an expander the user opened would snap shut on the next poll. #}
     <pre class="log-tail">{% for line in log_tail %}{{ line }}
 {% endfor %}</pre>
-    {% else %}
-    <p class="note">Startuje (stahování kurzů ČNB může poprvé trvat i minutu)…</p>
+    {% elif not (state and state.progress.label) %}
+    <p class="note">Chvilku to potrvá — stahování výpisů z IBKR i první stažení
+      kurzů ČNB jde v desítkách sekund.</p>
     {% endif %}
   </div>
 </div>

@@ -49,6 +49,7 @@ from src.utils.decimal_context import setup_decimal_context
 from src.utils.type_utils import parse_ibkr_date
 from src.webapp import settings
 from src.webapp.ibkr_flex import (
+    FLEX_SLOT_LABELS,
     FLEX_SLOTS,
     INTER_QUERY_DELAY_S,
     FlexConfig,
@@ -976,20 +977,36 @@ class RunService:
     def should_auto_fetch(self, tax_year: int, max_age_hours: float = 12.0) -> bool:
         if not self.get_flex_config().configured:
             return False
+        # A fetch in flight has not written the current year's files yet, so the
+        # age still looks stale — auto-fetching again would stack a duplicate.
+        if self.runner.find_active(self.FETCH_JOB_KIND) is not None:
+            return False
         age = self.dataset_age_hours(tax_year)
         return age is None or age > max_age_hours
 
     def start_fetch_and_run(self, tax_year: int, fx_mode: str = "compare") -> Tuple[str, str]:
-        """Download fresh YTD statements from IBKR, then recompute — one job."""
+        """Download fresh YTD statements from IBKR, then recompute — one job.
+
+        A fetch already in flight is handed back. This one runs for minutes
+        (five statements, a 10 s anti-throttle pause between each, plus a
+        historical bootstrap of every missing year), and until it writes into
+        the current year's directory ``should_auto_fetch`` keeps saying yes —
+        so every visit to /runs used to queue another whole fetch behind it.
+        """
         if not self.get_flex_config().configured:
             raise ValueError(
                 "IBKR Flex Web Service není nastavená — vyplňte token a query ID "
                 "na stránce Soubory."
             )
+        running = self.runner.find_active(self.FETCH_JOB_KIND)
+        if running is not None:
+            return running.job_id, running.meta.get("run_id")
         run_id = f"{tax_year}-{datetime.now():%Y%m%d-%H%M%S}"
         job_id = self.runner.submit(
             f"Stažení z IBKR + výpočet {tax_year} ({fx_mode})",
             self._fetch_and_run, run_id, tax_year, fx_mode,
+            with_progress=True, kind=self.FETCH_JOB_KIND,
+            meta={"run_id": run_id, "tax_year": tax_year},
         )
         return job_id, run_id
 
@@ -1010,68 +1027,99 @@ class RunService:
         fx_mode: str,
         fetch=fetch_statement,
         pause=time.sleep,
+        report=None,
     ) -> Dict[str, Any]:
         cfg = self.get_flex_config()
-
-        def _download(year: int, delay_first: bool,
-                      from_date: Optional[str] = None,
-                      to_date: Optional[str] = None) -> List[str]:
-            year_dir = self.data_dir / str(year)
-            year_dir.mkdir(parents=True, exist_ok=True)
-            done: List[str] = []
-            for slot in FLEX_SLOTS:
-                query_id = cfg.queries.get(slot)
-                if not query_id:
-                    continue
-                if done or delay_first:
-                    # IBKR throttles per-token bursts (error 1018) — space out
-                    # consecutive statement downloads.
-                    pause(INTER_QUERY_DELAY_S)
-                logger.info(f"IBKR Flex: downloading {slot} for {year} (query {query_id})…")
-                content = fetch(cfg.token, query_id,
-                                from_date=from_date, to_date=to_date)
-                (year_dir / self._FLEX_SLOT_FILES[slot]).write_bytes(content)
-                done.append(slot)
-            return done
+        say = report or (lambda **_kw: None)
 
         # Historical bootstrap FIRST (oldest year first): every missing
         # dataset year from first_year up to tax_year-1 is fetched via the
         # fd/td period override on the SAME queries — one calendar year per
         # request (365 days limits the window span, not how far back it
         # starts). Positions then arrive as the 31 Dec snapshot of the year.
+        #
+        # The work list is settled before the first request so the status can
+        # show a real "3 / 12" — with five slots, a 10 s anti-throttle pause
+        # between each and up to a minute of statement generation apiece, a
+        # bootstrap of several years runs for many minutes.
+        slots = [s for s in FLEX_SLOTS if cfg.queries.get(s)]
+        older: List[int] = []
+        for year in range(cfg.first_year, tax_year) if cfg.first_year else ():
+            ds = self.get_year(year)
+            if ds is None or not ds.run_ready:
+                older.append(year)
+        # +1 for the engine run itself, which is the last step. Steps are
+        # counted off a per-year base rather than incremented, so a year IBKR
+        # cannot deliver still consumes its whole slice of the bar instead of
+        # leaving the counter behind and jumping at the end.
+        total_steps = len(slots) * (len(older) + 1) + 1
+        done_steps = 0
+
+        def _download(year: int, year_index: int, delay_first: bool,
+                      from_date: Optional[str] = None,
+                      to_date: Optional[str] = None) -> List[str]:
+            nonlocal done_steps
+            base = year_index * len(slots)
+            year_dir = self.data_dir / str(year)
+            year_dir.mkdir(parents=True, exist_ok=True)
+            done: List[str] = []
+            for offset, slot in enumerate(slots):
+                query_id = cfg.queries[slot]
+                label = f"Stahuji z IBKR — {FLEX_SLOT_LABELS.get(slot, slot)} {year}"
+                done_steps = base + offset
+                if done or delay_first:
+                    # IBKR throttles per-token bursts (error 1018) — space out
+                    # consecutive statement downloads.
+                    say(label=label, step=done_steps, total=total_steps,
+                        detail=f"pauza {INTER_QUERY_DELAY_S:.0f} s, aby IBKR "
+                               "neodmítl další dotaz…")
+                    pause(INTER_QUERY_DELAY_S)
+                logger.info(f"IBKR Flex: downloading {slot} for {year} (query {query_id})…")
+                say(label=label, step=done_steps, total=total_steps, detail="")
+                content = fetch(cfg.token, query_id,
+                                from_date=from_date, to_date=to_date,
+                                report=lambda detail: say(detail=detail))
+                (year_dir / self._FLEX_SLOT_FILES[slot]).write_bytes(content)
+                done.append(slot)
+                done_steps = base + offset + 1
+            return done
+
         extra_notes: List[str] = []
         bootstrapped: List[int] = []
         delay_next = False
-        if cfg.first_year:
-            for year in range(cfg.first_year, tax_year):
-                ds = self.get_year(year)
-                if ds is not None and ds.run_ready:
-                    continue
-                try:
-                    done = _download(year, delay_first=delay_next,
-                                     from_date=f"{year}0101", to_date=f"{year}1231")
-                except FlexFetchError as exc:
-                    # A year IBKR cannot deliver must not sink the whole job.
-                    logger.warning(f"IBKR Flex: bootstrap of {year} failed: {exc}")
-                    extra_notes.append(f"Doplnění roku {year} z IBKR selhalo: {exc}")
-                    delay_next = True
-                    continue
-                delay_next = delay_next or bool(done)
-                if done:
-                    bootstrapped.append(year)
-                    logger.info(f"IBKR Flex: bootstrapped missing {year} dataset.")
+        for year_index, year in enumerate(older):
+            try:
+                done = _download(year, year_index, delay_first=delay_next,
+                                 from_date=f"{year}0101", to_date=f"{year}1231")
+            except FlexFetchError as exc:
+                # A year IBKR cannot deliver must not sink the whole job.
+                logger.warning(f"IBKR Flex: bootstrap of {year} failed: {exc}")
+                extra_notes.append(f"Doplnění roku {year} z IBKR selhalo: {exc}")
+                delay_next = True
+                done_steps = (year_index + 1) * len(slots)
+                say(step=done_steps, total=total_steps,
+                    detail=f"rok {year} IBKR nedodal — pokračuji dál")
+                continue
+            delay_next = delay_next or bool(done)
+            if done:
+                bootstrapped.append(year)
+                logger.info(f"IBKR Flex: bootstrapped missing {year} dataset.")
         if bootstrapped:
             extra_notes.append(
                 "Chybějící datasety doplněny z IBKR (fd/td období přes "
                 f"stávající queries): {', '.join(map(str, bootstrapped))}."
             )
 
-        fetched = _download(tax_year, delay_first=delay_next)
+        fetched = _download(tax_year, len(older), delay_first=delay_next)
         if not fetched:
             raise ValueError("Žádná query ID nejsou nastavená.")
         logger.info(f"IBKR Flex: fetched {', '.join(fetched)} for {tax_year}.")
 
+        say(label=f"Počítám daň {tax_year}", step=total_steps - 1,
+            total=total_steps,
+            detail=f"stažené výpisy: {', '.join(FLEX_SLOT_LABELS.get(s, s) for s in fetched)}")
         meta = self._execute_run(run_id, tax_year, fx_mode, extra_notes=extra_notes)
+        say(step=total_steps, detail="hotovo")
         meta["fetched_slots"] = fetched
         if bootstrapped:
             meta["bootstrapped_years"] = bootstrapped
@@ -1379,6 +1427,80 @@ class RunService:
             return None
         return (time.time() - path.stat().st_mtime) / 3600
 
+    def _positions_refresh_target(self, tax_year: Optional[int]) -> Tuple[int, str, str]:
+        """Validate a positions refresh and return (year, token, query_id).
+
+        Separate from the work so the caller can reject a misconfigured or
+        wrong-year request *before* a job exists — an error card beats a job
+        that fails on its first poll.
+        """
+        current = date.today().year
+        if tax_year is not None and tax_year != current:
+            raise ValueError(
+                f"Pozice lze obnovit jen pro běžící rok ({current}). Dnešní "
+                f"snapshot není stavem k 31. 12. {tax_year} — přepsal by "
+                f"závěrečné pozice uzavřeného roku, ze kterých se počítá daň "
+                f"i nabíhají loty roku {tax_year + 1}."
+            )
+        cfg = self.get_flex_config()
+        query_id = cfg.queries.get("positions")
+        if not cfg.token or not query_id:
+            raise ValueError(
+                "IBKR Flex Web Service není nastavená pro pozice — vyplňte "
+                "token a query ID slotu „positions“ na stránce Soubory."
+            )
+        return current, cfg.token, query_id
+
+    POSITIONS_JOB_KIND = "positions-refresh"
+    FETCH_JOB_KIND = "ibkr-fetch"
+
+    def active_job(self, kind: str):
+        """The queued-or-running job of a kind, so a page can show its progress."""
+        return self.runner.find_active(kind)
+
+    def start_positions_refresh(self, tax_year: Optional[int] = None) -> str:
+        """Queue the positions download and return its job id.
+
+        A job rather than a blocking request: statement generation on IBKR's
+        side is polled for up to a minute and the underlying quotes take
+        seconds more, which is far too long for a click to sit with no
+        feedback — and it would hold the single engine worker the whole time.
+
+        A refresh already in flight is handed back instead of queueing a second
+        one: the duplicate would re-download with no anti-throttle pause (a
+        likely 1018 and 150 s of backoff) and its .bak would overwrite the
+        pre-refresh statement with the copy the first download just made.
+        """
+        current, token, query_id = self._positions_refresh_target(tax_year)
+        running = self.runner.find_active(self.POSITIONS_JOB_KIND)
+        if running is not None:
+            return running.job_id
+        return self.runner.submit(
+            f"Načtení pozic z IBKR ({current})",
+            self._refresh_positions_job, current, token, query_id,
+            with_progress=True, kind=self.POSITIONS_JOB_KIND,
+        )
+
+    def _refresh_positions_job(self, tax_year: int, token: str, query_id: str,
+                               fetch=None, report=None) -> Dict[str, Any]:
+        """Download the positions statement, then price the option rows.
+
+        Runs ON the worker thread, so every step calls the plain helper
+        directly: going through ``runner.run_sync`` from here would submit to
+        the single-worker executor the job itself occupies and deadlock.
+        """
+        say = report or (lambda **_kw: None)
+        say(label="Načítám pozice z IBKR", step=0, total=2)
+        stats = self._download_positions(tax_year, token, query_id, fetch=fetch,
+                                         report=lambda detail: say(detail=detail))
+        say(label="Zjišťuji ceny podkladů", step=1, total=2, detail="")
+        overview = self._price_options_overview(
+            self.options_from_positions(tax_year, with_quotes=False))
+        say(step=2, detail="hotovo")
+        overview["downloaded_bytes"] = stats["bytes"]
+        overview["refreshed_at"] = datetime.now().strftime("%H:%M:%S")
+        return overview
+
     def refresh_positions_sync(self, tax_year: Optional[int] = None) -> Dict[str, Any]:
         """Download only the positions statement — no engine run.
 
@@ -1398,34 +1520,22 @@ class RunService:
         closed, so the button sat one click away from doing exactly that.
 
         On the runner so it cannot write the CSV from under a running engine.
+        Kept for the MCP tools, which are synchronous by contract; the web GUI
+        goes through ``start_positions_refresh`` to get progress.
         """
-        current = date.today().year
-        if tax_year is not None and tax_year != current:
-            raise ValueError(
-                f"Pozice lze obnovit jen pro běžící rok ({current}). Dnešní "
-                f"snapshot není stavem k 31. 12. {tax_year} — přepsal by "
-                f"závěrečné pozice uzavřeného roku, ze kterých se počítá daň "
-                f"i nabíhají loty roku {tax_year + 1}."
-            )
-        cfg = self.get_flex_config()
-        query_id = cfg.queries.get("positions")
-        if not cfg.token or not query_id:
-            raise ValueError(
-                "IBKR Flex Web Service není nastavená pro pozice — vyplňte "
-                "token a query ID slotu „positions“ na stránce Soubory."
-            )
+        current, token, query_id = self._positions_refresh_target(tax_year)
         return self.runner.run_sync(self._download_positions, current,
-                                    cfg.token, query_id, timeout=300)
+                                    token, query_id, timeout=300)
 
     def _download_positions(self, tax_year: int, token: str, query_id: str,
-                            fetch=None) -> Dict[str, Any]:
+                            fetch=None, report=None) -> Dict[str, Any]:
         # Resolved at call time, not bound as a default: a default argument
         # freezes the module attribute at import and cannot be patched, which
         # is how a test ends up talking to the real IBKR endpoint.
         fetch = fetch or fetch_statement
         year_dir = self.data_dir / str(tax_year)
         year_dir.mkdir(parents=True, exist_ok=True)
-        content = fetch(token, query_id)
+        content = fetch(token, query_id, report=report)
         path = year_dir / self._FLEX_SLOT_FILES["positions"]
         # Keep the previous statement one step from the bin. The year guard
         # above makes the destructive case unreachable, but this file is a

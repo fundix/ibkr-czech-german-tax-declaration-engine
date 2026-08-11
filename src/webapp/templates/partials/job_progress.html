@@ -1,0 +1,23 @@
+{# Progress line for a running job. Expects `state` (JobState) and `elapsed`
+   (seconds, may be None). Included by job_status.html and options_refresh.html
+   so both spell "where we are" the same way.
+
+   A QUEUED job says so instead of borrowing the running label: one worker runs
+   everything, so a refresh clicked during an engine run waits minutes, and
+   claiming "Načítám z IBKR" that whole time is simply untrue. #}
+{% set p = state.progress if state else none %}
+{% set queued = state and state.status.value == "queued" %}
+<strong>{% if queued %}Čeká ve frontě
+  {%- elif p and p.label %}{{ p.label }}
+  {%- else %}{{ fallback_label | default("Pracuji…") }}{% endif %}</strong>
+{%- if p and p.total and not queued %} <span class="muted">({{ p.step }}&nbsp;/&nbsp;{{ p.total }}){% if elapsed %} ·
+  {{ elapsed // 60 }}:{{ "%02d"|format(elapsed % 60) }}{% endif %}</span>
+{%- elif elapsed %} <span class="muted">({{ elapsed // 60 }}:{{ "%02d"|format(elapsed % 60) }})</span>
+{%- endif %}
+{% if p and p.total and not queued %}
+<progress class="job-bar" max="{{ p.total }}" value="{{ p.step }}"
+          aria-label="Průběh: {{ p.step }} z {{ p.total }}"></progress>
+{% endif %}
+{% if queued %}<p class="note job-detail">Engine zpracovává jednu úlohu po druhé —
+  tahle se rozjede, jakmile ta předchozí dojde.</p>
+{% elif p and p.detail %}<p class="note job-detail">{{ p.detail }}</p>{% endif %}

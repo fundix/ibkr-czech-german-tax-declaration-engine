@@ -1,0 +1,17 @@
+{# Positions download in flight. Keeps the #dash-options id so it replaces the
+   options card in place and puts it back when the job finishes — the card
+   never disappears mid-refresh. #}
+<section class="card" id="dash-options" hx-get="/dashboard/options/refresh/{{ job_id }}"
+         hx-trigger="every 1s" hx-swap="outerHTML">
+  <h2>Opce — expirace a riziko přiřazení</h2>
+  <div class="job running">
+    <span class="spinner"></span>
+    {% with fallback_label = "Načítám aktuální pozice z IBKR…" %}
+      {% include "partials/job_progress.html" %}
+    {% endwith %}
+    {% if not state %}
+    <p class="note">IBKR nejdřív výpis vygeneruje a teprve pak ho vydá — může to
+      trvat i minutu.</p>
+    {% endif %}
+  </div>
+</section>
