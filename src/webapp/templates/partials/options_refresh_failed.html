@@ -1,0 +1,14 @@
+{# A failed positions download. Deliberately NOT job_error.html: that partial
+   hardcodes id="job-status", so swapping it in here both stole the id of the
+   dashboard's own job box and left no way to try again. #}
+<section class="card" id="dash-options">
+  <h2>Opce — expirace a riziko přiřazení</h2>
+  <div class="job failed">
+    <strong>{{ error }}</strong>
+  </div>
+  <form hx-post="/dashboard/options/refresh" hx-target="#dash-options"
+        hx-swap="outerHTML" hx-disabled-elt="find button" class="run-form">
+    <button type="submit">Zkusit znovu</button>
+  </form>
+  <p class="note">Daňové výsledky se tím nezměnily — stahují se jen dnešní pozice.</p>
+</section>

@@ -344,6 +344,46 @@ button:hover {
     border: 1px solid #efc7c7;
     color: var(--fail);
 }
+.job.ok {
+    background: var(--ok-bg);
+    border: 1px solid #bfe3cc;
+    color: var(--ok);
+    margin-bottom: 0.8rem;
+}
+.job.ok .muted {
+    color: inherit;
+    opacity: 0.85;
+}
+/* Progress of a long job (IBKR download, then the engine run). */
+.job-bar {
+    display: block;
+    width: 100%;
+    max-width: 28rem;
+    height: 0.5rem;
+    margin: 0.5rem 0 0.1rem;
+    border: none;
+    border-radius: 999px;
+    background: #d8e3f8;
+    accent-color: var(--accent);
+    appearance: none;
+    -webkit-appearance: none;
+}
+.job-bar::-webkit-progress-bar {
+    background: #d8e3f8;
+    border-radius: 999px;
+}
+.job-bar::-webkit-progress-value {
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width 0.3s ease;
+}
+.job-bar::-moz-progress-bar {
+    background: var(--accent);
+    border-radius: 999px;
+}
+.job-detail {
+    margin: 0.15rem 0 0;
+}
 .warn-box {
     background: var(--warn-bg);
     border: 1px solid #efd9a0;

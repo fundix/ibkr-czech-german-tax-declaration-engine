@@ -9,14 +9,18 @@ Pins the two guarantees the web/MCP layer relies on:
 2. Jobs are serialized (single worker), failures are captured, and the
    cross-process flock actually excludes a second acquirer.
 """
+import threading
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import getcontext
 from pathlib import Path
 
 import pytest
 
 import src.config as config
-from src.webapp.jobs import JobRunner, JobStatus, engine_file_lock
+from src.webapp.jobs import (
+    JobProgress, JobRunner, JobState, JobStatus, engine_file_lock,
+)
 
 
 def _wait_for(runner, job_id, timeout=5.0):
@@ -75,6 +79,73 @@ class TestJobRunner:
 
     def test_unknown_job_id_returns_none(self):
         assert self.runner.get("nonexistent") is None
+
+    def test_progress_is_only_handed_out_when_asked_for(self):
+        """Existing jobs take no `report` kwarg — opting in must be explicit."""
+        job_id = self.runner.submit("no progress", lambda: "fine")
+        assert _wait_for(self.runner, job_id).status == JobStatus.DONE
+        assert self.runner.get(job_id).progress.label == ""
+
+    def test_a_progress_job_publishes_where_it_is_while_it_runs(self):
+        seen = []
+        gate = threading.Event()
+        have_id = threading.Event()
+
+        def work(report):
+            # The worker can start before submit() returns, so wait for the id.
+            assert have_id.wait(5.0)
+            report(label="Stahuji", step=0, total=3, detail="obchody")
+            seen.append(self.runner.get(job_id).progress)
+            report(detail="pozice")          # detail alone keeps label + counts
+            seen.append(self.runner.get(job_id).progress)
+            report(step=3)
+            gate.set()
+
+        job_id = self.runner.submit("progress job", work, with_progress=True)
+        have_id.set()
+        assert gate.wait(5.0)
+        _wait_for(self.runner, job_id)
+        assert [(p.label, p.step, p.total, p.detail) for p in seen] == [
+            ("Stahuji", 0, 3, "obchody"),
+            ("Stahuji", 0, 3, "pozice"),
+        ]
+        final = self.runner.get(job_id).progress
+        assert (final.label, final.step, final.detail) == ("Stahuji", 3, "pozice")
+        assert final.percent == 100
+
+    def test_find_active_returns_only_unfinished_jobs_of_that_kind(self):
+        gate = threading.Event()
+        held = self.runner.submit("slow", lambda: gate.wait(5.0), kind="fetch",
+                                  meta={"run_id": "2026-x"})
+        other = self.runner.submit("slow other", lambda: gate.wait(5.0),
+                                   kind="positions")
+        found = self.runner.find_active("fetch")
+        assert found is not None and found.job_id == held
+        assert found.meta["run_id"] == "2026-x"
+        assert self.runner.find_active("nothing-like-this") is None
+        gate.set()
+        _wait_for(self.runner, held)
+        _wait_for(self.runner, other)
+        # Finished jobs are not "active" any more.
+        assert self.runner.find_active("fetch") is None
+        assert self.runner.find_active("positions") is None
+
+    def test_a_failed_job_does_not_block_the_next_one(self):
+        job_id = self.runner.submit("boom", lambda: 1 / 0, kind="fetch")
+        _wait_for(self.runner, job_id)
+        assert self.runner.find_active("fetch") is None
+
+    def test_progress_percent_is_none_when_the_length_is_unknown(self):
+        assert JobProgress(label="x").percent is None
+        assert JobProgress(step=1, total=3).percent == 33
+
+    def test_elapsed_seconds_is_none_until_the_job_starts(self):
+        state = JobState(job_id="x", description="queued forever")
+        assert state.elapsed_seconds() is None
+        state.started_at = datetime.now(timezone.utc) - timedelta(seconds=90)
+        assert state.elapsed_seconds() >= 90
+        state.finished_at = state.started_at + timedelta(seconds=12)
+        assert state.elapsed_seconds() == 12   # frozen once finished
 
 
 class TestEngineFileLock:

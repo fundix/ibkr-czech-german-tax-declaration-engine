@@ -4,6 +4,7 @@ IBKR Flex Web Service integration — client protocol (SendRequest →
 ReferenceCode → GetStatement with 1019 polling), config handling, and the
 fetch-then-recompute service flow. All offline via injected fetchers.
 """
+import time
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,34 @@ class TestFetchStatement:
                             sleep=lambda s: None)
         assert exc.value.code == "1018"
 
+    def test_every_wait_is_announced_before_it_starts(self):
+        """Almost all the wall clock here is sleeping. A status display that is
+        not told about the waits sits unchanged for a minute and reads as hung,
+        so a detail line must be published BEFORE each sleep, not after."""
+        responses = iter([SEND_OK, GENERATING, RATE_LIMITED, CSV_BODY])
+        seen = []
+        fetch_statement("tok", "42",
+                        http_get=lambda u, p: next(responses),
+                        sleep=lambda s: seen.append(("sleep", s)),
+                        report=lambda detail: seen.append(("say", detail)))
+        kinds = [k for k, _ in seen]
+        # Never two sleeps in a row without something being said in between.
+        for i, (kind, _) in enumerate(seen):
+            if kind == "sleep":
+                assert seen[i - 1][0] == "say", seen
+        assert kinds.count("sleep") == 2
+        said = " | ".join(v for k, v in seen if k == "say")
+        assert "žádám IBKR" in said
+        assert "generuje" in said            # the 1019 wait explains itself
+        assert "příliš mnoho dotazů" in said  # and so does the 1018 backoff
+        assert "pokus 2/12" in said or "pokus 2/" in said
+
+    def test_report_is_optional(self):
+        responses = iter([SEND_OK, GENERATING, CSV_BODY])
+        assert fetch_statement("tok", "42",
+                               http_get=lambda u, p: next(responses),
+                               sleep=lambda s: None) == CSV_BODY
+
 
 class TestFlexConfig:
     def test_roundtrip_and_masking(self, tmp_path):
@@ -177,7 +206,7 @@ class TestServiceFetchFlow:
         )
         fetched_queries = []
 
-        def fake_fetch(token, query_id, from_date=None, to_date=None):
+        def fake_fetch(token, query_id, from_date=None, to_date=None, report=None):
             fetched_queries.append((token, query_id))
             return f"data-{query_id}".encode()
 
@@ -209,7 +238,7 @@ class TestServiceFetchFlow:
         )
         fetch_calls = []
 
-        def fake_fetch(token, query_id, from_date=None, to_date=None):
+        def fake_fetch(token, query_id, from_date=None, to_date=None, report=None):
             fetch_calls.append((query_id, from_date, to_date))
             return f"data-{query_id}-{to_date}".encode()
 
@@ -250,7 +279,7 @@ class TestServiceFetchFlow:
             lambda run_id, year, fx_mode, **kw: captured.update(kw) or {"run_id": run_id},
         )
 
-        def fake_fetch(token, query_id, from_date=None, to_date=None):
+        def fake_fetch(token, query_id, from_date=None, to_date=None, report=None):
             if to_date == "20241231":  # IBKR cannot deliver 2024
                 raise FlexFetchError("stará data nejsou", code="1020")
             return f"data-{query_id}".encode()
@@ -271,7 +300,7 @@ class TestServiceFetchFlow:
         fetch_calls = []
         service._fetch_and_run(
             "2026-x", 2026, "daily",
-            fetch=lambda t, q, from_date=None, to_date=None:
+            fetch=lambda t, q, from_date=None, to_date=None, report=None:
                 fetch_calls.append((q, from_date)) or b"data",
             pause=lambda s: None)
         assert fetch_calls == [("11", None)]
@@ -290,3 +319,104 @@ class TestServiceFetchFlow:
     def test_start_fetch_requires_configuration(self, service):
         with pytest.raises(ValueError, match="není nastavená"):
             service.start_fetch_and_run(2026)
+
+    def test_fetch_reports_a_step_per_statement_plus_the_run(
+            self, service, monkeypatch):
+        """The download dominates the wall clock, so the status has to count
+        statements — not just say "Výpočet běží" for several minutes."""
+        service.save_flex_settings(
+            "tok", {"trades": "11", "cash": "22", "positions": "33"},
+            first_year="2025")
+        monkeypatch.setattr(service, "_execute_run",
+                            lambda run_id, year, fx_mode, **kw: {"run_id": run_id})
+        seen = []
+
+        def report(**kw):
+            seen.append(kw)
+
+        service._fetch_and_run(
+            "2026-x", 2026, "daily",
+            fetch=lambda t, q, from_date=None, to_date=None, report=None:
+                (report("stahuji výpis…") if report else None) or b"data",
+            pause=lambda s: None, report=report)
+
+        totals = {kw["total"] for kw in seen if "total" in kw}
+        # 3 slots x (2025 bootstrap + 2026) + 1 engine run
+        assert totals == {7}
+        labels = [kw["label"] for kw in seen if kw.get("label")]
+        assert labels[0] == "Stahuji z IBKR — obchody 2025"
+        assert "Stahuji z IBKR — pozice 2026" in labels
+        assert labels[-1] == "Počítám daň 2026"
+        # Steps only ever advance, and the engine run is the last one.
+        steps = [kw["step"] for kw in seen if "step" in kw]
+        assert steps == sorted(steps)
+        assert steps[-1] == 7
+        # The Flex client's own detail lines are forwarded verbatim.
+        assert any(kw.get("detail") == "stahuji výpis…" for kw in seen)
+        # And the anti-throttle pauses say why nothing is happening.
+        assert any("pauza" in (kw.get("detail") or "") for kw in seen)
+
+    def test_a_year_ibkr_cannot_deliver_still_consumes_its_slice_of_the_bar(
+            self, service, monkeypatch):
+        """The bar would otherwise stall for the abandoned year's remaining
+        slots and then jump straight to the end."""
+        service.save_flex_settings(
+            "tok", {"trades": "11", "cash": "22"}, first_year="2024")
+        monkeypatch.setattr(service, "_execute_run",
+                            lambda run_id, year, fx_mode, **kw: {"run_id": run_id})
+
+        def fetch(t, q, from_date=None, to_date=None, report=None):
+            if to_date == "20241231" and q == "22":   # 2024 dies on its 2nd slot
+                raise FlexFetchError("stará data nejsou", code="1020")
+            return b"data"
+
+        seen = []
+        service._fetch_and_run("2026-x", 2026, "daily", fetch=fetch,
+                               pause=lambda s: None,
+                               report=lambda **kw: seen.append(kw))
+        steps = [kw["step"] for kw in seen if "step" in kw]
+        assert steps == sorted(steps)          # never goes backwards
+        # 2 slots x (2024 + 2025 + 2026) + 1 run = 7; 2024 credited in full
+        # at 2 even though its second statement never arrived.
+        assert {kw["total"] for kw in seen if "total" in kw} == {7}
+        assert 2 in steps                      # 2024's slice closed out
+        assert steps[-1] == 7
+        # No gap wider than one slot anywhere in the sequence.
+        assert max(b - a for a, b in zip(steps, steps[1:])) <= 1
+
+    def test_a_second_fetch_attaches_to_the_one_already_running(
+            self, service, monkeypatch):
+        """A fetch runs for minutes and only writes the current year's files at
+        the very end of a bootstrap, so should_auto_fetch keeps saying yes —
+        every visit to /runs used to queue another whole download behind it."""
+        import threading
+
+        service.save_flex_settings("tok", {"trades": "11"})
+        gate = threading.Event()
+        monkeypatch.setattr(service, "_fetch_and_run",
+                            lambda *a, **kw: gate.wait(5.0) and {"run_id": a[0]})
+
+        first_job, first_run = service.start_fetch_and_run(2026)
+        assert service.should_auto_fetch(2026) is False   # no auto re-arm
+        again_job, again_run = service.start_fetch_and_run(2026)
+        assert (again_job, again_run) == (first_job, first_run)
+        gate.set()
+        deadline = time.time() + 5
+        while time.time() < deadline and service.active_job(
+                service.FETCH_JOB_KIND) is not None:
+            time.sleep(0.02)
+        assert service.active_job(service.FETCH_JOB_KIND) is None
+        # Finished: a new click starts a genuinely new job again.
+        monkeypatch.setattr(service, "_fetch_and_run",
+                            lambda *a, **kw: {"run_id": a[0]})
+        assert service.start_fetch_and_run(2026)[0] != first_job
+
+    def test_fetch_still_works_without_a_progress_sink(self, service, monkeypatch):
+        service.save_flex_settings("tok", {"trades": "11"})
+        monkeypatch.setattr(service, "_execute_run",
+                            lambda run_id, year, fx_mode, **kw: {"run_id": run_id})
+        meta = service._fetch_and_run(
+            "2026-x", 2026, "daily",
+            fetch=lambda t, q, from_date=None, to_date=None, report=None: b"data",
+            pause=lambda s: None)
+        assert meta["fetched_slots"] == ["trades"]

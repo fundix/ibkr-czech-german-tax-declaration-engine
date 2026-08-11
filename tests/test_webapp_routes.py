@@ -6,7 +6,10 @@ installed — the service layer itself is covered framework-free in
 test_webapp_services.py.
 """
 import json
+import re
 import shutil
+import time
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -239,61 +242,120 @@ class TestPages:
         assert "UNDR" in body
         assert "ALPHA" not in body
 
-    def test_positions_refresh_renders_the_options_table_alone(
-            self, client, monkeypatch):
-        """No engine run: one Flex slot, then just the fragment re-rendered."""
+    POSITIONS_HEADER = (
+        "ClientAccountID,CurrencyPrimary,AssetClass,SubCategory,Symbol,"
+        "Description,Conid,ISIN,UnderlyingSymbol,Multiplier,Quantity,"
+        "MarkPrice,PositionValue,CostBasisMoney,UnderlyingConid,"
+        "LevelOfDetail,OpenDateTime,HoldingPeriodDateTime")
+
+    @staticmethod
+    def _stub_positions_fetch(monkeypatch, csv_body: str):
         from src.webapp import services as services_mod
+        monkeypatch.setattr(
+            services_mod, "fetch_statement",
+            lambda token, query_id, from_date=None, to_date=None, report=None:
+                csv_body.encode())
+
+    @staticmethod
+    def _drain_refresh(client, posted, timeout=15.0):
+        """Follow the refresh's polling card until the job settles.
+
+        The POST no longer blocks on IBKR, so the assertions live on whatever
+        the poll finally swaps in — the table, or a failure card.
+        """
+        match = re.search(r"/dashboard/options/refresh/[0-9a-f]+", posted.text)
+        assert match, posted.text
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            r = client.get(match.group(0))
+            assert r.status_code == 200
+            if 'hx-trigger="every 1s"' not in r.text:
+                return r
+            time.sleep(0.05)
+        raise AssertionError("positions refresh never finished")
+
+    def test_positions_refresh_answers_immediately_with_a_progress_card(
+            self, client, monkeypatch):
+        """The click has to show something: IBKR is polled for up to a minute
+        while it generates the statement, and the POST used to sit on it."""
         from src.webapp.ibkr_flex import FlexConfig, save_flex_config
 
         svc = client.app.state.services
         save_flex_config(svc.flex_config_path,
                          FlexConfig(token="tok", queries={"positions": "42"}))
-        header = ("ClientAccountID,CurrencyPrimary,AssetClass,SubCategory,Symbol,"
-                  "Description,Conid,ISIN,UnderlyingSymbol,Multiplier,Quantity,"
-                  "MarkPrice,PositionValue,CostBasisMoney,UnderlyingConid,"
-                  "LevelOfDetail,OpenDateTime,HoldingPeriodDateTime")
-        row = ("U1,USD,OPT,,SOFI  280616P00015000,SOFI PUT,1,,SOFI,100,-4,"
-               "3.5,-1400,0,2,SUMMARY,,")
-        monkeypatch.setattr(
-            services_mod, "fetch_statement",
-            lambda token, query_id, from_date=None, to_date=None:
-                (header + "\n" + row + "\n").encode())
+        self._stub_positions_fetch(monkeypatch, self.POSITIONS_HEADER + "\n")
 
-        runs_before = len(svc.list_runs())
         r = client.post("/dashboard/options/refresh")
         assert r.status_code == 200
-        assert 'id="dash-options"' in r.text
-        assert "SOFI  280616P00015000" in r.text
-        assert "výpisu pozic" in r.text          # says where the numbers came from
+        assert 'id="dash-options"' in r.text       # card replaced in place
+        assert "spinner" in r.text
+        assert "Načítám aktuální pozice z IBKR" in r.text
+        assert 'hx-trigger="every 1s"' in r.text   # and it polls for the result
+        self._drain_refresh(client, r)
+
+    def test_positions_refresh_renders_the_options_table_alone(
+            self, client, monkeypatch):
+        """No engine run: one Flex slot, then just the fragment re-rendered."""
+        from src.webapp.ibkr_flex import FlexConfig, save_flex_config
+
+        svc = client.app.state.services
+        save_flex_config(svc.flex_config_path,
+                         FlexConfig(token="tok", queries={"positions": "42"}))
+        row = ("U1,USD,OPT,,SOFI  280616P00015000,SOFI PUT,1,,SOFI,100,-4,"
+               "3.5,-1400,0,2,SUMMARY,,")
+        self._stub_positions_fetch(
+            monkeypatch, self.POSITIONS_HEADER + "\n" + row + "\n")
+
+        runs_before = len(svc.list_runs())
+        done = self._drain_refresh(
+            client, client.post("/dashboard/options/refresh"))
+        assert 'id="dash-options"' in done.text
+        assert "SOFI  280616P00015000" in done.text
+        assert "výpisu pozic" in done.text     # says where the numbers came from
+        # Proof the download really happened, not just that a table re-rendered.
+        assert "Pozice načteny z IBKR" in done.text
+        assert "kB" in done.text
         assert len(svc.list_runs()) == runs_before
         # Written into the current year, never the run's (2024) year.
-        from datetime import date
         assert (svc.data_dir / str(date.today().year) / "positions_end.csv").is_file()
         assert not (svc.data_dir / "2024" / "positions_end.csv.bak").exists()
+
+    def test_a_refresh_with_no_open_options_keeps_the_card_and_its_button(
+            self, client, monkeypatch):
+        """An empty render would have swapped the section away by its own id —
+        card, confirmation and button gone, i.e. a click that did nothing."""
+        from src.webapp.ibkr_flex import FlexConfig, save_flex_config
+
+        svc = client.app.state.services
+        save_flex_config(svc.flex_config_path,
+                         FlexConfig(token="tok", queries={"positions": "42"}))
+        stock = ("U1,USD,STK,COMMON,DIVCO,Divco Inc,7,,,1,100,"
+                 "40,4000,3000,,SUMMARY,,")
+        self._stub_positions_fetch(
+            monkeypatch, self.POSITIONS_HEADER + "\n" + stock + "\n")
+
+        done = self._drain_refresh(
+            client, client.post("/dashboard/options/refresh"))
+        assert 'id="dash-options"' in done.text
+        assert "Pozice načteny z IBKR" in done.text
+        assert "Žádné otevřené opční kontrakty" in done.text
+        assert "není co zobrazit" in done.text
+        assert "/dashboard/options/refresh" in done.text   # can refresh again
 
     def test_a_posted_year_cannot_steer_the_refresh(self, client, monkeypatch):
         """The 2024 run is on screen, so a form-carried year would have aimed
         the write at a closed year's authoritative statement."""
-        from datetime import date
-
-        from src.webapp import services as services_mod
         from src.webapp.ibkr_flex import FlexConfig, save_flex_config
 
         svc = client.app.state.services
         save_flex_config(svc.flex_config_path,
                          FlexConfig(token="tok", queries={"positions": "42"}))
-        header = ("ClientAccountID,CurrencyPrimary,AssetClass,SubCategory,Symbol,"
-                  "Description,Conid,ISIN,UnderlyingSymbol,Multiplier,Quantity,"
-                  "MarkPrice,PositionValue,CostBasisMoney,UnderlyingConid,"
-                  "LevelOfDetail,OpenDateTime,HoldingPeriodDateTime")
-        monkeypatch.setattr(
-            services_mod, "fetch_statement",
-            lambda token, query_id, from_date=None, to_date=None:
-                (header + "\n").encode())
+        self._stub_positions_fetch(monkeypatch, self.POSITIONS_HEADER + "\n")
 
         before = (svc.data_dir / "2024" / "positions_end.csv").read_bytes()
-        r = client.post("/dashboard/options/refresh", data={"tax_year": 2024})
-        assert r.status_code == 200
+        self._drain_refresh(
+            client,
+            client.post("/dashboard/options/refresh", data={"tax_year": 2024}))
         # The closed year's statement is byte-identical afterwards.
         assert (svc.data_dir / "2024" / "positions_end.csv").read_bytes() == before
         assert (svc.data_dir / str(date.today().year)
@@ -308,6 +370,139 @@ class TestPages:
         r = client.post("/dashboard/options/refresh")
         assert r.status_code == 200
         assert "Načtení pozic selhalo" in r.text
+        # Keeps its own id and offers a retry: job_error.html would have
+        # claimed id="job-status" (already used by the dashboard) and left the
+        # user with an error card and no button.
+        assert 'id="dash-options"' in r.text
+        assert 'id="job-status"' not in r.text
+        assert "Zkusit znovu" in r.text
+
+    def test_every_hx_target_on_the_ibkr_pages_actually_exists(self, client):
+        """On /runs the status slot used to sit inside "{% if ready %}", so with
+        no dataset — exactly when you press "Stáhnout z IBKR" — htmx had no
+        target and swapped the answer nowhere: the button looked dead."""
+        from src.webapp.ibkr_flex import FlexConfig, save_flex_config
+
+        svc = client.app.state.services
+        save_flex_config(svc.flex_config_path,
+                         FlexConfig(token="tok", queries={"trades": "11"}))
+        for path in ("/", "/runs"):
+            body = client.get(path).text
+            targets = set(re.findall(r'hx-target="#([\w-]+)"', body))
+            assert targets, path
+            for target in targets:
+                assert f'id="{target}"' in body, (path, target)
+            assert "job-slot" in targets, path
+
+    def test_a_download_in_flight_is_picked_up_on_page_load(
+            self, client, monkeypatch):
+        """The progress card used to live only in the tab that started the
+        fetch — a reload during a multi-minute download showed nothing."""
+        import threading
+
+        from src.webapp.ibkr_flex import FlexConfig, save_flex_config
+
+        svc = client.app.state.services
+        save_flex_config(svc.flex_config_path,
+                         FlexConfig(token="tok", queries={"trades": "11"}))
+        gate = threading.Event()
+        monkeypatch.setattr(svc, "_fetch_and_run",
+                            lambda *a, **kw: gate.wait(10.0) and {"run_id": a[0]})
+        started = client.post("/ibkr/fetch")
+        assert started.status_code == 200
+        job_id = re.search(r"/runs/([0-9a-f]+)/status", started.text).group(1)
+        try:
+            for path in ("/", "/runs"):
+                body = client.get(path).text
+                assert f"/runs/{job_id}/status" in body, path
+                # And the button is gone while it runs, so a second click
+                # cannot queue a duplicate download.
+                assert "Stáhnout z IBKR a přepočítat" not in body, path
+        finally:
+            gate.set()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and svc.active_job(
+                svc.FETCH_JOB_KIND) is not None:
+            time.sleep(0.02)
+        assert "Stáhnout z IBKR a přepočítat" in client.get("/").text
+
+    def test_a_refresh_waiting_in_line_says_so_instead_of_claiming_to_download(
+            self, client, monkeypatch):
+        """One worker runs everything, so a refresh clicked during an engine run
+        waits minutes. Showing "Načítám z IBKR" for that whole time is a lie —
+        and indistinguishable from the original "nothing happens"."""
+        import threading
+
+        from src.webapp.ibkr_flex import FlexConfig, save_flex_config
+
+        svc = client.app.state.services
+        save_flex_config(svc.flex_config_path,
+                         FlexConfig(token="tok", queries={"positions": "42"}))
+        self._stub_positions_fetch(monkeypatch, self.POSITIONS_HEADER + "\n")
+
+        gate = threading.Event()
+        blocker = svc.runner.submit("occupy the worker", lambda: gate.wait(10.0))
+        try:
+            posted = client.post("/dashboard/options/refresh")
+            url = re.search(r"/dashboard/options/refresh/[0-9a-f]+", posted.text)
+            body = client.get(url.group(0)).text
+            assert "Čeká ve frontě" in body
+            assert "Načítám pozice z IBKR" not in body
+            assert "<progress" not in body     # no bar for work not started
+        finally:
+            gate.set()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and svc.get_job(
+                blocker).status.value not in ("done", "failed"):
+            time.sleep(0.02)
+        self._drain_refresh(client, posted)
+
+    def test_a_broken_quote_feed_leaves_a_message_not_an_endless_spinner(
+            self, client, monkeypatch):
+        """options_overview sat outside the route's try, so a busy worker or a
+        dead feed meant a 500 — htmx does not swap a non-2xx, so the card kept
+        its "Načítám živé ocenění…" spinner for good."""
+        svc = client.app.state.services
+        monkeypatch.setattr(svc, "options_overview",
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("feed pryč")))
+        r = client.get("/dashboard/valuation")
+        assert r.status_code == 200          # something to swap in
+        assert "Ocenění selhalo" in r.text
+        assert "feed pryč" in r.text
+        # And it must not plant a second #job-status on the dashboard.
+        assert 'id="job-status"' not in r.text
+
+    def test_a_worker_timeout_still_says_something(self, client, monkeypatch):
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+        svc = client.app.state.services
+        monkeypatch.setattr(
+            svc, "options_overview",
+            lambda *a, **kw: (_ for _ in ()).throw(FuturesTimeoutError()))
+        r = client.get("/dashboard/valuation")
+        assert r.status_code == 200
+        # str(TimeoutError()) is "" — this used to render as a bare colon.
+        assert "Ocenění selhalo:" in r.text
+        assert "zaneprázdněný" in r.text
+
+    def test_a_failed_download_reports_through_the_polling_card(
+            self, client, monkeypatch):
+        from src.webapp import services as services_mod
+        from src.webapp.ibkr_flex import FlexConfig, FlexFetchError, save_flex_config
+
+        svc = client.app.state.services
+        save_flex_config(svc.flex_config_path,
+                         FlexConfig(token="tok", queries={"positions": "42"}))
+
+        def boom(*_a, **_kw):
+            raise FlexFetchError("IBKR Flex chyba 1015: Neplatný token.", code="1015")
+
+        monkeypatch.setattr(services_mod, "fetch_statement", boom)
+        done = self._drain_refresh(
+            client, client.post("/dashboard/options/refresh"))
+        assert "Načtení pozic selhalo" in done.text
+        assert "Neplatný token" in done.text
+        assert "Zkusit znovu" in done.text
 
     def test_form_page_shows_official_line_refs(self, client):
         r = client.get("/results/2024-test/form")

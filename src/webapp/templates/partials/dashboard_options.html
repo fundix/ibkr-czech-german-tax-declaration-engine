@@ -1,12 +1,30 @@
-  {# Rendered inside the dashboard and, on its own, by the positions refresh. #}
-  {% if options %}
+  {# Rendered inside the dashboard and, on its own, by the positions refresh.
+     The card also renders with ZERO contracts whenever positions can be
+     refreshed. Two reasons: after a refresh it is swapped in by its own id, so
+     an empty render would delete the card and its button and read as a click
+     that did nothing — and on the dashboard, a book with no options hid the
+     refresh button exactly when it was needed (you cannot see that a written
+     put went in the money if the only way to look is behind that button). #}
+  {% if options or options_refreshed or positions_refreshable %}
   <section class="card" id="dash-options">
     <h2>Opce — expirace a riziko přiřazení</h2>
+    {% if options_refreshed %}
+    <div class="job ok">
+      <strong>✓ Pozice načteny z IBKR{% if refreshed_at %} v&nbsp;{{ refreshed_at }}{% endif %}</strong>
+      <span class="muted">— {{ options | length }}
+        {%- if options | length == 1 %} otevřený opční kontrakt
+        {%- elif 1 < options | length < 5 %} otevřené opční kontrakty
+        {%- else %} otevřených opčních kontraktů{% endif %}
+        {%- if downloaded_bytes %} · výpis {{ "%.1f"|format(downloaded_bytes / 1024) }}&nbsp;kB{% endif %}</span>
+    </div>
+    {% endif %}
     {% if options_source == "positions_csv" %}
     <p class="note">Z výpisu pozic k&nbsp;{{ options_as_of }}{% if options_age_hours is not none %}
-      (stažen před {{ "%.0f"|format(options_age_hours) }} h){% endif %} — bez přepočtu daně.
-      Výpis udává jednu čistou pozici na kontrakt, takže současný long i short v témže
-      kontraktu tady vidět není.</p>
+      ({% if options_age_hours * 60 < 1 %}stažen právě teď{%
+        elif options_age_hours < 1 %}stažen před {{ "%.0f"|format(options_age_hours * 60) }}&nbsp;min{%
+        else %}stažen před {{ "%.0f"|format(options_age_hours) }}&nbsp;h{% endif %}){% endif %} — bez
+      přepočtu daně.{% if options %} Výpis udává jednu čistou pozici na kontrakt, takže
+      současný long i short v témže kontraktu tady vidět není.{% endif %}</p>
     {% endif %}
     {% if options_historical %}
     <p class="note">Kniha uzavřeného roku {{ options_tax_year }} — stav k 31. 12.
@@ -19,6 +37,11 @@
     <p class="note">⚠ {{ options_at_risk }} vypsaných kontraktů je v penězích s expirací do
       {{ assignment_near_days }} dní — u nich hrozí přiřazení podkladu.</p>
     {% endif %}
+    {% if not options %}
+    <p class="note">Žádné otevřené opční kontrakty{% if options_as_of %}
+      k&nbsp;{{ options_as_of }}{% endif %}.{% if options_refreshed %} Stažení
+      proběhlo v pořádku — není co zobrazit.{% endif %}</p>
+    {% else %}
     <div class="table-toolbar">
       <span class="table-search">
         <input type="search" placeholder="Filtr kontraktu…" autocomplete="off"
@@ -94,13 +117,19 @@
       kontrakt je a kolik dní zbývá — ex-dividendové termíny nástroj nevidí.
       {% if options | selectattr("expiry_date", "none") | list %}Některé kontrakty nemají datum expirace —
       přepočítejte rok pro doplnění.{% endif %}</p>
+    {% endif %}
     {% if positions_refreshable %}
     {# No year is posted: the refresh always fetches today's holdings into the
        current year. Sending the displayed run's year would, in filing season,
-       overwrite a closed year's authoritative 31 December statement. #}
+       overwrite a closed year's authoritative 31 December statement.
+       hx-disabled-elt greys the button out for the whole request — a second
+       click would start a second Flex download and earn a 1018 rate limit. #}
     <form hx-post="/dashboard/options/refresh" hx-target="#dash-options" hx-swap="outerHTML"
-          class="run-form">
-      <button type="submit">Načíst aktuální pozice z IBKR</button>
+          hx-disabled-elt="find button" class="run-form">
+      <button type="submit">
+        {%- if options_refreshed %}Načíst znovu{% else %}Načíst aktuální pozice z IBKR{% endif %}
+        <span class="htmx-indicator"><span class="spinner"></span></span>
+      </button>
     </form>
     {% endif %}
   </section>

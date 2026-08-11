@@ -11,22 +11,36 @@
     {% else %}Data roku {{ current_year }} jsou {{ "%.0f"|format(dataset_age) }} h stará.{% endif %}
   </p>
   {% if auto_fetch %}
-  <div hx-post="/ibkr/fetch" hx-trigger="load" hx-target="#job-status" hx-swap="innerHTML"></div>
+  <div hx-post="/ibkr/fetch" hx-trigger="load" hx-target="#job-slot" hx-swap="innerHTML"></div>
   <p class="note">Data jsou zastaralá — stahuji čerstvé výpisy z IBKR automaticky…</p>
-  {% else %}
-  <form hx-post="/ibkr/fetch" hx-target="#job-status" hx-swap="innerHTML">
+  {% elif not running_job %}
+  <form hx-post="/ibkr/fetch" hx-target="#job-slot" hx-swap="innerHTML"
+        hx-disabled-elt="find button">
     <input type="hidden" name="tax_year" value="{{ current_year }}">
-    <button type="submit">Stáhnout z IBKR a přepočítat ({{ current_year }})</button>
+    <button type="submit">Stáhnout z IBKR a přepočítat ({{ current_year }})
+      <span class="htmx-indicator"><span class="spinner"></span></span>
+    </button>
   </form>
   {% endif %}
 </section>
 {% endif %}
 
+{# Outside every conditional, and above both forms that aim at it. It used to
+   live inside "{% if ready %}" further down, so on a fresh install — no dataset,
+   exactly when you press "Stáhnout z IBKR" — htmx found no target and swapped
+   the answer nowhere: the button looked dead. A download in flight is picked up
+   on load so a reload mid-fetch keeps showing it. #}
+<div id="job-slot">
+  {%- if running_job %}{% with job_id = running_job %}
+    {% include "partials/job_status.html" %}
+  {% endwith %}{% endif %}
+</div>
+
 <section class="card">
   <h2>Spustit výpočet</h2>
   {% set ready = datasets | selectattr("run_ready") | list %}
   {% if ready %}
-  <form hx-post="/runs" hx-target="#job-status" hx-swap="innerHTML" class="run-form">
+  <form hx-post="/runs" hx-target="#job-slot" hx-swap="innerHTML" class="run-form">
     <label>Daňový rok
       <select name="tax_year">
         {% for ds in ready | reverse %}
@@ -54,7 +68,6 @@
     <button type="submit">Spustit výpočet</button>
   </form>
   <div class="classify-badge" hx-get="/classify/count" hx-trigger="load" hx-swap="innerHTML"></div>
-  <div id="job-status"></div>
   {% else %}
   <p>Zatím nejsou nahraná žádná kompletní data. <a href="/files">Nahrát výpisy →</a></p>
   {% endif %}

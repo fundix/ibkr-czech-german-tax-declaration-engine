@@ -1,6 +1,7 @@
 # src/webapp/routes.py
 """HTTP routes of the local web GUI — thin wrappers over services.RunService."""
 import logging
+from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -43,9 +44,35 @@ def _svc(request: Request):
     return request.app.state.services
 
 
+def _reason(exc: BaseException) -> str:
+    """Something printable for any exception.
+
+    ``concurrent.futures.TimeoutError`` — what a busy single worker raises —
+    stringifies to "", which rendered as "Ocenění selhalo:" and nothing after
+    the colon.
+    """
+    text = str(exc).strip()
+    if text:
+        return text
+    if isinstance(exc, FuturesTimeoutError):
+        return ("výpočet se nestihl do limitu — engine je zaneprázdněný jinou "
+                "úlohou, zkuste to za chvíli")
+    return type(exc).__name__
+
+
 # ---------------------------------------------------------------------------
 # Dashboard + runs
 # ---------------------------------------------------------------------------
+
+def _running_fetch(svc) -> Optional[str]:
+    """Job id of a download already in flight, so a page load re-attaches to it.
+
+    Without this, reloading during a multi-minute fetch left no trace of it on
+    screen — the progress card lived only in the tab that started it.
+    """
+    state = svc.active_job(svc.FETCH_JOB_KIND)
+    return state.job_id if state is not None else None
+
 
 @router.get("/", response_class=HTMLResponse)
 def index(request: Request):
@@ -59,6 +86,7 @@ def index(request: Request):
         current_year=current_year,
         flex_configured=flex.configured,
         dataset_age=svc.dataset_age_hours(current_year),
+        running_job=_running_fetch(svc),
     )
 
 
@@ -66,28 +94,42 @@ def index(request: Request):
 def dashboard_valuation(request: Request):
     """Lazy-loaded net-worth card — live quotes for the latest run in CZK."""
     svc = _svc(request)
+    # Everything is inside the try, not just the first call: options_overview
+    # prices the contracts through the single worker (a 120 s timeout away from
+    # raising) and used to sit outside it, so a busy worker or a dead quote feed
+    # meant a 500 — and htmx does not swap a non-2xx, leaving the card on its
+    # "Načítám živé ocenění…" spinner for good.
     try:
         data = svc.get_dashboard_valuation()
+        if data is None:
+            return HTMLResponse("")
+        live = data["live"]
+        allocation = svc.allocation_slices(live["positions"])
+        opt = svc.options_overview(data["run_id"])
+        snapshots = svc.snapshot_series(live["tax_year"])
     except Exception as exc:  # noqa: BLE001 — surface a friendly card, not a 500
         logger.exception("Dashboard valuation failed")
-        return _tpl(request, "partials/job_error.html", error=f"Ocenění selhalo: {exc}")
-    if data is None:
-        return HTMLResponse("")
-    live = data["live"]
-    allocation = svc.allocation_slices(live["positions"])
-    opt = svc.options_overview(data["run_id"])
+        return _tpl(request, "partials/job_error.html",
+                    error=f"Ocenění selhalo: {_reason(exc)}")
     return _tpl(request, "partials/dashboard_valuation.html",
                 run_id=data["run_id"], meta=data["meta"], live=live,
-                allocation=allocation,
-                snapshots=svc.snapshot_series(live["tax_year"]),
+                allocation=allocation, snapshots=snapshots,
                 **_options_ctx(svc, opt, live["tax_year"]))
 
 
-def _options_ctx(svc, overview: dict, tax_year) -> dict:
-    """Template variables for partials/dashboard_options.html."""
+def _options_ctx(svc, overview: dict, tax_year, refreshed: bool = False) -> dict:
+    """Template variables for partials/dashboard_options.html.
+
+    ``refreshed`` marks a card that came straight out of a positions download.
+    The table then renders even when there are no open contracts — with the
+    section swapped out by its own id, an empty render would delete the card
+    and the button with it, which looks exactly like a click that did nothing.
+    """
     return {
-        "options": overview["options"],
-        "options_as_of": overview["as_of"],
+        # .get, not [...]: the refresh path feeds this a finished job's result,
+        # and a 500 there would replace the card with nothing at all.
+        "options": overview.get("options") or [],
+        "options_as_of": overview.get("as_of"),
         "options_at_risk": overview.get("at_risk"),
         "options_source": overview.get("source"),
         "options_age_hours": overview.get("age_hours"),
@@ -96,15 +138,20 @@ def _options_ctx(svc, overview: dict, tax_year) -> dict:
         "assignment_near_days": ASSIGNMENT_NEAR_DAYS,
         "positions_refreshable": bool(
             svc.get_flex_config().queries.get("positions")),
+        "options_refreshed": refreshed,
+        "refreshed_at": overview.get("refreshed_at"),
+        "downloaded_bytes": overview.get("downloaded_bytes"),
     }
 
 
 @router.post("/dashboard/options/refresh", response_class=HTMLResponse)
 def refresh_positions(request: Request):
-    """Pull today's positions statement and re-render just the options table.
+    """Queue today's positions download and hand back a progress card.
 
     No engine run: positions is its own Flex slot, so the contracts and their
-    moneyness refresh in one request while the tax figures stay as computed.
+    moneyness refresh on their own while the tax figures stay as computed.
+    A job rather than a blocking POST — IBKR is polled for up to a minute
+    while it generates the statement, and a click has to say so.
 
     The year is taken from the calendar, never from the form. The dashboard
     renders the newest run, which in filing season is the year just closed —
@@ -112,16 +159,33 @@ def refresh_positions(request: Request):
     authoritative 31 December statement.
     """
     svc = _svc(request)
-    year = date.today().year
     try:
-        svc.refresh_positions_sync(year)
-        overview = svc.options_from_positions(year)
+        job_id = svc.start_positions_refresh(date.today().year)
     except Exception as exc:  # noqa: BLE001 — a friendly card beats a 500
-        logger.exception("Positions refresh failed")
-        return _tpl(request, "partials/job_error.html",
-                    error=f"Načtení pozic selhalo: {exc}")
+        logger.exception("Positions refresh could not start")
+        return _tpl(request, "partials/options_refresh_failed.html",
+                    error=f"Načtení pozic selhalo: {_reason(exc)}")
+    return _tpl(request, "partials/options_refresh.html", job_id=job_id)
+
+
+@router.get("/dashboard/options/refresh/{job_id}", response_class=HTMLResponse)
+def refresh_positions_status(request: Request, job_id: str):
+    """Poll the positions download; on success swap the options card back in."""
+    svc = _svc(request)
+    state = svc.get_job(job_id)
+    if state is None:
+        return _tpl(request, "partials/options_refresh_failed.html",
+                    error="Načtení pozic se nepodařilo dohledat — zkuste to znovu.")
+    if state.status == JobStatus.FAILED:
+        return _tpl(request, "partials/options_refresh_failed.html",
+                    error=f"Načtení pozic selhalo: {state.error}")
+    if state.status != JobStatus.DONE:
+        return _tpl(request, "partials/options_refresh.html", job_id=job_id,
+                    state=state, elapsed=state.elapsed_seconds())
+    overview = state.result or {}
     return _tpl(request, "partials/dashboard_options.html",
-                **_options_ctx(svc, overview, year))
+                **_options_ctx(svc, overview, overview.get("tax_year"),
+                               refreshed=True))
 
 
 @router.get("/runs", response_class=HTMLResponse)
@@ -138,6 +202,7 @@ def runs_page(request: Request):
         flex_configured=flex.configured,
         auto_fetch=svc.should_auto_fetch(current_year),
         dataset_age=svc.dataset_age_hours(current_year),
+        running_job=_running_fetch(svc),
     )
 
 
@@ -183,7 +248,8 @@ def job_status(request: Request, job_id: str):
         return _tpl(request, "partials/job_error.html", error=state.error,
                     log_tail=list(state.log_tail)[-10:])
     return _tpl(request, "partials/job_status.html", job_id=job_id,
-                state=state, log_tail=list(state.log_tail)[-6:])
+                state=state, log_tail=list(state.log_tail)[-6:],
+                elapsed=state.elapsed_seconds())
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +427,7 @@ def portfolio_live(request: Request, run_id: str):
         live = svc.get_live_portfolio(run_id)
     except Exception as exc:
         logger.exception("Live valuation failed")
-        return _tpl(request, "partials/job_error.html", error=f"Ocenění selhalo: {exc}")
+        return _tpl(request, "partials/job_error.html", error=f"Ocenění selhalo: {_reason(exc)}")
     if live is None:
         return HTMLResponse("")
     snapshots = svc.snapshot_series(live["tax_year"])
@@ -529,7 +595,7 @@ def targets(request: Request, run_id: Optional[str] = None, saved: str = "",
         overview = svc.sell_targets_overview(active_run)
     except Exception as exc:  # noqa: BLE001 — a quote outage must not 500 the page
         logger.exception("Sell-target overview failed")
-        return _tpl(request, "partials/job_error.html", error=f"Načtení selhalo: {exc}")
+        return _tpl(request, "partials/job_error.html", error=f"Načtení selhalo: {_reason(exc)}")
     pf = svc.load_portfolio(active_run) if active_run else None
     held = {p["symbol"]: p for p in (pf or {}).get("positions", [])
             if Decimal(str(p.get("quantity_long") or 0)) > 0}

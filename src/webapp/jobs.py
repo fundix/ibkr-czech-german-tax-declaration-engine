@@ -45,17 +45,63 @@ class JobStatus(str, Enum):
     FAILED = "failed"
 
 
+@dataclass(frozen=True)
+class JobProgress:
+    """A coarse "where are we" snapshot, published by the running job.
+
+    Frozen and replaced wholesale rather than field-by-field: the worker
+    thread writes it while HTTP threads poll, and a single attribute rebind
+    cannot be observed half-applied (a step counter from the new phase next
+    to the old phase's total).
+    """
+    label: str = ""          # what is happening: "Stahuji výpisy z IBKR"
+    detail: str = ""         # the current item: "pozice · rok 2026"
+    step: int = 0            # steps FINISHED, so 0/5 means "starting the first"
+    total: int = 0           # 0 = unknown length, render as a plain spinner
+
+    @property
+    def percent(self) -> Optional[int]:
+        if self.total <= 0:
+            return None
+        return min(100, int(round(100 * self.step / self.total)))
+
+
 @dataclass
 class JobState:
     job_id: str
     description: str
     status: JobStatus = JobStatus.QUEUED
+    kind: str = ""            # groups jobs so an in-flight one can be found
+    meta: Dict[str, Any] = field(default_factory=dict)
+    progress: JobProgress = field(default_factory=JobProgress)
     log_tail: Deque[str] = field(default_factory=lambda: deque(maxlen=LOG_TAIL_MAX_LINES))
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     result: Any = None
     error: Optional[str] = None
+
+    def report(self, label: Optional[str] = None, detail: Optional[str] = None,
+               step: Optional[int] = None, total: Optional[int] = None) -> None:
+        """Publish progress from the worker thread; omitted fields are kept.
+
+        Passing only ``detail`` is the common case — an IBKR download reports
+        its poll attempts without restating which slot it is on.
+        """
+        cur = self.progress
+        self.progress = JobProgress(
+            label=cur.label if label is None else label,
+            detail=cur.detail if detail is None else detail,
+            step=cur.step if step is None else step,
+            total=cur.total if total is None else total,
+        )
+
+    def elapsed_seconds(self) -> Optional[int]:
+        """Wall-clock since the job started running; None while queued."""
+        if self.started_at is None:
+            return None
+        end = self.finished_at or datetime.now(timezone.utc)
+        return int((end - self.started_at).total_seconds())
 
 
 class _JobLogHandler(logging.Handler):
@@ -88,11 +134,23 @@ class JobRunner:
         self._jobs: Dict[str, JobState] = {}
         self._registry_lock = threading.Lock()
 
-    def submit(self, description: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> str:
+    def submit(self, description: str, fn: Callable[..., Any], *args: Any,
+               with_progress: bool = False, kind: str = "",
+               meta: Optional[Dict[str, Any]] = None, **kwargs: Any) -> str:
+        """Queue *fn* on the worker thread and return its job id.
+
+        ``with_progress=True`` passes the job's ``report`` callable to *fn* as
+        the keyword ``report``, so long jobs can say where they are instead of
+        leaving the poller to guess from the log tail. ``kind`` lets callers
+        find an already-queued job of the same sort via ``find_active``.
+        """
         job_id = uuid.uuid4().hex[:12]
-        state = JobState(job_id=job_id, description=description)
+        state = JobState(job_id=job_id, description=description, kind=kind,
+                         meta=dict(meta or {}))
         with self._registry_lock:
             self._jobs[job_id] = state
+        if with_progress:
+            kwargs["report"] = state.report
 
         def _run() -> None:
             state.status = JobStatus.RUNNING
@@ -123,6 +181,22 @@ class JobRunner:
     def get(self, job_id: str) -> Optional[JobState]:
         with self._registry_lock:
             return self._jobs.get(job_id)
+
+    def find_active(self, kind: str) -> Optional[JobState]:
+        """The queued-or-running job of this ``kind``, newest first.
+
+        Lets a caller attach to work already in flight instead of queueing a
+        duplicate. With one worker a second submission would not race the
+        first, but it would still fire its own IBKR requests once the first
+        finished — earning a rate limit and overwriting the .bak copy of the
+        statement the first download replaced.
+        """
+        with self._registry_lock:
+            for state in reversed(list(self._jobs.values())):
+                if state.kind == kind and state.status in (
+                        JobStatus.QUEUED, JobStatus.RUNNING):
+                    return state
+        return None
 
     def run_sync(self, fn: Callable[..., Any], *args: Any, timeout: Optional[float] = None, **kwargs: Any) -> Any:
         """Execute *fn* on the worker thread and wait for the result.
