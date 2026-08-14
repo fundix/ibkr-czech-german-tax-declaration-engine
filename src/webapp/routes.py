@@ -34,6 +34,13 @@ def favicon():
     return FileResponse(_FAVICON_ICO)
 
 
+@router.get("/healthz", include_in_schema=False)
+def healthz():
+    """Readiness probe for the macOS launcher — it polls this instead of "/",
+    which would render the whole dashboard just to prove the port is alive."""
+    return Response(content="ok", media_type="text/plain")
+
+
 def _tpl(request: Request, name: str, **ctx) -> HTMLResponse:
     templates = request.app.state.templates
     ctx.setdefault("slot_labels", settings.SLOT_LABELS)

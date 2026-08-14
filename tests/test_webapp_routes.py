@@ -51,6 +51,16 @@ def client(tmp_path_factory):
 
 
 class TestPages:
+    def test_healthz_answers_without_rendering_a_page(self, client):
+        # The macOS Dock launcher polls this to decide whether it still has to
+        # start a server, so it has to stay cheap (no template, no run lookup)
+        # and it has to keep existing — a 404 here makes the launcher report
+        # the port as held by a foreign process.
+        r = client.get("/healthz")
+        assert r.status_code == 200
+        assert r.text == "ok"
+        assert r.headers["content-type"].startswith("text/plain")
+
     def test_index_dashboard_surfaces_latest_run(self, client):
         # The home page is now a dashboard: it links to the latest run and
         # offers the "run calculation" call-to-action (the form lives on /runs).

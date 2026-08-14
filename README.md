@@ -99,6 +99,27 @@ per-item detail, verified DAP form line references, a manual-review
 checklist, and JSON/XLSX/PDF downloads. Everything runs locally — no data leaves
 your machine.
 
+#### Dock launcher (macOS)
+
+So the GUI stops being a tab you have to find, build a launcher app once:
+
+```bash
+./scripts/macos/install_dock_app.sh
+```
+
+That writes `~/Applications/Daňová kalkulačka.app`. Clicking it probes
+`/healthz`, starts the server in the background if nothing answers (logging to
+`~/Library/Logs/ibkr-tax/webapp.log`), waits for it, and opens the GUI — no
+terminal involved. The first click lands in Safari: use *File → Add to Dock…*
+there once to get a standalone web-app window, and from then on the launcher
+opens that window directly. Drag the launcher into the Dock and it is the only
+thing you ever click.
+
+`--app-name`, `--webapp-name`, `--port` and `--dest` override the defaults
+(`--help` lists them); re-run the installer to change any of them. The server
+outlives the window you close — `pkill -f 'src.webapp'` stops it, which is also
+how you make the next click pick up code changes.
+
 ### Automatic statement download (IBKR Flex Web Service)
 
 Instead of exporting CSVs by hand: in Client Portal enable *Settings →
