@@ -121,6 +121,11 @@ class Realisation:
     activity: str
     source_id: str
     layers: List[ConsumedLayer] = field(default_factory=list)
+    # The row this came from. Identity, not the transaction id, is what tells
+    # a conversion's LEG from a fee booked against the same trade: IBKR gives
+    # the fee its own id on some trades and the legs' id on others (17 of 36
+    # on the book this was built against), so an id alone cannot separate them.
+    source_record: Optional[RawStatementOfFundsRecord] = None
 
     @property
     def movement_value(self) -> Optional[Decimal]:
@@ -277,14 +282,14 @@ class CurrencyLedger:
 
         self._balances[cur] += amount
         if amount < ZERO:
-            return self._outgoing(cur, -amount, on, rate, activity, source_id)
-        return self._incoming(cur, amount, on, rate, activity, source_id)
+            return self._outgoing(cur, -amount, on, rate, activity, source_id, rec)
+        return self._incoming(cur, amount, on, rate, activity, source_id, rec)
 
     # ------------------------------------------------------------------
     # The two directions
     # ------------------------------------------------------------------
 
-    def _outgoing(self, cur, quantity, on, rate, activity, source_id):
+    def _outgoing(self, cur, quantity, on, rate, activity, source_id, rec=None):
         """Currency leaving: held layers go first, the rest becomes debt."""
         taken = self._consume(self._long[cur], quantity)
         realisations: List[Realisation] = []
@@ -293,7 +298,7 @@ class CurrencyLedger:
             realisations.append(Realisation(
                 kind=RealisationKind.LONG_DISPOSAL, currency=cur,
                 quantity=consumed, on=on, rate=rate, activity=activity,
-                source_id=source_id, layers=taken,
+                source_id=source_id, layers=taken, source_record=rec,
             ))
         shortfall = quantity - consumed
         if shortfall > ZERO:
@@ -307,7 +312,7 @@ class CurrencyLedger:
             ))
         return realisations
 
-    def _incoming(self, cur, quantity, on, rate, activity, source_id):
+    def _incoming(self, cur, quantity, on, rate, activity, source_id, rec=None):
         """Currency arriving: it repays debt before it becomes a holding."""
         repaid = self._consume(self._debt[cur], quantity)
         realisations: List[Realisation] = []
@@ -316,7 +321,7 @@ class CurrencyLedger:
             realisations.append(Realisation(
                 kind=RealisationKind.DEBT_REPAYMENT, currency=cur,
                 quantity=settled, on=on, rate=rate, activity=activity,
-                source_id=source_id, layers=repaid,
+                source_id=source_id, layers=repaid, source_record=rec,
             ))
         surplus = quantity - settled
         if surplus > ZERO:
