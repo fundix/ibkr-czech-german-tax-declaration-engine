@@ -173,6 +173,22 @@ class CzechTaxAggregator:
         evaluate_exempt_income_cap(items, self.config, tax_year, has_fx)
 
         # --- Phase 4: Compute §10 loss offsetting ---
+        # compute_loss_offsetting branches on CZ_10_SECURITIES and
+        # CZ_10_OPTIONS and has no `else`, so a currency gain marked as being
+        # in the tax base would contribute nothing to the total while the
+        # items claimed otherwise — a silent nil, which is worse than not
+        # computing the figure at all. Turning the switch on therefore has to
+        # come WITH a netting branch, and until the advisor settles what that
+        # branch does (do losses offset gains inside the section, and is it
+        # floored at zero?) the run refuses rather than quietly under-reports.
+        if self.config.currency_gains_in_tax_base:
+            raise NotImplementedError(
+                "currency_gains_in_tax_base is on, but compute_loss_offsetting "
+                "has no CZ_10_CURRENCY branch — the gains would be shown on the "
+                "items and dropped from the total. Add the branch (and decide "
+                "whether losses net inside the section, and whether it floors "
+                "at zero) before enabling this."
+            )
         netting = compute_loss_offsetting(items, has_fx)
         netting.annual_limit_eligible_proceeds = annual_limit_proceeds
         netting.annual_limit_threshold = self.config.annual_exempt_limit_czk

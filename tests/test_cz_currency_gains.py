@@ -126,3 +126,19 @@ class TestConfigDefaults:
         # section, and trade vs settlement date — so nothing moves a tax
         # figure yet.
         assert cfg.currency_gains_in_tax_base is False
+
+    def test_enabling_the_tax_base_refuses_rather_than_under_reporting(self):
+        """compute_loss_offsetting has no CZ_10_CURRENCY branch, so a gain
+        marked as being in the base would show on the item and vanish from the
+        total. A loud stop beats a silent nil."""
+        from src.countries.cz.plugin import CzechTaxAggregator
+        from src.identification.asset_resolver import AssetResolver
+
+        cfg = CzTaxConfig()
+        cfg.currency_gains_in_tax_base = True
+        with pytest.raises(NotImplementedError, match="CZ_10_CURRENCY branch"):
+            CzechTaxAggregator(config=cfg).aggregate(
+                realized_gains_losses=[], financial_events=[],
+                asset_resolver=AssetResolver(asset_classifier=None),
+                tax_year=2026,
+            )

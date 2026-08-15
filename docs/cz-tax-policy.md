@@ -57,10 +57,28 @@ figures stay out of the tax base and the items stay `PENDING_MANUAL_REVIEW`:
 1. **Netting inside the section** — may a currency loss reduce a currency gain
    of the same year, and is the section floored at zero?
 2. **Which date governs** — the trade date or the settlement date, for both
-   the layer order and the ČNB rate. They differ on 169 of 267 rows of a real
-   year, so this is not a formality. Switchable via
+   the layer order and the ČNB rate. Switchable via
    `CzTaxConfig.currency_movement_date`; `DATE` (the economic date the rest of
-   the engine converts on) is the default.
+   the engine converts on) is the default. **This is the bigger of the two
+   questions**, measured on the real book:
+
+   | | 2025 narrow | 2026 narrow |
+   |---|---:|---:|
+   | `DATE` (trade) | −77.05 CZK | −91.38 CZK |
+   | `SETTLE_DATE` | −237.62 CZK | −361.16 CZK |
+   | difference | −160.57 | **−269.78** |
+
+   In 2026 the choice is worth three times the §10 total itself, and it flips
+   the sign of the 2025 short-FX figure (−883.21 → +413.73).
+
+   One argument is already on the settlement side and does not need the
+   advisor: of 89 complete conversions, **19 have legs carrying different
+   `Date` values and NONE have different `SettleDate`**. Under the trade-date
+   basis those 19 price the two sides of one transaction on two different ČNB
+   days, which is a booking artefact rather than an economic fact. The default
+   was left on `DATE` all the same — it is what the rest of the engine
+   converts on, and changing a tax basis is the advisor's call, not the
+   engine's.
 
 Settled, and therefore already in code: the narrow reading as the default, the
 shared FIFO, debt as its own queue, no revaluation of an opening balance at the
