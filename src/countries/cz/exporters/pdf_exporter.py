@@ -126,6 +126,7 @@ _ITEM_TYPE_LABELS = {
     "DIVIDEND": "dividenda",
     "FUND_DISTRIBUTION": "distribuce fondu",
     "INTEREST": "úrok",
+    "CURRENCY_CONVERSION": "směna měny",
     "OTHER": "nespárovaná srážková daň",
 }
 
