@@ -45,8 +45,33 @@ Definitive reference for Czech tax rules as implemented in this project. Each ru
 | Options are derivative instruments, NOT securities under §4/1/u | **IMPLEMENTED** — no time test for options |
 | PrivateSaleAsset → CZ_10_SECURITIES | **IMPLEMENTED** |
 | Lot pairing choice (FIFO / LIFO / weighted average / optimal) | **IMPLEMENTED** — `pairing.py`, `pairing_solver.py`; a private investor may pick, the tool only recommends. `optimal` covers long securities; options, shorts and assets with a mid-year corporate action stay FIFO |
-| Currency disposal (FX conversion) → CZ_10_CURRENCY | **PARTIAL** — each disposal of a foreign currency becomes a `CURRENCY_CONVERSION` item flagged `PENDING_MANUAL_REVIEW`, with the disposed amount at the ČNB daily rate. Outside §10 netting and `included_in_tax_base=False`, so it changes no figure. Conversions *out of* CZK are not disposals — they only establish an acquisition rate |
-| FX gain on a currency disposal (the actual §10 figure) | **NOT IMPLEMENTED** — needs a FIFO over cash. `statement_of_funds_parser.py` reads the opening balances and reassembles the conversions, but nothing consumes it yet, and two tax questions are still open (see `AUDIT_REPORT_2026-07.md` M15) |
+| Currency disposal (FX conversion) → CZ_10_CURRENCY | **IMPLEMENTED** — each disposal of a foreign currency becomes a `CURRENCY_CONVERSION` item. Conversions *out of* CZK are not disposals — they only establish an acquisition rate |
+| FX gain on a currency disposal (the actual §10 figure) | **IMPLEMENTED** — `engine/currency_ledger.py` runs a FIFO over cash from the Statement of Funds (merged across every year on file); `countries/cz/currency_gains.py` rules on what §10 reaches. Per a tax advisor on 2026-08-15: **narrow reading is the default** (paying a share's purchase price is payment, not an exchange of money), with a broad switch; both readings share ONE FIFO, since a purchase consumes layers either way. A negative balance is a **debt**, not a negative lot — its own queue, its own mirrored result, outside the §10 base and never netted against gains. Figures are shown on every item and in the §10 note but do NOT yet move a tax figure (`currency_gains_in_tax_base=False`) — see open questions below |
+
+
+### Open questions on currency disposals
+
+Two remain with the taxpayer's advisor; until both are answered the computed
+figures stay out of the tax base and the items stay `PENDING_MANUAL_REVIEW`:
+
+1. **Netting inside the section** — may a currency loss reduce a currency gain
+   of the same year, and is the section floored at zero?
+2. **Which date governs** — the trade date or the settlement date, for both
+   the layer order and the ČNB rate. They differ on 169 of 267 rows of a real
+   year, so this is not a formality. Switchable via
+   `CzTaxConfig.currency_movement_date`; `DATE` (the economic date the rest of
+   the engine converts on) is the default.
+
+Settled, and therefore already in code: the narrow reading as the default, the
+shared FIFO, debt as its own queue, no revaluation of an opening balance at the
+1 January rate, and an undetermined gain reported as undetermined rather than
+as zero.
+
+A note on provenance: the reconstruction is verifiable rather than merely
+plausible. The Statement of Funds carries a running `Balance` on every movement
+row, so replaying the amounts must reproduce IBKR's own figure on every row —
+`verify_against_statement` does exactly that, and a mismatch blocks the note
+from quoting any number.
 
 ---
 

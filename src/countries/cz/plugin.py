@@ -33,6 +33,10 @@ from src.countries.cz.fx_policy import (
     FxConversionRecord,
 )
 from src.countries.cz.annual_limit import evaluate_annual_limit, evaluate_exempt_income_cap
+from src.countries.cz.currency_gains import (
+    CzCurrencyRecognition, compute_currency_gains, rate_lookup_from_converter,
+)
+from src.parsers.statement_of_funds_parser import parse_statement_of_funds_csv
 from src.countries.cz.foreign_tax_credit import CzForeignTaxCreditSummary, evaluate_foreign_tax_credit
 from src.countries.cz.item_builder import (
     build_tax_items,
@@ -126,9 +130,24 @@ class CzechTaxAggregator:
         financial_events: List[FinancialEvent],
         asset_resolver: AssetResolver,
         tax_year: int,
+        statement_of_funds_path: Optional[str] = None,
     ) -> TaxResult:
         TWO = Decimal("0.01")
         ZERO = Decimal(0)
+
+        # --- Phase 0: replay the cash ledger, if the book has one ---
+        # Must span every year on file, not the tax year alone: a dollar sold
+        # this year may have arrived two years ago, as may the draw of a debt
+        # repaid now. Needs an FX converter — without one the run is in
+        # EUR-only mode and has no CZK rates to measure a gain against.
+        currency_gains = None
+        if statement_of_funds_path and self._fx is not None:
+            currency_gains = compute_currency_gains(
+                parse_statement_of_funds_csv(statement_of_funds_path),
+                rate_lookup=rate_lookup_from_converter(self._fx),
+                home_currency=self.config.home_currency,
+                date_field=self.config.currency_movement_date,
+            )
 
         # --- Phase 1: Build individual tax items with FX + WHT linking ---
         items, fx_records = build_tax_items(
@@ -137,6 +156,8 @@ class CzechTaxAggregator:
             asset_resolver=asset_resolver,
             fx=self._fx,
             home_currency=self.config.home_currency,
+            currency_gains=currency_gains,
+            config=self.config,
         )
 
         # --- Phase 2: Apply time test (sets taxability fields in-place) ---
@@ -277,9 +298,6 @@ class CzechTaxAggregator:
         # §10 netting summary (from loss_offsetting module)
         netting_items = netting.to_line_items(cur)
         cz10_notes = ["§10/4 expenses: acquisition costs and trade commissions are already reflected in cost basis / net proceeds per item; additional external expenses directly attributable to the sale (if any) must be added manually"]
-        # M15: FX gains from currency conversions are NOT computed (no cash-
-        # balance FIFO). They are taxable §10 income in CZ — make the gap
-        # loud whenever conversions exist in the data.
         # Counted the same way the items are built, or the note would promise
         # more rows than the review page shows: giving up the home currency to
         # buy a foreign one realises nothing.
@@ -289,17 +307,10 @@ class CzechTaxAggregator:
             and is_foreign_currency_disposal(ev, self.config.home_currency)
         )
         if conversion_count:
-            note = (
-                f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found — "
-                "FX gains/losses from currency conversions are NOT computed by this "
-                "engine and are taxable §10 income. Each conversion is listed as a "
-                "CURRENCY_CONVERSION item flagged for review, with the amount "
-                "disposed of and its CZK volume at the day's rate; the gain needs "
-                "the rate the currency was ACQUIRED at, which the statements cannot "
-                "supply (no cash balances). Assess them manually."
-            )
-            cz10_notes.append(note)
-            logger.warning(note)
+            cz10_notes.append(self._currency_note(
+                conversion_count, currency_gains, tax_year,
+            ))
+            logger.warning(cz10_notes[-1])
 
         sections["cz_10_summary"] = TaxResultSection(
             section_key="cz_10_summary",
@@ -360,8 +371,69 @@ class CzechTaxAggregator:
                 "fx_conversion_records": fx_records,
                 "fx_policy": self.config.fx_policy,
                 "currency": cur,
+                "currency_gains": currency_gains,
             },
         )
+
+    def _currency_note(self, conversion_count, currency_gains, tax_year) -> str:
+        """The §10 currency line of the review page.
+
+        Without a cash ledger this still has to say the gap is a gap. With one
+        it reports both readings and the debt result beside them, because the
+        difference between the readings is the whole of what the taxpayer's
+        advisor is being asked to decide — and on a real book it has been
+        1.44 CZK in one year and 2,587.58 in the next, so a number is worth
+        far more than a description of the question.
+        """
+        if currency_gains is None:
+            return (
+                f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found — "
+                "FX gains are NOT computed: this book has no Statement of Funds, "
+                "the only statement carrying the cash balances a currency FIFO "
+                "needs. Each conversion is listed as a CURRENCY_CONVERSION item "
+                "with the amount disposed of and its CZK volume at the day's rate. "
+                "Download the Statement of Funds slot to have the gains computed."
+            )
+        if currency_gains.ledger_problems:
+            return (
+                f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found, "
+                f"but the cash ledger does not replay to IBKR's own balances "
+                f"({len(currency_gains.ledger_problems)} mismatch(es), first: "
+                f"{currency_gains.ledger_problems[0]}). No FX gain from it can be "
+                "trusted — a dropped, duplicated or misordered row is exactly what "
+                "makes a currency FIFO silently wrong. Assess manually."
+            )
+        narrow = currency_gains.total(CzCurrencyRecognition.NARROW, tax_year)
+        broad = currency_gains.total(CzCurrencyRecognition.BROAD, tax_year)
+        short_fx = currency_gains.short_fx_total(tax_year)
+        undetermined = currency_gains.undetermined(tax_year)
+        active = self.config.currency_recognition
+        parts = [
+            f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found. "
+            f"FX gains ARE computed by a FIFO over cash (Statement of Funds): "
+            f"narrow reading {narrow:+.2f} CZK, broad reading {broad:+.2f} CZK "
+            f"(difference {broad - narrow:+.2f} — whether paying for a security "
+            f"in foreign currency is itself a §10 event); active: "
+            f"{active.value}."
+        ]
+        parts.append(
+            f"Repaying borrowed currency realised {short_fx:+.2f} CZK — reported "
+            "separately and NOT in the §10 base, and never netted against the "
+            "gains above: §10 covers exchanging one's own money, not repaying a "
+            "foreign-currency debt."
+        )
+        if undetermined:
+            parts.append(
+                f"{len(undetermined)} realisation(s) could not be determined at "
+                "all (an acquisition rate is missing) — those are not zero."
+            )
+        if not self.config.currency_gains_in_tax_base:
+            parts.append(
+                "The figures are NOT in the tax base yet: netting of losses "
+                "inside the section and the trade-vs-settlement date are still "
+                "open. Assess manually."
+            )
+        return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------

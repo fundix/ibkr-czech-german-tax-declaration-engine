@@ -879,14 +879,19 @@ class RunService:
                 pairing_method=pairing,
             )
 
+            sof = inputs.get("statement_of_funds")
+            sof_path = str(sof) if sof else None
+
             compare_lines: List[str] = []
             if fx_mode == "compare":
-                comparison = run_cz_compare(processing, tax_year)
+                comparison = run_cz_compare(processing, tax_year,
+                                            statement_of_funds_path=sof_path)
                 compare_lines = list(comparison.render_lines())
                 mode_results = [("daily", comparison.daily), ("uniform", comparison.uniform)]
             else:
                 result = run_cz_aggregation(
-                    processing, tax_year, fx_mode, fx_provider=cz_fx_provider
+                    processing, tax_year, fx_mode, fx_provider=cz_fx_provider,
+                    statement_of_funds_path=sof_path,
                 )
                 mode_results = [(fx_mode, result)]
 

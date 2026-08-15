@@ -15,7 +15,9 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Dict, Optional
 
+from src.countries.cz.currency_gains import CzCurrencyRecognition
 from src.countries.cz.fx_policy import CzFxPolicyConfig
+from src.engine.currency_ledger import MovementDateField
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
@@ -29,6 +31,28 @@ class CzTaxConfig:
 
     # --- FX policy ---
     fx_policy: CzFxPolicyConfig = field(default_factory=CzFxPolicyConfig)
+
+    # --- Currency disposals (§10 ZDP) ---
+    # Confirmed by a tax advisor on 2026-08-15 for a Czech resident individual
+    # holding a private account outside business assets and keeping no books.
+    #
+    # The FIFO over cash is unconditional — the two readings differ only in
+    # what they RECOGNISE, and both must consume the same layers, or a
+    # conversion gets measured against currency that was already spent.
+    currency_recognition: CzCurrencyRecognition = CzCurrencyRecognition.NARROW
+    # Repaying borrowed currency realises a mirrored result whose treatment is
+    # unsettled for an individual, so it is computed and reported but kept out
+    # of the base. Its losses are never netted against long gains either way.
+    currency_short_fx_in_tax_base: bool = False
+    # The computed gains do not yet move a tax figure. Two questions remain
+    # with the advisor: whether losses net against gains inside the currency
+    # section, and whether the trade or the settlement date governs (they
+    # differ on 169 of 267 rows of a real year). Until both are answered the
+    # items stay PENDING_MANUAL_REVIEW and carry the figure in their note.
+    currency_gains_in_tax_base: bool = False
+    # Which of IBKR's two dates orders the layers and picks the rate. DATE is
+    # the economic date the rest of this engine already converts on.
+    currency_movement_date: MovementDateField = MovementDateField.DATE
 
     # --- Tax rates (§16 ZDP) ---
     # 15 % base rate; 23 % on the base portion above the year's threshold.

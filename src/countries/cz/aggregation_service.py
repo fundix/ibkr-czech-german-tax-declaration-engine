@@ -34,11 +34,16 @@ def run_cz_aggregation(
     tax_year: int,
     fx_mode: str = "daily",
     fx_provider=None,
+    statement_of_funds_path: "str | None" = None,
 ) -> "TaxResult":
     """Aggregate a pipeline output under one FX mode ('daily' or 'uniform').
 
     ``fx_provider`` overrides the default provider for the mode — used by
     offline tests to pin rates without network access.
+
+    ``statement_of_funds_path`` is the merged multi-year cash ledger. With it
+    the currency disposals carry a computed FX gain; without it they are
+    recorded but not valued, which is all the other statements allow.
     """
     if fx_mode == "uniform":
         cfg = CzTaxConfig(fx_policy=uniform_fx_policy())
@@ -55,17 +60,21 @@ def run_cz_aggregation(
         financial_events=processing_results.processed_income_events,
         asset_resolver=processing_results.asset_resolver,
         tax_year=tax_year,
+        statement_of_funds_path=statement_of_funds_path,
     )
 
 
 def run_cz_compare(
     processing_results: "ProcessingOutput",
     tax_year: int,
+    statement_of_funds_path: "str | None" = None,
 ) -> CzFxModeComparison:
     """Aggregate under BOTH FX modes and return the comparison."""
     return CzFxModeComparison(
-        daily=run_cz_aggregation(processing_results, tax_year, "daily"),
-        uniform=run_cz_aggregation(processing_results, tax_year, "uniform"),
+        daily=run_cz_aggregation(processing_results, tax_year, "daily",
+                                 statement_of_funds_path=statement_of_funds_path),
+        uniform=run_cz_aggregation(processing_results, tax_year, "uniform",
+                                   statement_of_funds_path=statement_of_funds_path),
     )
 
 
