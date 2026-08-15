@@ -683,12 +683,22 @@ class RunService:
             corp = inputs_dir / "corporate_actions.csv"
             corp.write_text(settings.CORP_ACTIONS_HEADER, encoding="utf-8")
 
+        # Merged across ALL years, like trades: the currency FIFO measures a
+        # disposal against the rate the currency was ACQUIRED at, and a dollar
+        # sold in the tax year may have arrived two years earlier — as may the
+        # draw of a debt repaid in it. Stays None when the slot was never
+        # downloaded; there is simply no currency FIFO for such a book.
+        sof = self._merge_years("statement_of_funds", tax_year,
+                                inputs_dir / "statement_of_funds.csv",
+                                notes=notes)
+
         return {
             "trades": trades,
             "cash": cash,
             "positions_start": pos_start,
             "positions_end": pos_end,
             "corp_actions": corp,
+            "statement_of_funds": sof,
         }
 
     # ------------------------------------------------------------------
