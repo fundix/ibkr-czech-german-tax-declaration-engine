@@ -330,7 +330,12 @@ class TestAggregatorWithFxConversion:
         self.classifier.classify(rgl)
         agg = self._make_aggregator()
         result = agg.aggregate([rgl], [], self.resolver, 2025)
-        _METADATA_PREFIXES = ("item_count", "sec_item_count", "opt_item_count", "annual_limit_applied", "ftc_item_count", "ftc_pending_count")
+        _METADATA_PREFIXES = ("item_count", "sec_item_count", "opt_item_count",
+                              "annual_limit_applied", "ftc_item_count",
+                              "ftc_pending_count",
+                              # §10 currency: counts and the exemption flag are
+                              # metadata, not amounts.
+                              "fx_item_count", "fx_exempt_occasional")
         for sec_key, section in result.sections.items():
             for item_key in section.line_items:
                 if any(item_key.startswith(p) for p in _METADATA_PREFIXES):

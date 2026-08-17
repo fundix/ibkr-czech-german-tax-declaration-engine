@@ -44,15 +44,25 @@ class CzTaxConfig:
     # unsettled for an individual, so it is computed and reported but kept out
     # of the base. Its losses are never netted against long gains either way.
     currency_short_fx_in_tax_base: bool = False
-    # The computed gains do not yet move a tax figure. Two questions remain
-    # with the advisor: whether losses net against gains inside the currency
-    # section, and whether the trade or the settlement date governs (they
-    # differ on 169 of 267 rows of a real year). Until both are answered the
-    # items stay PENDING_MANUAL_REVIEW and carry the figure in their note.
-    currency_gains_in_tax_base: bool = False
-    # Which of IBKR's two dates orders the layers and picks the rate. DATE is
-    # the economic date the rest of this engine already converts on.
-    currency_movement_date: MovementDateField = MovementDateField.DATE
+    # Both blocking questions were answered on 2026-08-15, so the computed
+    # figures now reach the tax base: losses net against gains inside the kind
+    # and the result floors at zero (§10 odst. 4 and 5 — an FX loss is an
+    # expense, and where a kind's expenses exceed its income the difference is
+    # disregarded), with settlement as the rate and layer date.
+    currency_gains_in_tax_base: bool = True
+    # Occasional-income exemption on FX gains. Tested on the SUM OF POSITIVE
+    # gains — not the net, not the volume converted — and losses neither lower
+    # the amount tested nor earn the exemption. It is a cliff: above it the
+    # whole amount is taxable.
+    currency_occasional_exempt_enabled: bool = True
+    currency_occasional_exempt_limit_czk: Decimal = Decimal("50000")
+    # Which of IBKR's two dates orders the layers, picks the rate and decides
+    # the tax year. SETTLE_DATE on the advisor's ruling: a taxpayer keeping no
+    # books is on the cash basis, and a spot exchange only moves the currency
+    # balances on settlement — until then there is a receivable and a payable.
+    # DATE stays available as an advisory scenario; either way a conversion is
+    # ONE event on ONE date.
+    currency_movement_date: MovementDateField = MovementDateField.SETTLE_DATE
 
     # --- Tax rates (§16 ZDP) ---
     # 15 % base rate; 23 % on the base portion above the year's threshold.

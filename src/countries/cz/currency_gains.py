@@ -42,6 +42,7 @@ from src.engine.currency_ledger import (
 )
 from src.parsers.raw_models import RawStatementOfFundsRecord
 from src.parsers.statement_of_funds_parser import conversions
+from src.utils.type_utils import parse_ibkr_date
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +151,7 @@ def compute_currency_gains(
     records: Iterable[RawStatementOfFundsRecord],
     rate_lookup: Callable,
     home_currency: str = "CZK",
-    date_field: MovementDateField = MovementDateField.DATE,
+    date_field: MovementDateField = MovementDateField.SETTLE_DATE,
 ) -> CzCurrencyGains:
     """Replay the cash ledger and rule on what it realised.
 
@@ -173,15 +174,46 @@ def compute_currency_gains(
     # consumed, which can.
     leg_records = {id(leg) for conv in conversions(records) for leg in conv.legs}
 
+    # A conversion is one taxable event on one date, so its rows are grouped
+    # and given a single shared date. Every row of the trade goes in the group,
+    # charges included — a commission cannot be consumed between the two sides
+    # of the exchange it belongs to.
+    conversion_legs: Dict[int, str] = {}
+    conversion_dates: Dict[str, Optional[object]] = {}
+    for conv in conversions(records):
+        group = f"conv:{conv.trade_id}"
+        for rec in list(conv.legs) + list(conv.charges):
+            conversion_legs[id(rec)] = group
+        conversion_dates[group] = _conversion_date(conv, date_field)
+
     ledger = CurrencyLedger(rate_lookup=rate_lookup, home_currency=home_currency,
                             date_field=date_field)
     out = CzCurrencyGains(ledger_problems=problems)
-    for realisation in ledger.replay(records):
+    for realisation in ledger.replay(records, conversion_legs, conversion_dates):
         out.realisations.append(CzCurrencyRealisation(
             realisation=realisation,
             is_conversion_leg=id(realisation.source_record) in leg_records,
         ))
     return out
+
+
+def _conversion_date(conv, date_field: MovementDateField):
+    """The single date a whole conversion is attributed to.
+
+    Under settlement this is simply the legs' shared settle date — they have
+    never been seen to differ. Under the booking date they can, on 19 of 89
+    conversions of the book this was built against, and the LATER one is the
+    execution's own: the execution-level ``trades.csv`` reports exactly that
+    single TradeDate for each of those 19. The earlier leg is the artefact, so
+    taking the maximum reproduces what IBKR itself calls the trade date rather
+    than inventing a third answer.
+    """
+    dates = [parse_ibkr_date(getattr(leg, date_field.value, None))
+             for leg in conv.legs]
+    dates = [d for d in dates if d is not None]
+    if not dates:
+        return None
+    return max(dates)
 
 
 def rate_lookup_from_converter(converter) -> Callable:

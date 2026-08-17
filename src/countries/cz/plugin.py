@@ -63,6 +63,9 @@ from src.utils.type_utils import parse_ibkr_date
 
 logger = logging.getLogger(__name__)
 
+# Module level: the §10 currency note needs it outside aggregate()'s scope.
+ZERO = Decimal(0)
+
 
 # ---------------------------------------------------------------------------
 # CzechTaxClassifier
@@ -133,7 +136,6 @@ class CzechTaxAggregator:
         statement_of_funds_path: Optional[str] = None,
     ) -> TaxResult:
         TWO = Decimal("0.01")
-        ZERO = Decimal(0)
 
         # --- Phase 0: replay the cash ledger, if the book has one ---
         # Must span every year on file, not the tax year alone: a dollar sold
@@ -173,23 +175,17 @@ class CzechTaxAggregator:
         evaluate_exempt_income_cap(items, self.config, tax_year, has_fx)
 
         # --- Phase 4: Compute §10 loss offsetting ---
-        # compute_loss_offsetting branches on CZ_10_SECURITIES and
-        # CZ_10_OPTIONS and has no `else`, so a currency gain marked as being
-        # in the tax base would contribute nothing to the total while the
-        # items claimed otherwise — a silent nil, which is worse than not
-        # computing the figure at all. Turning the switch on therefore has to
-        # come WITH a netting branch, and until the advisor settles what that
-        # branch does (do losses offset gains inside the section, and is it
-        # floored at zero?) the run refuses rather than quietly under-reports.
-        if self.config.currency_gains_in_tax_base:
-            raise NotImplementedError(
-                "currency_gains_in_tax_base is on, but compute_loss_offsetting "
-                "has no CZ_10_CURRENCY branch — the gains would be shown on the "
-                "items and dropped from the total. Add the branch (and decide "
-                "whether losses net inside the section, and whether it floors "
-                "at zero) before enabling this."
-            )
         netting = compute_loss_offsetting(items, has_fx)
+        # The currency kind nets inside itself and floors at zero; its
+        # exemption is a cliff on gross positive gains, so the threshold has to
+        # be in place before compute_combined runs.
+        netting.currency_exemption_enabled = (
+            self.config.currency_occasional_exempt_enabled
+        )
+        netting.currency_exemption_threshold = (
+            self.config.currency_occasional_exempt_limit_czk
+        )
+        netting.compute_combined()
         netting.annual_limit_eligible_proceeds = annual_limit_proceeds
         netting.annual_limit_threshold = self.config.annual_exempt_limit_czk
         netting.annual_limit_applied = (
@@ -324,7 +320,7 @@ class CzechTaxAggregator:
         )
         if conversion_count:
             cz10_notes.append(self._currency_note(
-                conversion_count, currency_gains, tax_year,
+                conversion_count, currency_gains, tax_year, netting,
             ))
             logger.warning(cz10_notes[-1])
 
@@ -391,15 +387,14 @@ class CzechTaxAggregator:
             },
         )
 
-    def _currency_note(self, conversion_count, currency_gains, tax_year) -> str:
+    def _currency_note(self, conversion_count, currency_gains, tax_year,
+                       netting=None) -> str:
         """The §10 currency line of the review page.
 
-        Without a cash ledger this still has to say the gap is a gap. With one
-        it reports both readings and the debt result beside them, because the
-        difference between the readings is the whole of what the taxpayer's
-        advisor is being asked to decide — and on a real book it has been
-        1.44 CZK in one year and 2,587.58 in the next, so a number is worth
-        far more than a description of the question.
+        Says what the outcome IS, not what the question was. "REVIEW REQUIRED"
+        is reserved for what genuinely still needs a human: no ledger, a ledger
+        that does not reconcile, a gain that could not be determined, or the
+        disputed result of repaying borrowed currency.
         """
         if currency_gains is None:
             return (
@@ -419,35 +414,66 @@ class CzechTaxAggregator:
                 "trusted — a dropped, duplicated or misordered row is exactly what "
                 "makes a currency FIFO silently wrong. Assess manually."
             )
-        narrow = currency_gains.total(CzCurrencyRecognition.NARROW, tax_year)
+
+        active = self.config.currency_recognition
         broad = currency_gains.total(CzCurrencyRecognition.BROAD, tax_year)
         short_fx = currency_gains.short_fx_total(tax_year)
         undetermined = currency_gains.undetermined(tax_year)
-        active = self.config.currency_recognition
+        fx = getattr(netting, "currency", None) if netting else None
+
         parts = [
-            f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found. "
-            f"FX gains ARE computed by a FIFO over cash (Statement of Funds): "
-            f"narrow reading {narrow:+.2f} CZK, broad reading {broad:+.2f} CZK "
-            f"(difference {broad - narrow:+.2f} — whether paying for a security "
-            f"in foreign currency is itself a §10 event); active: "
-            f"{active.value}."
+            f"§10 currency exchange: {conversion_count} conversion(s), gains "
+            f"{(fx.gains if fx else ZERO):+.2f} CZK against losses "
+            f"{(fx.losses if fx else ZERO):.2f}, net "
+            f"{(fx.raw_net if fx else ZERO):+.2f} CZK, from a FIFO over cash "
+            f"(Statement of Funds) on the settlement date."
         ]
+        if fx is not None and fx.exempt_occasional:
+            parts.append(
+                f"EXEMPT: the sum of POSITIVE gains ({fx.gains:.2f}) did not "
+                f"exceed {fx.exemption_threshold:.2f} CZK, so nothing enters the "
+                "base. Note the threshold is tested on gross gains — not on the "
+                "net result and not on the volume converted — and losses neither "
+                "lower the amount tested nor earn the exemption."
+            )
+        elif fx is not None and fx.unutilized_loss > ZERO:
+            parts.append(
+                f"Into the base: 0 CZK. The net loss of {fx.unutilized_loss:.2f} "
+                "is disregarded under §10 odst. 4 — it does not reduce securities "
+                "or any other kind, and does not carry to another year."
+            )
+        elif fx is not None:
+            parts.append(f"Into the base: {fx.net_taxable:.2f} CZK.")
+
         parts.append(
-            f"Repaying borrowed currency realised {short_fx:+.2f} CZK — reported "
-            "separately and NOT in the §10 base, and never netted against the "
-            "gains above: §10 covers exchanging one's own money, not repaying a "
-            "foreign-currency debt."
+            f"Recognition: {active.value} (losses net against gains inside the "
+            f"kind, §10 odst. 5). For comparison the broad reading gives "
+            f"{broad:+.2f} CZK."
         )
+        if short_fx != ZERO:
+            parts.append(
+                f"REVIEW REQUIRED: repaying borrowed currency realised "
+                f"{short_fx:+.2f} CZK. It is reported apart and NOT in the §10 "
+                "base, and never netted against the gains above — §10 covers "
+                "exchanging one's own money, not repaying a foreign-currency "
+                "debt, and the treatment for an individual is unsettled."
+            )
         if undetermined:
             parts.append(
-                f"{len(undetermined)} realisation(s) could not be determined at "
-                "all (an acquisition rate is missing) — those are not zero."
+                f"REVIEW REQUIRED: {len(undetermined)} realisation(s) could not be "
+                "determined at all (an acquisition rate is missing) — those are "
+                "not zero."
             )
-        if not self.config.currency_gains_in_tax_base:
+        parts.append(
+            "Not carved out automatically: FX on a demonstrably regulated "
+            "European market would need its own classification and cannot be "
+            "told from these statements."
+        )
+        if tax_year >= 2026:
             parts.append(
-                "The figures are NOT in the tax base yet: netting of losses "
-                "inside the section and the trade-vs-settlement date are still "
-                "open. Assess manually."
+                "For 2026, amendment 360/2025 Sb. left the §10 letter references "
+                "in odst. 4-5 inconsistent with the new q/r — check the letter "
+                "before citing it on the form."
             )
         return " ".join(parts)
 

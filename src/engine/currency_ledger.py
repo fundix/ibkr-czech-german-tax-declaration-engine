@@ -50,12 +50,82 @@ class MovementDateField(Enum):
     """Which of IBKR's two dates orders the layers and picks the rate.
 
     They disagree on most rows — 169 of 267 on the book this was built
-    against — so the choice is a real one and is left to the caller rather
-    than being hardcoded. ``DATE`` is the economic date and is what the rest
-    of this engine already converts on.
+    against — so the choice is a real one. ``SETTLE_DATE`` is the default on a
+    tax advisor's ruling of 2026-08-15: a taxpayer keeping no books is on the
+    cash basis, and a spot exchange only moves the currency balances
+    themselves on settlement (until then there is a receivable and a payable).
+    ``DATE`` remains available as an advisory scenario.
+
+    Either way a conversion is ONE event on ONE date — see ``plan_movements``.
     """
     DATE = "date"
     SETTLE_DATE = "settle_date"
+
+
+@dataclass
+class PlannedMovement:
+    """A movement with the date the tax code attributes it to.
+
+    Kept apart from the record because one conversion's legs must share a
+    single date even when IBKR booked them on two, and because that date —
+    not the row's own field — decides the order the FIFO consumes in.
+    """
+    record: RawStatementOfFundsRecord
+    on: Optional[date_type]
+    #: Rows of the same conversion share a group id, and a group is never
+    #: split by another event.
+    group: str
+
+
+def plan_movements(
+    records: Iterable[RawStatementOfFundsRecord],
+    date_field: MovementDateField = MovementDateField.SETTLE_DATE,
+    conversion_legs: Optional[Dict[int, str]] = None,
+    conversion_dates: Optional[Dict[str, Optional[date_type]]] = None,
+) -> List[PlannedMovement]:
+    """Attribute every movement to a date and put them in consumption order.
+
+    Three rules, all from the same ruling:
+
+    * **A conversion is atomic.** Its rows take one shared date and stay
+      contiguous, so nothing can be consumed between the two sides of a single
+      exchange. Under ``SETTLE_DATE`` this costs nothing — on the book this was
+      built against, 0 of 89 conversions had legs settling on different days,
+      while 19 had legs *booked* on different days. Those 19 are a reporting
+      artefact: the execution-level ``trades.csv`` carries a single TradeDate
+      per conversion, always the later of the two.
+    * **Order follows the attributed date**, not the file. The statement is
+      laid out in per-currency blocks in booking order, so once settlement
+      governs, the file order is no longer the consumption order.
+    * **File order breaks ties.** It is the canonical intra-day order — proven
+      by IBKR's own running Balance column reproducing when the rows are summed
+      top to bottom — so a stable sort keeps it rather than inventing a
+      tie-break. Rows with no usable date sort last; the caller sees them as
+      undetermined rather than silently first.
+    """
+    conversion_legs = conversion_legs or {}
+    conversion_dates = conversion_dates or {}
+    planned: List[PlannedMovement] = []
+    for index, rec in enumerate(records):
+        if rec.is_balance_row:
+            continue
+        group = conversion_legs.get(id(rec))
+        if group is not None and group in conversion_dates:
+            on = conversion_dates[group]
+        else:
+            on = parse_ibkr_date(getattr(rec, date_field.value, None))
+            group = group or f"row:{index}"
+        planned.append(PlannedMovement(record=rec, on=on, group=group))
+
+    # Stable sort keeps file order inside a date, and anchoring each group at
+    # its earliest member keeps a conversion's rows together.
+    anchor: Dict[str, int] = {}
+    for i, p in enumerate(planned):
+        anchor.setdefault(p.group, i)
+    return sorted(
+        planned,
+        key=lambda p: (p.on is None, p.on or date_type.min, anchor[p.group]),
+    )
 
 
 class RealisationKind(Enum):
@@ -180,7 +250,7 @@ class CurrencyLedger:
         self,
         rate_lookup: RateLookup,
         home_currency: str = "CZK",
-        date_field: MovementDateField = MovementDateField.DATE,
+        date_field: MovementDateField = MovementDateField.SETTLE_DATE,
     ):
         self.home_currency = home_currency.upper()
         self.date_field = date_field
@@ -217,23 +287,30 @@ class CurrencyLedger:
     # ------------------------------------------------------------------
 
     def replay(
-        self, records: Iterable[RawStatementOfFundsRecord]
+        self,
+        records: Iterable[RawStatementOfFundsRecord],
+        conversion_legs: Optional[Dict[int, str]] = None,
+        conversion_dates: Optional[Dict[str, Optional[date_type]]] = None,
     ) -> List[Realisation]:
-        """Apply every movement in order and collect what they realised.
+        """Apply every movement in attributed-date order and collect the results.
 
-        Balance-marker rows are skipped except for the opening one of each
-        currency, which seeds the ledger. Callers that already filtered to
-        movements should seed the opening balances themselves via
-        ``seed_opening_balance``.
+        Openings are seeded in a first pass over the whole input: once order
+        follows the attributed date rather than the file, a starting-balance
+        marker no longer necessarily precedes the movements of its currency.
+
+        ``conversion_legs`` maps ``id(record)`` to a conversion's group id and
+        ``conversion_dates`` gives that group its single shared date — see
+        ``plan_movements``. Both come from the caller because pairing legs to
+        conversions is the parser's job, not the ledger's.
         """
-        out: List[Realisation] = []
+        records = list(records)
         for rec in records:
             if rec.is_starting_balance:
                 self.seed_opening_balance(rec)
-                continue
-            if rec.is_balance_row:
-                continue
-            out.extend(self.apply(rec))
+        out: List[Realisation] = []
+        for planned in plan_movements(records, self.date_field,
+                                      conversion_legs, conversion_dates):
+            out.extend(self.apply(planned.record, on=planned.on))
         return out
 
     def seed_opening_balance(self, rec: RawStatementOfFundsRecord) -> None:
@@ -268,14 +345,23 @@ class CurrencyLedger:
         )
         (self._long if amount > ZERO else self._debt)[cur].append(layer)
 
-    def apply(self, rec: RawStatementOfFundsRecord) -> List[Realisation]:
-        """Apply one movement, returning whatever it realised (often nothing)."""
+    def apply(
+        self,
+        rec: RawStatementOfFundsRecord,
+        on: Optional[date_type] = None,
+    ) -> List[Realisation]:
+        """Apply one movement, returning whatever it realised (often nothing).
+
+        ``on`` overrides the row's own date — that is how both legs of one
+        conversion come to share a single date.
+        """
         cur = (rec.currency_primary or "").upper()
         amount = rec.amount or ZERO
         if not cur or amount == ZERO:
             return []
 
-        on = self._date_of(rec)
+        if on is None:
+            on = self._date_of(rec)
         rate = self._rate_for(on, cur)
         activity = (rec.activity_code or "").strip().upper() or "?"
         source_id = (rec.transaction_id or rec.trade_id or "").strip()

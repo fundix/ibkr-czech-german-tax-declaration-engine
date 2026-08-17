@@ -40,10 +40,66 @@ class CzSectionNetting:
 
 
 @dataclass
+class CzCurrencyNetting:
+    """The §10 currency result, which nets inside itself and floors at zero.
+
+    Per a tax advisor on 2026-08-15: §10 odst. 5 calls an FX loss an expense
+    and odst. 4 says that where a kind's expenses exceed its income the
+    difference is disregarded. So losses DO net against gains inside the kind —
+    across currencies, pairs and accounts of one taxpayer, since the "kind" is
+    none of those — and the result never falls below zero.
+
+    The unused part of a loss is not a tax loss. It does not reach securities
+    or any other kind of §10, and it does not carry to another year. It is kept
+    here only so the preparer can see what was disregarded.
+
+    NOT in this bucket, deliberately: the disputed result of repaying borrowed
+    currency, and FX on a demonstrably regulated European market — both need
+    their own legal classification. The first is excluded by construction
+    (``currency_gains`` never recognises it); the second cannot be told from
+    these statements at all and would have to be carved out by hand.
+    """
+    gains: Decimal = ZERO             # sum of the positive results
+    losses: Decimal = ZERO            # sum of the negative results, absolute
+    raw_net: Decimal = ZERO           # gains - losses; may be negative
+    net_taxable: Decimal = ZERO       # max(0, raw_net), or 0 when exempt
+    unutilized_loss: Decimal = ZERO   # what §10/4 disregards
+    #: The occasional-income exemption, tested on the SUM OF POSITIVE gains
+    #: rather than the net and never reduced by losses.
+    exempt_occasional: bool = False
+    exemption_threshold: Decimal = ZERO
+    pending_total: Decimal = ZERO
+    item_count_total: int = 0
+    item_count_taxable: int = 0
+    item_count_pending: int = 0
+
+    def compute_net(self, threshold: Decimal, exemption_enabled: bool) -> None:
+        self.raw_net = self.gains - self.losses
+        self.exemption_threshold = threshold
+        # The threshold is a cliff on gross positive income, and it is tested
+        # BEFORE netting: a loss neither lowers the income being tested nor
+        # earns the exemption. Above the cliff the whole amount is taxable.
+        self.exempt_occasional = bool(
+            exemption_enabled and self.gains > ZERO and self.gains <= threshold
+        )
+        if self.exempt_occasional:
+            self.net_taxable = ZERO
+            self.unutilized_loss = ZERO
+            return
+        self.net_taxable = max(ZERO, self.raw_net)
+        self.unutilized_loss = -self.raw_net if self.raw_net < ZERO else ZERO
+
+
+@dataclass
 class CzLossOffsettingResult:
     """Full §10 netting result with per-section detail and combined total."""
     securities: CzSectionNetting = field(default_factory=CzSectionNetting)
     options: CzSectionNetting = field(default_factory=CzSectionNetting)
+    currency: CzCurrencyNetting = field(default_factory=CzCurrencyNetting)
+    #: Threshold and switch for the currency exemption, set by the caller from
+    #: CzTaxConfig before compute_combined().
+    currency_exemption_threshold: Decimal = ZERO
+    currency_exemption_enabled: bool = False
     combined_net_taxable: Decimal = ZERO
     # Annual limit audit
     annual_limit_applied: bool = False
@@ -53,7 +109,15 @@ class CzLossOffsettingResult:
     def compute_combined(self) -> None:
         self.securities.compute_net()
         self.options.compute_net()
-        self.combined_net_taxable = self.securities.net_taxable + self.options.net_taxable
+        self.currency.compute_net(self.currency_exemption_threshold,
+                                  self.currency_exemption_enabled)
+        # The currency kind contributes only its floored figure: its loss is
+        # disregarded rather than allowed to reduce securities or options.
+        self.combined_net_taxable = (
+            self.securities.net_taxable
+            + self.options.net_taxable
+            + self.currency.net_taxable
+        )
 
     def to_line_items(self, currency: str) -> Dict[str, Decimal]:
         """Flat dict of all netting figures for TaxResult line_items."""
@@ -77,6 +141,19 @@ class CzLossOffsettingResult:
         d[f"opt_taxable_losses_{c}"] = self.options.taxable_losses.quantize(TWO)
         d[f"opt_net_taxable_{c}"] = self.options.net_taxable.quantize(TWO)
         d["opt_item_count"] = Decimal(self.options.item_count_total)
+
+        # Currency (§10 FX). raw_net is reported beside the floored figure so
+        # a disregarded loss stays visible instead of looking like a zero.
+        d[f"fx_gains_{c}"] = self.currency.gains.quantize(TWO)
+        d[f"fx_losses_{c}"] = self.currency.losses.quantize(TWO)
+        d[f"fx_raw_net_{c}"] = self.currency.raw_net.quantize(TWO)
+        d[f"fx_net_taxable_{c}"] = self.currency.net_taxable.quantize(TWO)
+        d[f"fx_unutilized_loss_{c}"] = self.currency.unutilized_loss.quantize(TWO)
+        d[f"fx_exemption_threshold_{c}"] = self.currency.exemption_threshold.quantize(TWO)
+        d["fx_exempt_occasional"] = Decimal(1 if self.currency.exempt_occasional else 0)
+        d["fx_item_count_total"] = Decimal(self.currency.item_count_total)
+        d["fx_item_count_taxable"] = Decimal(self.currency.item_count_taxable)
+        d["fx_item_count_pending"] = Decimal(self.currency.item_count_pending)
 
         # Combined
         d[f"combined_net_taxable_{c}"] = self.combined_net_taxable.quantize(TWO)
@@ -135,6 +212,19 @@ def compute_loss_offsetting(
                     sec.taxable_gains += gl
                 else:
                     sec.taxable_losses += gl.copy_abs()
+
+        elif it.section == CzTaxSection.CZ_10_CURRENCY:
+            fx = result.currency
+            fx.item_count_total += 1
+            if it.tax_review_status == CzTaxReviewStatus.PENDING_MANUAL_REVIEW:
+                fx.item_count_pending += 1
+                fx.pending_total += gl.copy_abs()
+            if it.included_in_tax_base:
+                fx.item_count_taxable += 1
+                if gl >= ZERO:
+                    fx.gains += gl
+                else:
+                    fx.losses += gl.copy_abs()
 
         elif it.section == CzTaxSection.CZ_10_OPTIONS:
             opt = result.options

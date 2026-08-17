@@ -46,50 +46,63 @@ Definitive reference for Czech tax rules as implemented in this project. Each ru
 | PrivateSaleAsset → CZ_10_SECURITIES | **IMPLEMENTED** |
 | Lot pairing choice (FIFO / LIFO / weighted average / optimal) | **IMPLEMENTED** — `pairing.py`, `pairing_solver.py`; a private investor may pick, the tool only recommends. `optimal` covers long securities; options, shorts and assets with a mid-year corporate action stay FIFO |
 | Currency disposal (FX conversion) → CZ_10_CURRENCY | **IMPLEMENTED** — each disposal of a foreign currency becomes a `CURRENCY_CONVERSION` item. Conversions *out of* CZK are not disposals — they only establish an acquisition rate |
-| FX gain on a currency disposal (the actual §10 figure) | **IMPLEMENTED** — `engine/currency_ledger.py` runs a FIFO over cash from the Statement of Funds (merged across every year on file); `countries/cz/currency_gains.py` rules on what §10 reaches. Per a tax advisor on 2026-08-15: **narrow reading is the default** (paying a share's purchase price is payment, not an exchange of money), with a broad switch; both readings share ONE FIFO, since a purchase consumes layers either way. A negative balance is a **debt**, not a negative lot — its own queue, its own mirrored result, outside the §10 base and never netted against gains. Figures are shown on every item and in the §10 note but do NOT yet move a tax figure (`currency_gains_in_tax_base=False`) — see open questions below |
+| FX gain on a currency disposal (the actual §10 figure) | **IMPLEMENTED** — `engine/currency_ledger.py` runs a FIFO over cash from the Statement of Funds (merged across every year on file); `countries/cz/currency_gains.py` rules on what §10 reaches. Per a tax advisor on 2026-08-15: **narrow reading is the default** (paying a share's purchase price is payment, not an exchange of money), with a broad switch; both readings share ONE FIFO, since a purchase consumes layers either way. A negative balance is a **debt**, not a negative lot — its own queue, its own mirrored result, outside the §10 base and never netted against gains. Netting inside the kind is floored at zero (§10 odst. 4 and 5) and the occasional-income exemption is tested on gross positive gains; both settled by the same advisor ruling, so the figures now reach the tax base |
 
 
-### Open questions on currency disposals
+### Currency disposals — settled rules
 
-Two remain with the taxpayer's advisor; until both are answered the computed
-figures stay out of the tax base and the items stay `PENDING_MANUAL_REVIEW`:
+A tax advisor answered both blocking questions on **2026-08-15** for a Czech
+resident individual, private account outside business assets, keeping no books.
+Everything below is implemented and in the tax base.
 
-1. **Netting inside the section** — may a currency loss reduce a currency gain
-   of the same year, and is the section floored at zero?
-2. **Which date governs** — the trade date or the settlement date, for both
-   the layer order and the ČNB rate. Switchable via
-   `CzTaxConfig.currency_movement_date`; `DATE` (the economic date the rest of
-   the engine converts on) is the default. **This is the bigger of the two
-   questions**, measured on the real book:
+**Rate and layer date: settlement.** `CzTaxConfig.currency_movement_date`
+defaults to `SETTLE_DATE`. §38 wants the daily rate for the day an item arises,
+and a taxpayer keeping no books is on the cash basis — income has to reach his
+estate, typically on credit to the account (NSS 2 Afs 21/2010-118; extended
+chamber 1 Afs 208/2023-57, point 33). A spot exchange creates a receivable and
+a payable on the trade day; the currency balances themselves only move on
+settlement.
 
-   | | 2025 narrow | 2026 narrow |
-   |---|---:|---:|
-   | `DATE` (trade) | −77.05 CZK | −91.38 CZK |
-   | `SETTLE_DATE` | −237.62 CZK | −361.16 CZK |
-   | difference | −160.57 | **−269.78** |
+**A conversion is one event on one date.** Its legs take a single shared date
+and stay contiguous, so nothing is consumed between the two sides of one
+exchange. This is not cosmetic: IBKR books the two legs a day apart on **19 of
+89** conversions of the reference book, while their settlement dates have never
+been seen to differ. The execution-level `trades.csv` carries a single TradeDate
+for those 19 — always the later of the two — so the earlier leg is a reporting
+artefact and `_conversion_date` takes the maximum. The advisory `DATE` scenario
+obeys the same rule; per-leg dating was simply wrong and is gone.
 
-   In 2026 the choice is worth three times the §10 total itself, and it flips
-   the sign of the 2025 short-FX figure (−883.21 → +413.73).
+**Netting inside the kind, floored at zero.** §10 odst. 5 calls an FX loss an
+expense and odst. 4 disregards the difference where a kind's expenses exceed its
+income. So losses net against gains across currencies, pairs and accounts of one
+taxpayer — the "kind" is none of those — and the result never goes below zero.
+`CzCurrencyNetting` keeps `raw_net`, `net_taxable` and `unutilized_loss` apart,
+because the unused loss is not a tax loss: it reaches no other kind of §10, does
+not carry to another year, and `compute_combined` contributes only the floored
+figure.
 
-   One argument is already on the settlement side and does not need the
-   advisor: of 89 complete conversions, **19 have legs carrying different
-   `Date` values and NONE have different `SettleDate`**. Under the trade-date
-   basis those 19 price the two sides of one transaction on two different ČNB
-   days, which is a booking artefact rather than an economic fact. The default
-   was left on `DATE` all the same — it is what the rest of the engine
-   converts on, and changing a tax basis is the advisor's call, not the
-   engine's.
+**Occasional-income exemption.** Tested on the **sum of positive gains**, not on
+the net and not on the volume converted; losses neither lower the amount tested
+nor earn the exemption; it is a cliff. `currency_occasional_exempt_limit_czk`
+defaults to 50 000 CZK.
 
-Settled, and therefore already in code: the narrow reading as the default, the
-shared FIFO, debt as its own queue, no revaluation of an opening balance at the
-1 January rate, and an undetermined gain reported as undetermined rather than
-as zero.
+**Still outside the base, deliberately:** the mirrored result of repaying
+borrowed currency (computed, reported, flagged for review — §10 covers
+exchanging one's own money, and NSS 5 Afs 45/2011-94 allowed an FX result on
+repaying a debt only for a bookkeeping legal person), and FX on a demonstrably
+regulated European market, which these statements cannot identify and which the
+note says is not carved out automatically.
+
+**2026 caveat**, carried in the note: amendment 360/2025 Sb. renumbered the §10
+letters and left the odst. 4-5 references inconsistent with the new q/r, so the
+letter is checked per year rather than hardcoded.
 
 A note on provenance: the reconstruction is verifiable rather than merely
 plausible. The Statement of Funds carries a running `Balance` on every movement
 row, so replaying the amounts must reproduce IBKR's own figure on every row —
-`verify_against_statement` does exactly that, and a mismatch blocks the note
-from quoting any number.
+`verify_against_statement` does exactly that in file order (a completeness
+check, independent of the settlement ordering the FIFO consumes in), and a
+mismatch blocks the note from quoting any number.
 
 ---
 

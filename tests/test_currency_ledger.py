@@ -28,13 +28,15 @@ from src.parsers.statement_of_funds_parser import (
 
 FIXTURE = str(Path(__file__).parent / "fixtures" / "statement_of_funds_currency_fifo.csv")
 
-# CZK per 1 USD on the fixture's dates.
+# CZK per 1 USD. Each trade date and its settlement date carry the SAME rate,
+# so the worked example below isolates the FIFO mechanics from the date basis;
+# TestDateBasis then varies one of them on purpose.
 RATES = {
-    date(2026, 1, 10): Decimal("21.00"),
-    date(2026, 2, 10): Decimal("23.00"),
-    date(2026, 3, 10): Decimal("22.50"),
-    date(2026, 4, 10): Decimal("22.00"),
-    date(2026, 5, 10): Decimal("24.00"),
+    date(2026, 1, 10): Decimal("21.00"), date(2026, 1, 12): Decimal("21.00"),
+    date(2026, 2, 10): Decimal("23.00"), date(2026, 2, 12): Decimal("23.00"),
+    date(2026, 3, 10): Decimal("22.50"), date(2026, 3, 12): Decimal("22.50"),
+    date(2026, 4, 10): Decimal("22.00"), date(2026, 4, 14): Decimal("22.00"),
+    date(2026, 5, 10): Decimal("24.00"), date(2026, 5, 12): Decimal("24.00"),
 }
 
 
@@ -76,8 +78,8 @@ class TestSharedFifo:
         assert buys[0].quantity == Decimal("1200.00")
         assert [l.quantity for l in buys[0].layers] == [Decimal("1000.00"),
                                                         Decimal("200.00")]
-        assert [l.opened_on for l in buys[0].layers] == [date(2026, 1, 10),
-                                                         date(2026, 2, 10)]
+        assert [l.opened_on for l in buys[0].layers] == [date(2026, 1, 12),
+                                                         date(2026, 2, 12)]
 
     def test_the_conversion_meets_the_layer_the_purchase_left_behind(self, realisations):
         """Had the purchase not consumed anything, the 300 would have come
@@ -92,17 +94,17 @@ class TestSharedFifo:
 
 
 class TestDebt:
-    def test_converting_more_than_is_held_borrows_the_rest(self, realisations, records):
+    def test_converting_more_than_is_held_borrows_the_rest(self, realisations):
         """500 disposed against 300 held: the 200 shortfall is the broker's
-        money, so it realises nothing and opens a debt instead."""
+        money, so it realises nothing and opens a debt instead. The debt shows
+        up as the layer the later repayment consumes."""
         conv = next(r for r in realisations if r.activity == "FOREX")
         assert conv.quantity == Decimal("300.00")
-        ledger = CurrencyLedger(rate_lookup=stub_rate)
-        ledger.replay([r for r in records
-                       if (r.date or "") <= "2026-04-10" or r.is_balance_row])
-        debts = ledger.open_debts("USD")
-        assert [d.quantity for d in debts] == [Decimal("200.00")]
-        assert debts[0].rate == Decimal("22.00")
+        repayment = next(r for r in realisations
+                         if r.kind is RealisationKind.DEBT_REPAYMENT)
+        assert [l.quantity for l in repayment.layers] == [Decimal("200.00")]
+        assert repayment.layers[0].opened_on == date(2026, 4, 14)
+        assert repayment.layers[0].rate == Decimal("22.00")
 
     def test_incoming_cash_repays_the_debt_before_it_becomes_a_holding(self, realisations):
         repayment = next(r for r in realisations
@@ -117,7 +119,7 @@ class TestDebt:
         ledger.replay(records)
         lots = ledger.open_lots("USD")
         assert [l.quantity for l in lots] == [Decimal("600.00")]
-        assert lots[0].opened_on == date(2026, 5, 10)
+        assert lots[0].opened_on == date(2026, 5, 12)
         assert ledger.open_debts("USD") == []
 
     def test_the_ledger_position_matches_the_brokers_closing_balance(self, records):
@@ -170,23 +172,74 @@ class TestDateField:
         assert by_trade.open_lots("USD")[0].opened_on == date(2026, 5, 10)
         assert by_settle.open_lots("USD")[0].opened_on == date(2026, 5, 12)
 
+    def test_the_basis_changes_the_gain_when_the_two_dates_differ(self, records):
+        """Not cosmetic: on the real book the basis moved the 2026 §10 total
+        from -91 CZK to -361."""
+        rates = dict(RATES)
+        rates[date(2026, 4, 14)] = Decimal("25.00")   # settlement, 3 CZK away
+
+        def rate(on, cur):
+            return rates.get(on) if cur == "USD" else Decimal("1")
+
+        def conv_gain(field):
+            out = CurrencyLedger(rate_lookup=rate, date_field=field).replay(records)
+            return next(r.gain for r in out if r.activity == "FOREX")
+
+        assert conv_gain(MovementDateField.DATE) == Decimal("-300.00")
+        # 300 acquired at 23.00, given up at 25.00 instead of 22.00.
+        assert conv_gain(MovementDateField.SETTLE_DATE) == Decimal("600.00")
+
 
 class TestOrdering:
-    def test_movements_are_applied_in_the_order_given(self, records):
-        """File order is canonical — IBKR's own running balance proves it —
-        so the ledger must not re-sort.
+    def test_consumption_follows_the_attributed_date_not_the_file(self, records):
+        """The statement is laid out in per-currency blocks in booking order,
+        so once settlement governs, file order is no longer consumption order.
+        Shuffling the input must not change a thing — the plan re-derives the
+        order from the dates, with file order only breaking ties."""
+        straight = CurrencyLedger(rate_lookup=stub_rate)
+        straight_out = straight.replay(records)
+        shuffled = CurrencyLedger(rate_lookup=stub_rate)
+        shuffled_out = shuffled.replay(list(reversed(movements(records))))
 
-        The closing position is a plain sum and so cannot show this; what
-        order decides is which layer each disposal meets, and therefore every
-        gain. Reversing the rows must change the results, not silently
-        produce the same ones.
-        """
-        forward = CurrencyLedger(rate_lookup=stub_rate)
-        forward_out = forward.replay(records)
-        backward = CurrencyLedger(rate_lookup=stub_rate)
-        backward_out = backward.replay(list(reversed(movements(records))))
+        assert straight.position("USD") == shuffled.position("USD")
+        assert [r.gain for r in straight_out if r.currency == "USD"] \
+            == [r.gain for r in shuffled_out if r.currency == "USD"]
 
-        assert forward.position("USD") == backward.position("USD")
-        forward_gains = [r.gain for r in forward_out if r.currency == "USD"]
-        backward_gains = [r.gain for r in backward_out if r.currency == "USD"]
-        assert forward_gains != backward_gains
+
+class TestConversionAtomicity:
+    """A conversion is one event on one date. IBKR books its two legs a day
+    apart on 19 of 89 conversions of a real book, while their settlement dates
+    have never been seen to differ — and the execution-level trades.csv
+    reports a single trade date for those 19, always the later one."""
+
+    def test_the_fixture_carries_the_real_artefact(self, records):
+        legs = [r for r in records
+                if (r.activity_code or "") == "FOREX" and r.trade_id == "6004"]
+        assert {r.date for r in legs} == {"2026-04-10", "2026-04-09"}
+        assert {r.settle_date for r in legs} == {"2026-04-14"}
+
+    def test_grouped_legs_take_one_shared_date(self, records):
+        """Ungrouped, each leg would price on its own booking day — the very
+        thing the advisor called incorrect."""
+        from src.engine.currency_ledger import plan_movements
+
+        legs = {id(r): "conv:6004" for r in records
+                if (r.activity_code or "") == "FOREX" and r.trade_id == "6004"}
+        planned = plan_movements(records, MovementDateField.DATE,
+                                 conversion_legs=legs,
+                                 conversion_dates={"conv:6004": date(2026, 4, 10)})
+        conv_rows = [p for p in planned if p.group == "conv:6004"]
+        assert len(conv_rows) == 2
+        assert {p.on for p in conv_rows} == {date(2026, 4, 10)}
+
+    def test_a_conversions_rows_stay_contiguous(self, records):
+        """Nothing may be consumed between the two sides of one exchange."""
+        from src.engine.currency_ledger import plan_movements
+
+        legs = {id(r): "conv:6004" for r in records
+                if (r.activity_code or "") == "FOREX" and r.trade_id == "6004"}
+        planned = plan_movements(records, MovementDateField.SETTLE_DATE,
+                                 conversion_legs=legs,
+                                 conversion_dates={"conv:6004": date(2026, 4, 14)})
+        positions = [i for i, p in enumerate(planned) if p.group == "conv:6004"]
+        assert positions == list(range(positions[0], positions[0] + len(positions)))
