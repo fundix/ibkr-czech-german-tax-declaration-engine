@@ -25,6 +25,7 @@ from src.countries.cz.enums import (
     category_requires_manual_review,
     category_to_cz_section,
 )
+from src.countries.cz.currency_gains import CzCurrencyGains, CzCurrencyRecognition
 from src.countries.cz.fx_policy import CzCurrencyConverter, FxConversionRecord
 from src.countries.cz.tax_items import (
     CzTaxItem, CzTaxItemType, CzTaxReviewStatus, CzWhtRecord,
@@ -77,12 +78,18 @@ def build_tax_items(
     asset_resolver: AssetResolver,
     fx: Optional[CzCurrencyConverter] = None,
     home_currency: str = "CZK",
+    currency_gains: Optional["CzCurrencyGains"] = None,
+    config: Optional["CzTaxConfig"] = None,
 ) -> Tuple[List[CzTaxItem], List[FxConversionRecord]]:
     """
     Build ``CzTaxItem`` list from core pipeline outputs.
 
     Returns ``(items, fx_records)`` where *fx_records* is the full
     audit trail of all FX conversions performed.
+
+    *currency_gains* is the replayed cash ledger, when the book has a
+    Statement of Funds. Without it the currency items keep their old shape:
+    the disposal is recorded, its gain is not computed.
     """
     fx_records: List[FxConversionRecord] = []
 
@@ -104,9 +111,10 @@ def build_tax_items(
         realized_gains_losses, asset_resolver, fx, fx_records,
     )
 
-    # --- Phase 4: currency conversions (recorded, not valued) ---
+    # --- Phase 4: currency conversions ---
     currency_items = _build_currency_items(
         financial_events, asset_resolver, fx, fx_records, home_currency,
+        currency_gains=currency_gains, config=config,
     )
 
     all_items = income_items + unlinked_items + disposal_items + currency_items
@@ -133,23 +141,32 @@ def _build_currency_items(
     fx: Optional[CzCurrencyConverter],
     fx_records: List[FxConversionRecord],
     home_currency: str = "CZK",
+    currency_gains: Optional["CzCurrencyGains"] = None,
+    config: Optional["CzTaxConfig"] = None,
 ) -> List[CzTaxItem]:
     """One item per FX conversion — the disposal of foreign currency.
 
-    Disposing of a foreign currency is §10 income in CZ, but the gain cannot be
-    computed here: it needs the rate at which that currency was ACQUIRED, and
-    the statements carry no cash balances at all. Reconstructing the balance
-    from trades and cash rows goes negative within days on a margin account,
-    where a debit balance is borrowed currency rather than a holding.
+    Disposing of a foreign currency is §10 income in CZ. The gain needs the
+    rate the currency was ACQUIRED at, which no statement states: it has to be
+    reconstructed by a FIFO over cash, and that needs the Statement of Funds,
+    the only statement carrying balances at all.
 
-    So each conversion is recorded with the amount disposed of, valued at the
-    day's ČNB rate purely to show the scale, and flagged for manual review.
-    ``included_in_tax_base`` stays False and the section is outside §10 netting,
-    so none of this can leak into a tax figure. Making them items rather than a
-    note means they show up on the review page, in the pending-items MCP tool
-    and in the XLSX for free.
+    With *currency_gains* the item carries the real figure and the layers
+    behind it. Without it — a book whose Statement of Funds was never
+    downloaded — the item keeps its older, honest shape: the disposal is
+    recorded at the day's ČNB rate to show its scale, and says outright that
+    the gain was not computed.
+
+    Either way the item stays PENDING_MANUAL_REVIEW and out of the tax base
+    while ``currency_gains_in_tax_base`` is off, which is the default until the
+    advisor settles netting inside the section and the trade-vs-settlement
+    date. Making these items rather than a note means they reach the review
+    page, the pending-items MCP tool and the XLSX for free.
     """
     items: List[CzTaxItem] = []
+    recognition = (config.currency_recognition if config
+                   else CzCurrencyRecognition.NARROW)
+    in_base = bool(config and config.currency_gains_in_tax_base)
     for ev in financial_events:
         if not isinstance(ev, CurrencyConversionEvent):
             continue
@@ -174,18 +191,66 @@ def _build_currency_items(
             asset_symbol=f"{ev.from_currency}.{ev.to_currency}",
             asset_description=getattr(asset, "description", None),
         )
-        item.is_taxable = False
+        realisations = (currency_gains.for_transaction(ev.ibkr_transaction_id)
+                        if currency_gains else [])
+        recognised = [r for r in realisations if r.recognised_under(recognition)]
+        determined = [r for r in recognised if r.is_determined]
+
+        opening = (f"Pozbytí {disposed_amount} {disposed_currency} za "
+                   f"{ev.to_amount} {ev.to_currency} (kurz {ev.exchange_rate}). ")
+
+        if currency_gains is None:
+            item_gain = None
+            note = opening + (
+                "Kurzový rozdíl NENÍ spočítán — chybí hotovostní kniha "
+                "(Statement of Funds). Částka v Kč je jen objem pozbytí "
+                "přepočtený denním kurzem ČNB, NE zisk. Posuďte ručně."
+            )
+        elif not realisations:
+            # Nothing of this conversion came out of a holding: the currency
+            # given up was itself borrowed, so the taxpayer disposed of nothing
+            # he owned. That is a determinate nil under §10, not an unknown —
+            # drawing loan principal is not income (§3/4/b ZDP).
+            item_gain = Decimal("0")
+            note = opening + (
+                "Z §10 nevzniká příjem — pozbytá měna nepocházela z držených "
+                "vrstev, nýbrž z úvěru u brokera (čerpání jistiny není příjem, "
+                "§3 odst. 4 písm. b) ZDP). Kurzový výsledek se projeví až při "
+                "splátce úvěru a je veden zvlášť. Posuďte ručně."
+            )
+        elif not determined:
+            item_gain = None
+            note = opening + (
+                "Kurzový rozdíl NELZE určit — u spotřebovaných vrstev chybí "
+                "nabývací kurz. NENÍ to nula. Posuďte ručně."
+            )
+        else:
+            item_gain = sum((r.gain_czk for r in determined), Decimal("0"))
+            layers = [l for r in determined for l in r.realisation.layers]
+            oldest = min((l.opened_on for l in layers if l.opened_on),
+                         default=None)
+            note = opening + (
+                f"Kurzový rozdíl {item_gain:+.2f} Kč — spočítán FIFO nad "
+                f"hotovostí z {len(layers)} nabývacích vrstev"
+                + (f" (nejstarší {oldest})" if oldest else "")
+                + f", výklad §10: {'úzký' if recognition is CzCurrencyRecognition.NARROW else 'široký'}. "
+                + ("Zahrnuto do základu daně." if in_base else
+                   "Do základu daně zatím NEZAHRNUTO — čeká na potvrzení "
+                   "zápočtu ztrát uvnitř druhu příjmu a rozhodného data. "
+                   "Posuďte ručně.")
+            )
+
+        item.is_taxable = bool(in_base and item_gain is not None)
         item.is_exempt = False
-        item.included_in_tax_base = False
+        item.included_in_tax_base = bool(in_base and item_gain is not None)
         item.qualifies_for_annual_limit = False
-        item.tax_review_status = CzTaxReviewStatus.PENDING_MANUAL_REVIEW
-        item.tax_review_note = (
-            f"Pozbytí {disposed_amount} {disposed_currency} za "
-            f"{ev.to_amount} {ev.to_currency} (kurz {ev.exchange_rate}). "
-            "Kurzový rozdíl NENÍ spočítán — chybí nabývací kurz pozbyté měny, "
-            "výpisy neobsahují hotovostní zůstatky. Částka v Kč je jen objem "
-            "pozbytí přepočtený denním kurzem ČNB, NE zisk. Posuďte ručně."
+        if item_gain is not None:
+            item.gain_loss_czk = item_gain
+        item.tax_review_status = (
+            CzTaxReviewStatus.RESOLVED if item.included_in_tax_base
+            else CzTaxReviewStatus.PENDING_MANUAL_REVIEW
         )
+        item.tax_review_note = note
         if fx is not None and czk is None:
             item.fx_conversion_failed = True
         items.append(item)

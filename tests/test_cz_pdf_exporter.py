@@ -21,10 +21,12 @@ fitz = pytest.importorskip("fitz")  # pymupdf — dev dependency
 
 from src.countries.base import TaxResult
 from src.countries.cz.exporters.pdf_exporter import (
+    _ITEM_TYPE_LABELS,
     _fmt_date,
     _fmt_money,
     export_cz_to_pdf,
 )
+from src.countries.cz.tax_items import CzTaxItemType
 from tests.test_cz_exporters import _build_test_result  # noqa: E402
 
 
@@ -99,6 +101,14 @@ class TestPdfContent:
     def test_pending_review_section(self, pdf_text):
         assert "Položky vyžadující ruční kontrolu" in pdf_text
         assert "ke kontrole" in pdf_text
+
+    def test_every_item_type_has_a_czech_label(self):
+        """The pending table falls back to the raw enum name, which is how
+        CURRENCY_CONVERSION reached the PDF as "CURRENCY_CONVERSION" — the
+        item type it is most likely to show, since those items are always
+        pending. A new type must not repeat it."""
+        missing = [t.name for t in CzTaxItemType if t.name not in _ITEM_TYPE_LABELS]
+        assert missing == []
 
     def test_warnings_rendered_once(self, pdf_text):
         needle = "NENÍ oficiální daňové přiznání"

@@ -33,6 +33,10 @@ from src.countries.cz.fx_policy import (
     FxConversionRecord,
 )
 from src.countries.cz.annual_limit import evaluate_annual_limit, evaluate_exempt_income_cap
+from src.countries.cz.currency_gains import (
+    CzCurrencyRecognition, compute_currency_gains, rate_lookup_from_converter,
+)
+from src.parsers.statement_of_funds_parser import parse_statement_of_funds_csv
 from src.countries.cz.foreign_tax_credit import CzForeignTaxCreditSummary, evaluate_foreign_tax_credit
 from src.countries.cz.item_builder import (
     build_tax_items,
@@ -58,6 +62,9 @@ from src.utils.exchange_rate_provider import ExchangeRateProvider
 from src.utils.type_utils import parse_ibkr_date
 
 logger = logging.getLogger(__name__)
+
+# Module level: the §10 currency note needs it outside aggregate()'s scope.
+ZERO = Decimal(0)
 
 
 # ---------------------------------------------------------------------------
@@ -126,9 +133,23 @@ class CzechTaxAggregator:
         financial_events: List[FinancialEvent],
         asset_resolver: AssetResolver,
         tax_year: int,
+        statement_of_funds_path: Optional[str] = None,
     ) -> TaxResult:
         TWO = Decimal("0.01")
-        ZERO = Decimal(0)
+
+        # --- Phase 0: replay the cash ledger, if the book has one ---
+        # Must span every year on file, not the tax year alone: a dollar sold
+        # this year may have arrived two years ago, as may the draw of a debt
+        # repaid now. Needs an FX converter — without one the run is in
+        # EUR-only mode and has no CZK rates to measure a gain against.
+        currency_gains = None
+        if statement_of_funds_path and self._fx is not None:
+            currency_gains = compute_currency_gains(
+                parse_statement_of_funds_csv(statement_of_funds_path),
+                rate_lookup=rate_lookup_from_converter(self._fx),
+                home_currency=self.config.home_currency,
+                date_field=self.config.currency_movement_date,
+            )
 
         # --- Phase 1: Build individual tax items with FX + WHT linking ---
         items, fx_records = build_tax_items(
@@ -137,6 +158,8 @@ class CzechTaxAggregator:
             asset_resolver=asset_resolver,
             fx=self._fx,
             home_currency=self.config.home_currency,
+            currency_gains=currency_gains,
+            config=self.config,
         )
 
         # --- Phase 2: Apply time test (sets taxability fields in-place) ---
@@ -153,6 +176,16 @@ class CzechTaxAggregator:
 
         # --- Phase 4: Compute §10 loss offsetting ---
         netting = compute_loss_offsetting(items, has_fx)
+        # The currency kind nets inside itself and floors at zero; its
+        # exemption is a cliff on gross positive gains, so the threshold has to
+        # be in place before compute_combined runs.
+        netting.currency_exemption_enabled = (
+            self.config.currency_occasional_exempt_enabled
+        )
+        netting.currency_exemption_threshold = (
+            self.config.currency_occasional_exempt_limit_czk
+        )
+        netting.compute_combined()
         netting.annual_limit_eligible_proceeds = annual_limit_proceeds
         netting.annual_limit_threshold = self.config.annual_exempt_limit_czk
         netting.annual_limit_applied = (
@@ -277,9 +310,6 @@ class CzechTaxAggregator:
         # §10 netting summary (from loss_offsetting module)
         netting_items = netting.to_line_items(cur)
         cz10_notes = ["§10/4 expenses: acquisition costs and trade commissions are already reflected in cost basis / net proceeds per item; additional external expenses directly attributable to the sale (if any) must be added manually"]
-        # M15: FX gains from currency conversions are NOT computed (no cash-
-        # balance FIFO). They are taxable §10 income in CZ — make the gap
-        # loud whenever conversions exist in the data.
         # Counted the same way the items are built, or the note would promise
         # more rows than the review page shows: giving up the home currency to
         # buy a foreign one realises nothing.
@@ -289,17 +319,10 @@ class CzechTaxAggregator:
             and is_foreign_currency_disposal(ev, self.config.home_currency)
         )
         if conversion_count:
-            note = (
-                f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found — "
-                "FX gains/losses from currency conversions are NOT computed by this "
-                "engine and are taxable §10 income. Each conversion is listed as a "
-                "CURRENCY_CONVERSION item flagged for review, with the amount "
-                "disposed of and its CZK volume at the day's rate; the gain needs "
-                "the rate the currency was ACQUIRED at, which the statements cannot "
-                "supply (no cash balances). Assess them manually."
-            )
-            cz10_notes.append(note)
-            logger.warning(note)
+            cz10_notes.append(self._currency_note(
+                conversion_count, currency_gains, tax_year, netting,
+            ))
+            logger.warning(cz10_notes[-1])
 
         sections["cz_10_summary"] = TaxResultSection(
             section_key="cz_10_summary",
@@ -360,8 +383,99 @@ class CzechTaxAggregator:
                 "fx_conversion_records": fx_records,
                 "fx_policy": self.config.fx_policy,
                 "currency": cur,
+                "currency_gains": currency_gains,
             },
         )
+
+    def _currency_note(self, conversion_count, currency_gains, tax_year,
+                       netting=None) -> str:
+        """The §10 currency line of the review page.
+
+        Says what the outcome IS, not what the question was. "REVIEW REQUIRED"
+        is reserved for what genuinely still needs a human: no ledger, a ledger
+        that does not reconcile, a gain that could not be determined, or the
+        disputed result of repaying borrowed currency.
+        """
+        if currency_gains is None:
+            return (
+                f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found — "
+                "FX gains are NOT computed: this book has no Statement of Funds, "
+                "the only statement carrying the cash balances a currency FIFO "
+                "needs. Each conversion is listed as a CURRENCY_CONVERSION item "
+                "with the amount disposed of and its CZK volume at the day's rate. "
+                "Download the Statement of Funds slot to have the gains computed."
+            )
+        if currency_gains.ledger_problems:
+            return (
+                f"REVIEW REQUIRED: {conversion_count} currency conversion(s) found, "
+                f"but the cash ledger does not replay to IBKR's own balances "
+                f"({len(currency_gains.ledger_problems)} mismatch(es), first: "
+                f"{currency_gains.ledger_problems[0]}). No FX gain from it can be "
+                "trusted — a dropped, duplicated or misordered row is exactly what "
+                "makes a currency FIFO silently wrong. Assess manually."
+            )
+
+        active = self.config.currency_recognition
+        broad = currency_gains.total(CzCurrencyRecognition.BROAD, tax_year)
+        short_fx = currency_gains.short_fx_total(tax_year)
+        undetermined = currency_gains.undetermined(tax_year)
+        fx = getattr(netting, "currency", None) if netting else None
+
+        parts = [
+            f"§10 currency exchange: {conversion_count} conversion(s), gains "
+            f"{(fx.gains if fx else ZERO):+.2f} CZK against losses "
+            f"{(fx.losses if fx else ZERO):.2f}, net "
+            f"{(fx.raw_net if fx else ZERO):+.2f} CZK, from a FIFO over cash "
+            f"(Statement of Funds) on the settlement date."
+        ]
+        if fx is not None and fx.exempt_occasional:
+            parts.append(
+                f"EXEMPT: the sum of POSITIVE gains ({fx.gains:.2f}) did not "
+                f"exceed {fx.exemption_threshold:.2f} CZK, so nothing enters the "
+                "base. Note the threshold is tested on gross gains — not on the "
+                "net result and not on the volume converted — and losses neither "
+                "lower the amount tested nor earn the exemption."
+            )
+        elif fx is not None and fx.unutilized_loss > ZERO:
+            parts.append(
+                f"Into the base: 0 CZK. The net loss of {fx.unutilized_loss:.2f} "
+                "is disregarded under §10 odst. 4 — it does not reduce securities "
+                "or any other kind, and does not carry to another year."
+            )
+        elif fx is not None:
+            parts.append(f"Into the base: {fx.net_taxable:.2f} CZK.")
+
+        parts.append(
+            f"Recognition: {active.value} (losses net against gains inside the "
+            f"kind, §10 odst. 5). For comparison the broad reading gives "
+            f"{broad:+.2f} CZK."
+        )
+        if short_fx != ZERO:
+            parts.append(
+                f"REVIEW REQUIRED: repaying borrowed currency realised "
+                f"{short_fx:+.2f} CZK. It is reported apart and NOT in the §10 "
+                "base, and never netted against the gains above — §10 covers "
+                "exchanging one's own money, not repaying a foreign-currency "
+                "debt, and the treatment for an individual is unsettled."
+            )
+        if undetermined:
+            parts.append(
+                f"REVIEW REQUIRED: {len(undetermined)} realisation(s) could not be "
+                "determined at all (an acquisition rate is missing) — those are "
+                "not zero."
+            )
+        parts.append(
+            "Not carved out automatically: FX on a demonstrably regulated "
+            "European market would need its own classification and cannot be "
+            "told from these statements."
+        )
+        if tax_year >= 2026:
+            parts.append(
+                "For 2026, amendment 360/2025 Sb. left the §10 letter references "
+                "in odst. 4-5 inconsistent with the new q/r — check the letter "
+                "before citing it on the form."
+            )
+        return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------

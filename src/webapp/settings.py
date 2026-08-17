@@ -22,6 +22,11 @@ SLOT_FILES = {
     "positions_start": "positions_start.csv",
     "positions_end": "positions_end.csv",
     "corp_actions": "corporate_actions.csv",
+    # The cash ledger behind the currency FIFO. Optional, and listed last
+    # because it is the newest slot: leaving it out of SLOT_FILES made it
+    # invisible to the dataset model, so the /files table always showed it as
+    # absent and a hand-uploaded one was discarded without a word.
+    "statement_of_funds": "statement_of_funds.csv",
 }
 
 SLOT_LABELS = {

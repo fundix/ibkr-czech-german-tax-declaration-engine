@@ -50,6 +50,7 @@ class CzTaxLiabilitySummary:
     taxable_interest: Decimal = ZERO
     taxable_securities_net: Decimal = ZERO
     taxable_options_net: Decimal = ZERO
+    taxable_currency_net: Decimal = ZERO
 
     # --- Combined ---
     combined_taxable_base: Decimal = ZERO
@@ -115,6 +116,7 @@ class CzTaxLiabilitySummary:
             f"taxable_interest_{c}": self.taxable_interest.quantize(TWO),
             f"taxable_securities_net_{c}": self.taxable_securities_net.quantize(TWO),
             f"taxable_options_net_{c}": self.taxable_options_net.quantize(TWO),
+            f"taxable_currency_net_{c}": self.taxable_currency_net.quantize(TWO),
             f"combined_taxable_base_{c}": self.combined_taxable_base.quantize(TWO),
             f"base_for_base_rate_{c}": self.base_for_base_rate.quantize(TWO),
             f"tax_at_base_rate_{c}": self.tax_at_base_rate.quantize(TWO),
@@ -339,6 +341,11 @@ def compute_tax_liability(
     result.taxable_interest = taxable_interest
     result.taxable_securities_net = max(ZERO, netting.securities.net_taxable)
     result.taxable_options_net = max(ZERO, netting.options.net_taxable)
+    # Already floored (and possibly zeroed by the occasional-income exemption)
+    # inside CzCurrencyNetting, because an FX loss is disregarded rather than
+    # allowed to reduce another kind.
+    result.taxable_currency_net = getattr(netting, "currency", None) and \
+        netting.currency.net_taxable or ZERO
 
     # NOTE: negative §10 net results are floored at 0 for tax base purposes.
     # Loss carryforward is NOT implemented.
@@ -352,6 +359,21 @@ def compute_tax_liability(
             f"§10 options net loss {netting.options.net_taxable} "
             "floored to 0 for tax base (loss carryforward not implemented)"
         )
+    fx = getattr(netting, "currency", None)
+    if fx is not None and fx.unutilized_loss > ZERO:
+        notes.append(
+            f"§10 currency net loss {fx.raw_net} disregarded (§10 odst. 4 — "
+            "where a kind's expenses exceed its income the difference is not "
+            "taken into account); it does not reduce another kind and does not "
+            "carry to another year"
+        )
+    if fx is not None and fx.exempt_occasional:
+        notes.append(
+            f"§10 currency gains {fx.gains} are exempt — the sum of POSITIVE "
+            f"FX gains did not exceed {fx.exemption_threshold} "
+            "(occasional income); the threshold is tested on gross gains, not "
+            "on the net result"
+        )
 
     # --- 2. Combined taxable base ---
     combined = (
@@ -359,6 +381,7 @@ def compute_tax_liability(
         + result.taxable_interest
         + result.taxable_securities_net
         + result.taxable_options_net
+        + result.taxable_currency_net
     )
     result.combined_taxable_base = max(ZERO, combined)
 

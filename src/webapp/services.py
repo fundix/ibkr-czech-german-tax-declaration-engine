@@ -683,12 +683,22 @@ class RunService:
             corp = inputs_dir / "corporate_actions.csv"
             corp.write_text(settings.CORP_ACTIONS_HEADER, encoding="utf-8")
 
+        # Merged across ALL years, like trades: the currency FIFO measures a
+        # disposal against the rate the currency was ACQUIRED at, and a dollar
+        # sold in the tax year may have arrived two years earlier — as may the
+        # draw of a debt repaid in it. Stays None when the slot was never
+        # downloaded; there is simply no currency FIFO for such a book.
+        sof = self._merge_years("statement_of_funds", tax_year,
+                                inputs_dir / "statement_of_funds.csv",
+                                notes=notes)
+
         return {
             "trades": trades,
             "cash": cash,
             "positions_start": pos_start,
             "positions_end": pos_end,
             "corp_actions": corp,
+            "statement_of_funds": sof,
         }
 
     # ------------------------------------------------------------------
@@ -869,14 +879,19 @@ class RunService:
                 pairing_method=pairing,
             )
 
+            sof = inputs.get("statement_of_funds")
+            sof_path = str(sof) if sof else None
+
             compare_lines: List[str] = []
             if fx_mode == "compare":
-                comparison = run_cz_compare(processing, tax_year)
+                comparison = run_cz_compare(processing, tax_year,
+                                            statement_of_funds_path=sof_path)
                 compare_lines = list(comparison.render_lines())
                 mode_results = [("daily", comparison.daily), ("uniform", comparison.uniform)]
             else:
                 result = run_cz_aggregation(
-                    processing, tax_year, fx_mode, fx_provider=cz_fx_provider
+                    processing, tax_year, fx_mode, fx_provider=cz_fx_provider,
+                    statement_of_funds_path=sof_path,
                 )
                 mode_results = [(fx_mode, result)]
 
@@ -1043,27 +1058,44 @@ class RunService:
         # between each and up to a minute of statement generation apiece, a
         # bootstrap of several years runs for many minutes.
         slots = [s for s in FLEX_SLOTS if cfg.queries.get(s)]
-        older: List[int] = []
+        # Older years are gap-filled per SLOT, not skipped per year. Skipping
+        # any year that could already run meant a slot added to the config
+        # later never arrived for it: statement_of_funds was configured long
+        # after 2024 and 2025 had been computed, so the cash ledger the
+        # currency FIFO needs was downloadable and never downloaded. Only
+        # files absent from disk are requested, so a closed year's existing
+        # statements are still never re-downloaded over.
+        older: List[Tuple[int, List[str]]] = []
         for year in range(cfg.first_year, tax_year) if cfg.first_year else ():
-            ds = self.get_year(year)
-            if ds is None or not ds.run_ready:
-                older.append(year)
-        # +1 for the engine run itself, which is the last step. Steps are
-        # counted off a per-year base rather than incremented, so a year IBKR
-        # cannot deliver still consumes its whole slice of the bar instead of
-        # leaving the counter behind and jumping at the end.
-        total_steps = len(slots) * (len(older) + 1) + 1
+            missing = [
+                s for s in slots
+                if not (self.data_dir / str(year)
+                        / self._FLEX_SLOT_FILES[s]).is_file()
+            ]
+            if missing:
+                older.append((year, missing))
+        # Each year's slice of the progress bar is as wide as its own gap
+        # list. +1 for the engine run itself, which is the last step. Steps
+        # are counted off a per-year base rather than incremented, so a year
+        # IBKR cannot deliver still consumes its whole slice of the bar
+        # instead of leaving the counter behind and jumping at the end.
+        year_base: Dict[int, int] = {}
+        running = 0
+        for year, missing in older:
+            year_base[year] = running
+            running += len(missing)
+        total_steps = running + len(slots) + 1
         done_steps = 0
 
-        def _download(year: int, year_index: int, delay_first: bool,
+        def _download(year: int, base: int, year_slots: List[str],
+                      delay_first: bool,
                       from_date: Optional[str] = None,
                       to_date: Optional[str] = None) -> List[str]:
             nonlocal done_steps
-            base = year_index * len(slots)
             year_dir = self.data_dir / str(year)
             year_dir.mkdir(parents=True, exist_ok=True)
             done: List[str] = []
-            for offset, slot in enumerate(slots):
+            for offset, slot in enumerate(year_slots):
                 query_id = cfg.queries[slot]
                 label = f"Stahuji z IBKR — {FLEX_SLOT_LABELS.get(slot, slot)} {year}"
                 done_steps = base + offset
@@ -1087,30 +1119,33 @@ class RunService:
         extra_notes: List[str] = []
         bootstrapped: List[int] = []
         delay_next = False
-        for year_index, year in enumerate(older):
+        for year, missing in older:
             try:
-                done = _download(year, year_index, delay_first=delay_next,
+                done = _download(year, year_base[year], missing,
+                                 delay_first=delay_next,
                                  from_date=f"{year}0101", to_date=f"{year}1231")
             except FlexFetchError as exc:
                 # A year IBKR cannot deliver must not sink the whole job.
                 logger.warning(f"IBKR Flex: bootstrap of {year} failed: {exc}")
                 extra_notes.append(f"Doplnění roku {year} z IBKR selhalo: {exc}")
                 delay_next = True
-                done_steps = (year_index + 1) * len(slots)
+                done_steps = year_base[year] + len(missing)
                 say(step=done_steps, total=total_steps,
                     detail=f"rok {year} IBKR nedodal — pokračuji dál")
                 continue
             delay_next = delay_next or bool(done)
             if done:
                 bootstrapped.append(year)
-                logger.info(f"IBKR Flex: bootstrapped missing {year} dataset.")
+                logger.info(
+                    f"IBKR Flex: filled {', '.join(done)} for {year}."
+                )
         if bootstrapped:
             extra_notes.append(
-                "Chybějící datasety doplněny z IBKR (fd/td období přes "
+                "Chybějící výpisy doplněny z IBKR (fd/td období přes "
                 f"stávající queries): {', '.join(map(str, bootstrapped))}."
             )
 
-        fetched = _download(tax_year, len(older), delay_first=delay_next)
+        fetched = _download(tax_year, running, slots, delay_first=delay_next)
         if not fetched:
             raise ValueError("Žádná query ID nejsou nastavená.")
         logger.info(f"IBKR Flex: fetched {', '.join(fetched)} for {tax_year}.")

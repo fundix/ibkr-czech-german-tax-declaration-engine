@@ -161,11 +161,13 @@ def evaluate_time_test(
 
     for item in items:
         if item.item_type is CzTaxItemType.CURRENCY_CONVERSION:
-            # Recorded, not valued. The item carries the volume of a currency
-            # disposal, never a gain, and item_builder already flagged it for
-            # review. A holding period says nothing about currency, and the
-            # unknown-type catch-all below would mark it taxable and resolved —
-            # claiming a figure the engine has not computed.
+            # A holding period says nothing about currency: §4/1/u exempts
+            # securities held long enough, and money is not one. item_builder
+            # has already settled this item's taxability from the cash FIFO,
+            # so there is nothing here to decide — and the unknown-type
+            # catch-all below would overwrite it, marking every disposal
+            # taxable and RESOLVED including the ones funded from the broker's
+            # money rather than the holder's.
             continue
 
         if getattr(item, "fx_conversion_failed", False):

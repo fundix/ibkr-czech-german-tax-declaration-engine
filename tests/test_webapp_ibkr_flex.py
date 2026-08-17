@@ -264,13 +264,21 @@ class TestServiceFetchFlow:
         # A pause between every consecutive download: 12 requests -> 11 pauses
         assert len(pauses) == 11
 
-    def test_bootstrap_skips_existing_years_and_survives_a_failed_one(self, service, monkeypatch):
+    def test_bootstrap_fills_only_the_gaps_and_survives_a_failed_year(self, service, monkeypatch):
+        """An older year is gap-filled per slot, never re-downloaded wholesale.
+
+        Skipping every year that could already run is what kept
+        statement_of_funds — configured long after 2024 and 2025 had been
+        computed — from ever reaching them, so the currency FIFO had no cash
+        ledger for the years its history lives in.
+        """
         service.save_flex_settings(
             "tok",
-            {"trades": "11", "cash": "22", "positions": "33", "corp_actions": "44"},
+            {"trades": "11", "cash": "22", "positions": "33",
+             "corp_actions": "44", "statement_of_funds": "55"},
             first_year="2024",
         )
-        # A run-ready 2025 dataset already exists — must NOT be overwritten
+        # 2025 already runs, but has no corporate actions and no cash ledger.
         for slot in ("trades", "cash", "positions_end"):
             service.save_upload(2025, slot, b"existing\n")
         captured = {}
@@ -278,19 +286,26 @@ class TestServiceFetchFlow:
             service, "_execute_run",
             lambda run_id, year, fx_mode, **kw: captured.update(kw) or {"run_id": run_id},
         )
+        fetch_calls = []
 
         def fake_fetch(token, query_id, from_date=None, to_date=None, report=None):
             if to_date == "20241231":  # IBKR cannot deliver 2024
                 raise FlexFetchError("stará data nejsou", code="1020")
+            fetch_calls.append((query_id, to_date))
             return f"data-{query_id}".encode()
 
         meta = service._fetch_and_run("2026-x", 2026, "daily",
                                       fetch=fake_fetch, pause=lambda s: None)
 
-        # 2024 failed but the job carried on; 2025 untouched; 2026 fetched
-        assert "bootstrapped_years" not in meta
+        # 2024 failed but the job carried on.
         assert any("2024" in n and "selhalo" in n for n in captured["extra_notes"])
+        # 2025 kept every file it had and received exactly the two it lacked.
         assert (service.data_dir / "2025" / "trades.csv").read_bytes() == b"existing\n"
+        assert (service.data_dir / "2025" / "cash_transactions.csv").read_bytes() == b"existing\n"
+        assert [q for q, td in fetch_calls if td == "20251231"] == ["44", "55"]
+        assert (service.data_dir / "2025" / "corporate_actions.csv").read_bytes() == b"data-44"
+        assert (service.data_dir / "2025" / "statement_of_funds.csv").read_bytes() == b"data-55"
+        assert meta["bootstrapped_years"] == [2025]
         assert (service.data_dir / "2026" / "trades.csv").read_bytes() == b"data-11"
 
     def test_no_bootstrap_without_first_year(self, service, monkeypatch):
