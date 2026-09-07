@@ -71,6 +71,23 @@ class TestPages:
         assert "Spustit výpočet" in r.text    # CTA to /runs
 
     @staticmethod
+    def _json_payload(html, marker):
+        """The JSON literal the inline JS assigns right after ``marker``."""
+        assert marker in html, marker
+        tail = html.split(marker, 1)[1]
+        depth, end = 0, None
+        for k, ch in enumerate(tail):
+            if ch in "[{":
+                depth += 1
+            elif ch in "]}":
+                depth -= 1
+                if depth == 0:
+                    end = k + 1
+                    break
+        assert end is not None, marker
+        return json.loads(tail[:end])
+
+    @staticmethod
     def _assert_json_payloads(html, markers):
         """Every payload the inline JS parses must be a JSON ARRAY of objects.
 
@@ -82,19 +99,7 @@ class TestPages:
         catches the second one; valid-JSON alone does not.
         """
         for marker in markers:
-            assert marker in html, marker
-            tail = html.split(marker, 1)[1]
-            depth, end = 0, None
-            for k, ch in enumerate(tail):
-                if ch in "[{":
-                    depth += 1
-                elif ch in "]}":
-                    depth -= 1
-                    if depth == 0:
-                        end = k + 1
-                        break
-            assert end is not None, marker
-            payload = json.loads(tail[:end])
+            payload = TestPages._json_payload(html, marker)
             assert isinstance(payload, list), f"{marker} is not an array"
             assert all(isinstance(x, dict) for x in payload), marker
 
@@ -104,17 +109,46 @@ class TestPages:
         """
         r = client.get("/dashboard/valuation")
         assert r.status_code == 200
-        assert "Aktuální hodnota" in r.text
+        assert "Čistá hodnota" in r.text
+        # The synthetic run has no Statement of Funds: the card must say the
+        # cash is unknown rather than show the positions as if net.
+        assert "hotovost neznámá" in r.text
         # Live quote reached the row and was converted (40 USD x 100 x 20);
         # format_czk uses a non-breaking thousands space.
         assert "DIVCO" in r.text
         assert "80\u00a0000,00" in r.text
         self._assert_json_payloads(
             r.text, ("const alloc = ", "const snaps = "))
+        # This very request stored today's snapshot as a positions-only (v2)
+        # point; the chart under a positions-only card must draw it rather
+        # than filter it out as an "older formula" of the net-value line.
+        assert len(self._json_payload(r.text, "const snaps = ")) >= 1
+
+    def test_valuation_fragment_shows_the_cash_ledger_as_margin(self, client):
+        """With the run's Statement of Funds in place the card nets the cash:
+        USD -1417.08947 x 20, EUR 397 x 25 and CZK -402.37994 make
+        -18 819,17 Kč, GBP has no stub rate and is disclosed, CHF is 0."""
+        svc = client.app.state.services
+        ledger = svc.runs_dir / "2024-test" / "inputs" / "statement_of_funds.csv"
+        shutil.copyfile(
+            Path(__file__).parent / "fixtures" / "statement_of_funds_sample.csv",
+            ledger)
+        try:
+            r = client.get("/dashboard/valuation")
+        finally:
+            ledger.unlink()
+        assert r.status_code == 200
+        assert "Čistá hodnota" in r.text
+        assert "hotovost neznámá" not in r.text
+        assert "-18\u00a0819,17" in r.text
+        assert "margin" in r.text
+        assert "2026-07-31" in r.text          # the close the balances are as of
+        assert "GBP" in r.text                 # unconverted currency disclosed
 
     def test_portfolio_live_fragment_renders_its_chart_payloads(self, client):
         r = client.get("/results/2024-test/portfolio/live")
         assert r.status_code == 200
+        assert "Čistá hodnota" in r.text
         assert 'id="portfolio-live-table"' in r.text
         assert "Váha %" in r.text
         assert "DIVCO" in r.text
@@ -591,7 +625,7 @@ class TestLiveAndSimulateRoutes:
         r = stub_client.get("/results/2024-live/portfolio/live")
         assert r.status_code == 200
         assert "DIVCO" in r.text
-        assert "Aktuální hodnota" in r.text
+        assert "Čistá hodnota" in r.text
         assert "alloc-chart" in r.text
 
     def test_simulate_form_and_post(self, stub_client):

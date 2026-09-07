@@ -44,6 +44,9 @@ from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.time_test import time_test_deadline
 from src.engine.pairing import PairingMethod, coerce as coerce_pairing_method
 from src.parsers.positions_parser import parse_positions_csv
+from src.parsers.statement_of_funds_parser import (
+    EndingBalances, ending_balances, parse_statement_of_funds_csv,
+)
 from src.pipeline_runner import run_core_processing_pipeline
 from src.utils.decimal_context import setup_decimal_context
 from src.utils.type_utils import parse_ibkr_date
@@ -207,11 +210,15 @@ QUOTE_FETCH_WORKERS = 8
 # 12 keeps the legend readable; the book runs to 36 rows, so the fold matters.
 ALLOCATION_SLICES = 12
 
-# Bumped whenever the live-valuation total changes meaning, so stored snapshots
-# computed the old way are never charted next to new ones. v2: option contracts
-# are valued at their multiplier and written legs subtract — worth ~+11% on the
-# real book, which the trend chart drew as an overnight gain.
-VALUATION_FORMULA_VERSION = "v2"
+# Bumped whenever the live-valuation headline changes meaning, so stored
+# snapshots computed the old way are never charted next to new ones. v2: option
+# contracts are valued at their multiplier and written legs subtract — worth
+# ~+11% on the real book, which the trend chart drew as an overnight gain. v3:
+# the headline is the NET value — positions plus the cash ledger, margin debt
+# included. A valuation without a cash ledger still yields the positions-only
+# figure and is tagged v2, so each card charts its own comparable series.
+VALUATION_FORMULA_VERSION = "v3"
+POSITIONS_ONLY_FORMULA_VERSION = "v2"
 
 # How far a payer's effective withholding rate may sit above its treaty cap
 # before the dividends page calls it over-withheld. Half a point: the per-item
@@ -1707,7 +1714,24 @@ class RunService:
         mode = (meta.get("modes") or ["daily"])[0]
         return self.runner.run_sync(self._compute_live_portfolio, pf,
                                     self.event_countries(run_id, mode),
+                                    self.cash_balances(run_id),
                                     timeout=120)
+
+    def cash_balances(self, run_id: str) -> Optional[EndingBalances]:
+        """Cash per currency at the close of the run's own Statement of Funds.
+
+        Read from the ledger persisted WITH the run (``inputs/``), not from
+        the dataset directory, so a re-run of an older year values the cash
+        it actually had. ``None`` when the run has no ledger or the file
+        carries no closing markers (a header-only upload, say): the card then
+        says the cash is unknown instead of showing a zero that reads as
+        "no margin".
+        """
+        path = self.runs_dir / run_id / "inputs" / "statement_of_funds.csv"
+        if not path.is_file():
+            return None
+        closing = ending_balances(parse_statement_of_funds_csv(str(path)))
+        return closing if closing.as_of is not None else None
 
     @staticmethod
     def _net_quantity(pos: Dict[str, Any]) -> Decimal:
@@ -1960,6 +1984,7 @@ class RunService:
     def _compute_live_portfolio(
         self, pf: Dict[str, Any],
         event_countries: Optional[Dict[str, str]] = None,
+        cash: Optional[EndingBalances] = None,
     ) -> Dict[str, Any]:
         from datetime import date as _date
         today = _date.today()
@@ -2024,6 +2049,32 @@ class RunService:
         rows.sort(key=lambda r: r.get("value_czk") or Decimal(0), reverse=True)
         breakdown = self.portfolio_breakdown(rows)     # also sets weight_pct
         breakdown["country"] = self.country_breakdown(rows, event_countries or {})
+
+        # Cash is what turns the value of the positions into a net figure: on
+        # a margin account the borrowed currencies sit here as negative
+        # balances, and the positions alone overstate what is actually owned.
+        # The balances are as of the statement close (not live), converted at
+        # today's rate like everything else on the card.
+        cash_czk: Optional[Decimal] = None
+        cash_rows: List[Dict[str, Any]] = []
+        unconverted: List[str] = []
+        if cash is not None:
+            cash_czk = Decimal(0)
+            for currency, amount in cash.balances.items():
+                if not amount:
+                    continue        # spent down to 0: no exposure, needs no rate
+                czk = self._to_czk(converter, amount, currency, today)
+                if czk is None:
+                    unconverted.append(currency)
+                    continue
+                cash_czk += czk
+                cash_rows.append({"currency": currency, "amount": amount, "czk": czk})
+            cash_rows.sort(key=lambda r: abs(r["czk"]), reverse=True)
+            unconverted.sort()
+        net_value_czk = (
+            total_value_czk + cash_czk
+            if cash_czk is not None and total_value_czk else None
+        )
         result = {
             "breakdown": breakdown,
             "as_of": today.isoformat(),
@@ -2038,6 +2089,19 @@ class RunService:
             "total_value_czk": total_value_czk if total_value_czk else None,
             "total_cost_czk": total_cost_czk if total_cost_czk else None,
             "total_unrealized_czk": (total_value_czk - total_cost_czk) if total_value_czk else None,
+            "cash_czk": cash_czk,
+            "cash_as_of": cash.as_of.isoformat() if cash is not None and cash.as_of else None,
+            "cash_by_currency": cash_rows,
+            "cash_unconverted": unconverted,
+            "cash_stale": [
+                {"currency": c, "as_of": on.isoformat(), "amount": amount}
+                for c, (on, amount) in sorted(cash.stale.items())
+            ] if cash is not None else [],
+            "net_value_czk": net_value_czk,
+            # What the headline (and therefore the trend) means — see the
+            # constants. A card without a cash ledger charts its own series.
+            "formula_version": (VALUATION_FORMULA_VERSION if net_value_czk is not None
+                                else POSITIONS_ONLY_FORMULA_VERSION),
         }
         # The one place where every position already carries a fresh quote.
         # Both entry points (/dashboard/valuation and the portfolio page) pass
@@ -2257,13 +2321,18 @@ class RunService:
         return conn
 
     def _maybe_save_snapshot(self, tax_year, live: Dict[str, Any]) -> None:
-        """At most one automatic snapshot per day (manual saves unrestricted)."""
+        """At most one automatic snapshot per day AND per formula (manual saves
+        unrestricted). Per formula, because each version is its own series:
+        when the net-value formula rolled out, an older instance had already
+        stored that day's positions-only point, and a plain per-day rule
+        would have pushed the net line's first point to the next day."""
         try:
             today = datetime.now(timezone.utc).date().isoformat()
             with self._snapshot_db() as conn:
                 row = conn.execute(
-                    "SELECT COUNT(*) FROM snapshots WHERE substr(taken_at, 1, 10) = ?",
-                    (today,),
+                    "SELECT COUNT(*) FROM snapshots WHERE substr(taken_at, 1, 10) = ?"
+                    " AND formula_version = ?",
+                    (today, live.get("formula_version") or VALUATION_FORMULA_VERSION),
                 ).fetchone()
                 if row[0] == 0:
                     self._insert_snapshot(conn, tax_year, live)
@@ -2277,6 +2346,13 @@ class RunService:
                 self._insert_snapshot(conn, live.get("tax_year"), live)
 
     def _insert_snapshot(self, conn, tax_year, live: Dict[str, Any]) -> None:
+        # ``total_value_czk`` holds the HEADLINE figure — the net value when
+        # the cash ledger is known, the positions alone otherwise — and
+        # ``formula_version`` says which. The column keeps its old name: the
+        # rows already in every user's portfolio.db are v2 headlines.
+        headline = live.get("net_value_czk")
+        if headline is None:
+            headline = live.get("total_value_czk")
         conn.execute(
             "INSERT INTO snapshots (taken_at, tax_year, total_value_czk,"
             " total_cost_czk, quotes_ok, formula_version)"
@@ -2284,16 +2360,23 @@ class RunService:
             (
                 datetime.now(timezone.utc).isoformat(),
                 tax_year,
-                str(live.get("total_value_czk")),
+                str(headline),
                 str(live.get("total_cost_czk") or ""),
                 live.get("quotes_ok") or 0,
-                VALUATION_FORMULA_VERSION,
+                live.get("formula_version") or VALUATION_FORMULA_VERSION,
             ),
         )
 
     def snapshot_series(self, tax_year: Optional[int] = None,
-                        limit: int = 365) -> Dict[str, Any]:
+                        limit: int = 365,
+                        formula_version: Optional[str] = None,
+                        ) -> Dict[str, Any]:
         """Net-worth points that are actually comparable, plus what was left out.
+
+        ``formula_version`` is the one the card being drawn shows — pass the
+        live result's own, so a positions-only card (no cash ledger) charts
+        its positions-only history instead of an empty net-value line.
+        ``None`` means the current (net-value) formula.
 
         Two things made one line out of three incompatible series:
 
@@ -2309,6 +2392,7 @@ class RunService:
         reported rather than silently dropped, so the page can say why its chart
         starts where it does.
         """
+        formula_version = formula_version or VALUATION_FORMULA_VERSION
         try:
             with self._snapshot_db() as conn:
                 rows = conn.execute(
@@ -2325,7 +2409,7 @@ class RunService:
             if tax_year is not None and row_year != tax_year:
                 other_years += 1
                 continue
-            if version != VALUATION_FORMULA_VERSION:
+            if version != formula_version:
                 older_formula += 1
                 continue
             points.append({"taken_at": taken_at, "total_value_czk": value})
@@ -2333,9 +2417,11 @@ class RunService:
                 "excluded_older_formula": older_formula}
 
     def list_snapshots(self, tax_year: Optional[int] = None,
-                       limit: int = 365) -> List[Dict[str, Any]]:
+                       limit: int = 365,
+                       formula_version: Optional[str] = None,
+                       ) -> List[Dict[str, Any]]:
         """Comparable points only — see ``snapshot_series`` for what that means."""
-        return self.snapshot_series(tax_year, limit)["points"]
+        return self.snapshot_series(tax_year, limit, formula_version)["points"]
 
     # ------------------------------------------------------------------
     # Asset classification (non-interactive cache editor)
