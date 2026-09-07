@@ -1,9 +1,11 @@
 # src/webapp/serializers.py
 """JSON-safe conversion helpers shared by the web routes and (later) MCP tools."""
 import json
+import os
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from enum import Enum
 from typing import Any
 
@@ -40,6 +42,34 @@ def format_czk(value: Any) -> str:
         return str(value)
     formatted = f"{dec:,.2f}"
     return formatted.replace(",", " ").replace(".", ",")
+
+
+def asset_url(static_dir: Path, name: str) -> str:
+    """``/static/<name>?v=<mtime>`` — a link that changes when the file does.
+
+    Templates reload live under a running server, the browser's copy of
+    style.css does not: after a ``git pull`` the new markup would sit on the
+    old stylesheet until a hard reload. The version is the file's mtime read
+    at render time (one stat), so it follows a checkout with no restart. A
+    missing file links with ``v=0`` rather than failing the whole page.
+    """
+    try:
+        version = int(os.stat(Path(static_dir) / name).st_mtime)
+    except OSError:
+        version = 0
+    return f"/static/{name}?v={version}"
+
+
+def format_cs_date(value: Any) -> str:
+    """ISO date → Czech "4. 9. 2026". None/empty → "–"; anything else as given,
+    so a stray label shows rather than blanking the card."""
+    if value is None or value == "":
+        return "–"
+    try:
+        d = date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return str(value)
+    return f"{d.day}. {d.month}. {d.year}"
 
 
 def format_quantity(value: Any) -> str:
