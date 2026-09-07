@@ -2,10 +2,13 @@
     Net value = positions + the cash ledger, margin debt included; `live`
     is RunService._compute_live_portfolio's result. Cash is as of the
     statement close (cash_as_of), the positions are priced live. -#}
-<div class="card stat">
-  <h3>Čistá hodnota</h3>
+<div class="card stat nw-card">
+  <div class="nw-head">
+    <h3>Čistá hodnota</h3>
+    <span class="nw-asof" title="Datum živého ocenění pozic">k {{ live.as_of | csdate }}</span>
+  </div>
   {% if live.net_value_czk is not none %}
-  <p class="big {{ 'neg' if live.net_value_czk < 0 }}">{{ live.net_value_czk | czk }} Kč</p>
+  <p class="big {{ 'neg' if live.net_value_czk < 0 }}">{{ live.net_value_czk | czk }}<span class="nw-unit">Kč</span></p>
   <dl class="nw-split">
     <dt>Pozice</dt>
     <dd>{{ live.total_value_czk | czk }} Kč</dd>
@@ -15,29 +18,18 @@
     <dd class="{{ 'neg' if live.cash_czk < 0 }}">{{ live.cash_czk | czk }} Kč</dd>
   </dl>
   {% else %}
-  <p class="big">{{ live.total_value_czk | czk }} Kč</p>
+  <p class="big">{{ live.total_value_czk | czk }}<span class="nw-unit">Kč</span></p>
   {% if live.cash_czk is none %}
-  <p class="muted">jen pozice — hotovost neznámá (běh nemá Statement of Funds)</p>
+  <p class="muted nw-note">jen pozice — hotovost neznámá (běh nemá Statement of Funds)</p>
   {% else %}
   <dl class="nw-split">
     <dt>Hotovost <small>k {{ live.cash_as_of | csdate }}</small></dt>
     <dd class="{{ 'neg' if live.cash_czk < 0 }}">{{ live.cash_czk | czk }} Kč</dd>
     <dt>Pozice</dt>
-    <dd>bez ocenění</dd>
+    <dd class="muted">bez ocenění</dd>
   </dl>
   {% endif %}
   {% endif %}
-  <p class="nw-meta">
-    <span class="badge {{ 'ok' if live.quotes_ok == live.quotes_total else 'warn' }}"
-          title="Živé kotace akcií a ETF. Chybějící symbol se mapuje v data/webapp/symbol_map.json.">{{
-      live.quotes_ok }}/{{ live.quotes_total }} živých cen</span>
-    {% if live.options_at_eoy %}
-    <span class="badge muted"
-          title="Živé kotace pro opce nejsou — kontrakty jsou oceněny závěrečnou cenou (markem) k 31. 12.">{{
-      live.options_at_eoy }} opcí · cena k 31. 12.</span>
-    {% endif %}
-    <span class="badge muted">k {{ live.as_of | csdate }}</span>
-  </p>
   {% if live.cash_unconverted %}
   <p class="note">Bez přepočtu na Kč (kurz ČNB nedostupný): {{ live.cash_unconverted | join(", ") }}.</p>
   {% endif %}
@@ -45,4 +37,13 @@
   <p class="note">Zůstatek bez aktuálního výpisu, do čisté hodnoty nezapočítán:
     {% for c in live.cash_stale %}{{ c.currency }} {{ c.amount | czk }} (k {{ c.as_of | csdate }}){% if not loop.last %}, {% endif %}{% endfor %}.</p>
   {% endif %}
+  <div class="nw-foot">
+    <span class="nw-quotes {{ 'ok' if live.quotes_ok == live.quotes_total else 'warn' }}"
+          title="Živé kotace akcií a ETF. Chybějící symbol se mapuje v data/webapp/symbol_map.json."><i class="nw-dot"></i>{{
+      live.quotes_ok }}/{{ live.quotes_total }} živých cen</span>
+    {% if live.options_at_eoy %}
+    <span title="Živé kotace pro opce nejsou — kontrakty jsou oceněny závěrečnou cenou (markem) k 31. 12.">{{
+      live.options_at_eoy }} opcí · cena k 31. 12.</span>
+    {% endif %}
+  </div>
 </div>
