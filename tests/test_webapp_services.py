@@ -9,16 +9,19 @@ import re
 import shutil
 import threading
 import time
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from src.parsers.statement_of_funds_parser import EndingBalances
 from src.webapp.services import RunService
 from tests.support.golden_fx import GoldenCnbProvider, GoldenEcbProvider
 
 SYNTHETIC = Path(__file__).resolve().parent.parent / "data" / "synthetic_2024"
+SOF_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "statement_of_funds_sample.csv"
 
 # synthetic file name -> canonical slot file name
 SYNTHETIC_MAP = {
@@ -658,12 +661,140 @@ class TestLivePortfolio:
         assert live["total_value_czk"] == Decimal("8200")
         assert live["quotes_ok"] == 1
 
+    def _cash(self):
+        return EndingBalances(as_of=date(2026, 9, 3), balances={
+            "USD": Decimal("-100"), "CZK": Decimal("500")})
+
     def test_snapshot_saved_once_per_day(self, stub_service):
-        stub_service._compute_live_portfolio(self._pf())
-        stub_service._compute_live_portfolio(self._pf())
+        """The trend tracks the net figure — the same number the card shows
+        big — not the value of the positions."""
+        stub_service._compute_live_portfolio(self._pf(), cash=self._cash())
+        stub_service._compute_live_portfolio(self._pf(), cash=self._cash())
         snaps = stub_service.list_snapshots()
         assert len(snaps) == 1
-        assert Decimal(snaps[0]["total_value_czk"]) == Decimal("8200")
+        assert Decimal(snaps[0]["total_value_czk"]) == Decimal("6700")
+
+    def test_the_first_point_of_a_new_formula_is_saved_today(self, stub_service):
+        """The once-a-day rule is per series. Rolling out the net-value
+        formula while an older instance already stored today's positions-only
+        point must not push the net line's first point to tomorrow."""
+        stub_service._compute_live_portfolio(self._pf(), cash=None)      # v2 today
+        stub_service._compute_live_portfolio(self._pf(), cash=self._cash())  # v3 today
+        stub_service._compute_live_portfolio(self._pf(), cash=self._cash())  # still once
+        assert [pt["total_value_czk"] for pt in stub_service.list_snapshots()] == ["6700"]
+        assert [pt["total_value_czk"] for pt in
+                stub_service.list_snapshots(formula_version="v2")] == ["8200"]
+
+    def test_a_positions_only_valuation_is_its_own_series(self, stub_service):
+        """Without a cash ledger the headline is the positions alone, which
+        is the older formula (v2). Such a point must not be charted on the
+        net-value line, but the card that shows positions-only should still
+        find its own history."""
+        live = stub_service._compute_live_portfolio(self._pf(), cash=None)
+        assert live["formula_version"] == "v2"
+        net_series = stub_service.snapshot_series(2025)
+        assert net_series["points"] == []
+        assert net_series["excluded_older_formula"] == 1
+        own = stub_service.snapshot_series(2025, formula_version=live["formula_version"])
+        assert [pt["total_value_czk"] for pt in own["points"]] == ["8200"]
+
+    # -- net value: positions + the cash ledger --------------------------
+
+    def test_net_value_counts_cash_and_margin_debt(self, stub_service):
+        """Positions alone read 8 200; a 100 USD margin debt (-2 000 CZK) and
+        500 CZK of cash make the net 6 700. Positions, cost and unrealized
+        stay what they were — cash is not a holding."""
+        cash = EndingBalances(as_of=date(2026, 9, 3), balances={
+            "USD": Decimal("-100"), "CZK": Decimal("500")})
+        live = stub_service._compute_live_portfolio(self._pf(), cash=cash)
+        assert live["total_value_czk"] == Decimal("8200")
+        assert live["cash_czk"] == Decimal("-1500")
+        assert live["net_value_czk"] == Decimal("6700")
+        assert live["cash_as_of"] == "2026-09-03"
+        # Largest exposure first, so a tooltip reads top-down.
+        assert live["cash_by_currency"] == [
+            {"currency": "USD", "amount": Decimal("-100"), "czk": Decimal("-2000")},
+            {"currency": "CZK", "amount": Decimal("500"), "czk": Decimal("500")},
+        ]
+
+    def test_without_a_cash_ledger_the_net_value_is_unknown(self, stub_service):
+        """No Statement of Funds → no cash figure at all, rather than a net
+        equal to the positions that would read as "no margin"."""
+        live = stub_service._compute_live_portfolio(self._pf(), cash=None)
+        assert live["total_value_czk"] == Decimal("8200")
+        assert live["cash_czk"] is None
+        assert live["net_value_czk"] is None
+        assert live["cash_as_of"] is None
+
+    def test_a_currency_without_a_rate_is_disclosed_not_dropped_silently(
+            self, stub_service):
+        """The stub has no GBP rate. The GBP balance must not vanish into a
+        net figure that looks complete."""
+        cash = EndingBalances(as_of=date(2026, 9, 3), balances={
+            "USD": Decimal("-100"), "GBP": Decimal("10")})
+        live = stub_service._compute_live_portfolio(self._pf(), cash=cash)
+        assert live["cash_czk"] == Decimal("-2000")
+        assert live["net_value_czk"] == Decimal("6200")
+        assert live["cash_unconverted"] == ["GBP"]
+
+    def test_zero_balances_are_left_out_of_the_breakdown(self, stub_service):
+        """IBKR closes a currency at 0 after it is spent; that is not an
+        exposure worth a line, and it must not need a rate either."""
+        cash = EndingBalances(as_of=date(2026, 9, 3), balances={
+            "CHF": Decimal("0"), "CZK": Decimal("500")})
+        live = stub_service._compute_live_portfolio(self._pf(), cash=cash)
+        assert live["cash_czk"] == Decimal("500")
+        assert [c["currency"] for c in live["cash_by_currency"]] == ["CZK"]
+        assert live["cash_unconverted"] == []
+
+    def test_a_stale_currency_close_is_reported(self, stub_service):
+        cash = EndingBalances(
+            as_of=date(2026, 9, 3), balances={"CZK": Decimal("500")},
+            stale={"SEK": (date(2025, 12, 31), Decimal("120"))})
+        live = stub_service._compute_live_portfolio(self._pf(), cash=cash)
+        assert live["cash_stale"] == [
+            {"currency": "SEK", "as_of": "2025-12-31", "amount": Decimal("120")}]
+
+    def test_get_live_portfolio_reads_the_runs_own_cash_ledger(self, stub_service):
+        """The ledger a run was computed from is persisted next to it; the
+        live view must read THAT file, not the dataset directory, so a
+        re-run of an older year values the cash it actually had.
+
+        Fixture closes: USD -1417.08947 (x20), EUR 397 (x25), CZK -402.37994,
+        GBP 150 and CHF 0 — the stub has no GBP/CHF rate."""
+        run_dir = stub_service.runs_dir / "2026-x"
+        (run_dir / "inputs").mkdir(parents=True)
+        shutil.copyfile(SOF_FIXTURE, run_dir / "inputs" / "statement_of_funds.csv")
+        from src.webapp.serializers import dump_json
+        dump_json(self._pf(), run_dir / "portfolio.json")
+        live = stub_service.get_live_portfolio("2026-x")
+        assert live["cash_as_of"] == "2026-07-31"
+        assert live["cash_czk"] == Decimal("-18819.16934")
+        assert live["net_value_czk"] == Decimal("-10619.16934")
+        assert live["cash_unconverted"] == ["GBP"]
+
+
+class TestCashBalances:
+    def test_reads_the_runs_cash_ledger(self, stub_service):
+        run_dir = stub_service.runs_dir / "2026-x" / "inputs"
+        run_dir.mkdir(parents=True)
+        shutil.copyfile(SOF_FIXTURE, run_dir / "statement_of_funds.csv")
+        cash = stub_service.cash_balances("2026-x")
+        assert cash.as_of == date(2026, 7, 31)
+        assert cash.balances["USD"] == Decimal("-1417.08947")
+
+    def test_a_run_without_the_ledger_has_no_cash(self, stub_service):
+        (stub_service.runs_dir / "2026-y" / "inputs").mkdir(parents=True)
+        assert stub_service.cash_balances("2026-y") is None
+
+    def test_a_ledger_without_closing_markers_has_no_cash(self, stub_service, tmp_path):
+        """Header-only or movement-only file (a hand-made upload): nothing
+        to read a balance from, so no figure — not a zero."""
+        run_dir = stub_service.runs_dir / "2026-z" / "inputs"
+        run_dir.mkdir(parents=True)
+        header = SOF_FIXTURE.read_text(encoding="utf-8").splitlines()[0]
+        (run_dir / "statement_of_funds.csv").write_text(header + "\n", encoding="utf-8")
+        assert stub_service.cash_balances("2026-z") is None
 
 
 class TestSnapshotSeries:
@@ -719,9 +850,12 @@ class TestSnapshotSeries:
 
     def test_new_snapshots_carry_the_current_formula_version(self, stub_service):
         from src.webapp.services import VALUATION_FORMULA_VERSION as V
-        stub_service._compute_live_portfolio(
+        live = stub_service._compute_live_portfolio(
             {"tax_year": 2025, "positions": [
-                {**_sim_position(), "total_cost_eur": "280"}]})
+                {**_sim_position(), "total_cost_eur": "280"}]},
+            cash=EndingBalances(as_of=date(2026, 9, 3),
+                                balances={"CZK": Decimal("1")}))
+        assert live["formula_version"] == V
         with stub_service._snapshot_db() as conn:
             versions = [r[0] for r in conn.execute(
                 "SELECT formula_version FROM snapshots")]

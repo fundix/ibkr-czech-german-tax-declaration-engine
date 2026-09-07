@@ -23,13 +23,13 @@ Vytvoříte **pět samostatných query** (každá právě jedna sekce!) — engi
 čte každý dataset jako samostatné CSV. Jedna query s více sekcemi by
 vyrobila slepený soubor, který parser nepřečte.
 
-Query 1–4 jsou povinné. Query 5 (Statement of Funds) je **volitelná a zatím
-do daně nic nepřináší**: engine bez ní funguje úplně stejně a konverze měn
-tak či tak jen označí k ruční kontrole (§10 kurzový zisk se ještě nepočítá,
-chybí FIFO na hotovosti). Pořizuje se dopředu, protože je to jediný výpis,
-který nese hotovostní zůstatky — a nabývací kurz pozbyté měny může být
-z dřívějšího roku, takže historii je potřeba mít stáhnutou, než se výpočet
-doplní.
+Query 1–4 jsou povinné. Query 5 (Statement of Funds) je **volitelná, ale
+bez ní dvě věci chybí**: engine nespočítá §10 kurzový zisk z pozbytí měny
+(hotovostní FIFO potřebuje počáteční zůstatky z tohoto výpisu) a karta
+„Čistá hodnota" na přehledu nezná hotovost ani margin úvěr, takže ukáže jen
+hodnotu pozic. Je to jediný výpis, který nese hotovostní zůstatky. Nabývací
+kurz pozbyté měny může být z dřívějšího roku, proto je potřeba mít stáhnutou
+celou historii — bootstrap přes „První rok obchodování" ji stáhne sám.
 
 ## Společná konfigurace (všechny query)
 

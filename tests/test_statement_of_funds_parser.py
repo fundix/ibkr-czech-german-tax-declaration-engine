@@ -7,17 +7,29 @@ blocks, a Starting/Ending Balance pair around each, a two-legged FOREX
 conversion, a positive commission, and a withholding-tax correction whose
 economic date is a month before its report date.
 """
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from src.parsers.raw_models import RawStatementOfFundsRecord
 from src.parsers.statement_of_funds_parser import (
     conversions,
+    ending_balances,
     movements,
     parse_statement_of_funds_csv,
     starting_balances,
 )
 
 FIXTURE = str(Path(__file__).parent / "fixtures" / "statement_of_funds_sample.csv")
+
+
+def _marker(currency, description, on, balance):
+    """A Starting/Ending Balance row as IBKR emits it: no activity code, the
+    figure in Balance, the same calendar date in Date and ReportDate."""
+    return RawStatementOfFundsRecord(
+        CurrencyPrimary=currency, ActivityDescription=description,
+        Date=on, ReportDate=on, Balance=balance, LevelOfDetail="Currency",
+    )
 
 
 class TestParsing:
@@ -60,6 +72,48 @@ class TestBalanceRows:
         clamping it would hide a real FX exposure."""
         recs = parse_statement_of_funds_csv(FIXTURE)
         assert starting_balances(recs)["USD"] < 0
+
+    def test_ending_balances_close_every_currency_block(self):
+        """The closing markers are what the net-worth card reads as cash —
+        including the borrowed (negative) currencies, which are what make
+        the net figure differ from the value of the positions."""
+        recs = parse_statement_of_funds_csv(FIXTURE)
+        closing = ending_balances(recs)
+        assert closing.as_of == date(2026, 7, 31)
+        assert closing.balances == {
+            "CHF": Decimal("0"),
+            "EUR": Decimal("397.00"),
+            "GBP": Decimal("150.00"),
+            "USD": Decimal("-1417.08947"),
+            "CZK": Decimal("-402.37994"),
+        }
+        assert closing.stale == {}
+
+    def test_a_merged_multi_year_file_reports_only_the_latest_close(self):
+        """A run merges every year's statement into one file, so a currency
+        closes once per year. Cash is the newest close only; a currency that
+        stopped being reported while still holding a balance is flagged
+        rather than silently added to (or dropped from) today's cash."""
+        recs = [
+            _marker("USD", "Starting Balance", "2025-01-01", "0"),
+            _marker("USD", "Ending Balance", "2025-12-31", "-500"),
+            _marker("USD", "Starting Balance", "2026-01-01", "-500"),
+            _marker("USD", "Ending Balance", "2026-09-03", "-800"),
+            _marker("SEK", "Starting Balance", "2025-01-01", "0"),
+            _marker("SEK", "Ending Balance", "2025-12-31", "120"),   # no 2026 block
+            _marker("CHF", "Starting Balance", "2025-01-01", "5"),
+            _marker("CHF", "Ending Balance", "2025-12-31", "0"),     # closed out
+        ]
+        closing = ending_balances(recs)
+        assert closing.as_of == date(2026, 9, 3)
+        assert closing.balances == {"USD": Decimal("-800")}
+        assert closing.stale == {"SEK": (date(2025, 12, 31), Decimal("120"))}
+
+    def test_no_closing_markers_means_no_cash_figure(self):
+        closing = ending_balances(movements(parse_statement_of_funds_csv(FIXTURE)))
+        assert closing.as_of is None
+        assert closing.balances == {}
+        assert closing.stale == {}
 
 
 class TestConversions:

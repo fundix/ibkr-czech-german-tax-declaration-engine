@@ -9,10 +9,13 @@ import csv
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from pydantic import ValidationError
+
+from src.utils.type_utils import parse_ibkr_date
 
 from .raw_models import RawStatementOfFundsRecord
 
@@ -73,6 +76,57 @@ def starting_balances(
     for rec in records:
         if rec.is_starting_balance and rec.currency_primary not in out:
             out[rec.currency_primary] = rec.balance
+    return out
+
+
+@dataclass
+class EndingBalances:
+    """Cash per currency at the newest statement close — see ``ending_balances``.
+
+    ``balances`` are the currencies closed on ``as_of``; ``stale`` maps a
+    currency whose newest close is OLDER and non-zero to that close.
+    """
+    as_of: Optional[date] = None
+    balances: Dict[str, Decimal] = field(default_factory=dict)
+    stale: Dict[str, Tuple[date, Decimal]] = field(default_factory=dict)
+
+
+def ending_balances(
+    records: List[RawStatementOfFundsRecord],
+) -> EndingBalances:
+    """Closing balance per currency, from the ``Ending Balance`` markers.
+
+    This is what a net-worth figure adds to the positions: a positive balance
+    is cash held, a negative one is currency borrowed on margin — so the sign
+    is kept, exactly as in ``starting_balances``.
+
+    A run merges every year's statement into one file, so each currency
+    closes once per year block. Only the closes on the NEWEST date count as
+    today's cash. A currency whose newest close is older and non-zero goes to
+    ``stale`` instead: IBKR keeps reporting a currency for as long as it holds
+    a balance, so an older non-zero close means a block is missing, and both
+    adding it to today's cash and dropping it would be guesses.
+    """
+    latest: Dict[str, Tuple[date, Decimal]] = {}
+    for rec in records:
+        if not rec.is_balance_row or rec.is_starting_balance:
+            continue
+        on = parse_ibkr_date(rec.date or rec.report_date)
+        if on is None:
+            continue
+        prev = latest.get(rec.currency_primary)
+        if prev is None or on >= prev[0]:
+            latest[rec.currency_primary] = (
+                on, rec.balance if rec.balance is not None else Decimal(0))
+    if not latest:
+        return EndingBalances()
+    as_of = max(on for on, _ in latest.values())
+    out = EndingBalances(as_of=as_of)
+    for currency, (on, balance) in latest.items():
+        if on == as_of:
+            out.balances[currency] = balance
+        elif balance != 0:
+            out.stale[currency] = (on, balance)
     return out
 
 

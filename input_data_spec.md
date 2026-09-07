@@ -132,9 +132,10 @@
 The per-currency cash ledger, and the **only** statement that carries cash
 balances at all — `positions_end_of_year.csv` holds STK and OPT only. It exists
 for the §10 FX gain on a currency disposal, which needs the rate at which the
-disposed currency was acquired. **Optional and not yet consumed by the engine:**
-the file is downloaded and stored, but no processor reads it, so its presence
-changes no tax figure today.
+disposed currency was acquired. **Optional.** Consumed by the CZ currency FIFO
+(`src/engine/currency_ledger.py`, `src/countries/cz/currency_gains.py`) for
+that gain, and by the web GUI's net-worth card, which reads the `Ending
+Balance` markers as the cash — margin debt included — behind the positions.
 
 **Two row shapes share the schema:**
 

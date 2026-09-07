@@ -113,7 +113,8 @@ def dashboard_valuation(request: Request):
         live = data["live"]
         allocation = svc.allocation_slices(live["positions"])
         opt = svc.options_overview(data["run_id"])
-        snapshots = svc.snapshot_series(live["tax_year"])
+        snapshots = svc.snapshot_series(live["tax_year"],
+                                        formula_version=live.get("formula_version"))
     except Exception as exc:  # noqa: BLE001 — surface a friendly card, not a 500
         logger.exception("Dashboard valuation failed")
         return _tpl(request, "partials/job_error.html",
@@ -437,7 +438,8 @@ def portfolio_live(request: Request, run_id: str):
         return _tpl(request, "partials/job_error.html", error=f"Ocenění selhalo: {_reason(exc)}")
     if live is None:
         return HTMLResponse("")
-    snapshots = svc.snapshot_series(live["tax_year"])
+    snapshots = svc.snapshot_series(live["tax_year"],
+                                    formula_version=live.get("formula_version"))
     allocation = svc.allocation_slices(live["positions"])
     return _tpl(request, "partials/portfolio_live.html", run_id=run_id, live=live,
                 allocation=allocation, snapshots=snapshots)
