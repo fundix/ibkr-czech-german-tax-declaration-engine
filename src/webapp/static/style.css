@@ -121,41 +121,119 @@ a {
     font-weight: 700;
     margin: 0.2rem 0;
 }
-/* Net-worth card: the positions/cash split under the headline, one row each
-   with the amount right-aligned, and the meta facts as badges instead of a
-   dotted sentence that wrapped mid-number. */
+/* Net-worth card — a header row with the valuation date at the right, the
+   headline with a small unit, a hairline, then positions and cash each on
+   their own row with the amount right-aligned (the ledger date under the cash
+   label), and a tinted footer band carrying the live-quote status. Scoped to
+   .nw-card so the sibling stat cards keep their plain look. */
+.nw-card {
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 0;
+}
+.nw-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.6rem;
+}
+.nw-head h3 {
+    margin: 0;
+}
+.nw-asof {
+    color: var(--muted);
+    font-size: 0.82rem;
+    white-space: nowrap;
+}
+/* .nw-side: the neighbouring stat card (unrealised P/L) shares the headline
+   size and the small unit so the row reads as one design. */
+.nw-card .big,
+.nw-side .big {
+    font-size: 2.1rem;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    margin: 0.5rem 0 0.9rem;
+}
+.nw-unit {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--muted);
+    margin-left: 0.3rem;
+}
+.big.neg .nw-unit {
+    color: inherit;
+    opacity: 0.75;
+}
 .nw-split {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     column-gap: 1rem;
-    row-gap: 0.25rem;
-    align-items: baseline;
-    margin: 0.55rem 0 0.75rem;
+    row-gap: 0.85rem;
+    align-items: start;
+    border-top: 1px solid var(--border);
+    padding-top: 0.9rem;
+    margin: 0 0 1rem;
 }
 .nw-split dt {
-    color: var(--muted);
     font-weight: 400;
+    color: var(--text);
 }
 .nw-split dt small {
-    font-size: 0.78rem;
-    margin-left: 0.25rem;
+    display: block;
+    color: var(--muted);
+    font-size: 0.8rem;
+    margin-top: 0.15rem;
     white-space: nowrap;
 }
 .nw-split dd {
     margin: 0;
     text-align: right;
-    font-weight: 600;
+    font-weight: 700;
+    font-size: 1.05rem;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
-.nw-meta {
+.nw-split dd.muted {
+    font-weight: 400;
+    font-size: 0.95rem;
+}
+.nw-note {
+    margin: 0 0 1rem;
+}
+.nw-card .note {
+    margin-bottom: 0.8rem;
+}
+.nw-foot {
+    margin: auto -1.2rem 0;
+    padding: 0.7rem 1.2rem;
+    background: var(--bg);
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 11px 11px;
     display: flex;
     flex-wrap: wrap;
-    gap: 0.35rem;
-    margin: 0.2rem 0 0;
+    align-items: center;
+    gap: 0.4rem 1.2rem;
+    font-size: 0.85rem;
+    color: var(--muted);
 }
-.nw-meta .badge {
-    font-weight: 500;
+.nw-quotes {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-weight: 600;
+}
+.nw-quotes.ok {
+    color: var(--ok);
+}
+.nw-quotes.warn {
+    color: var(--warn);
+}
+.nw-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: currentColor;
+    display: inline-block;
 }
 .card.highlight {
     border-color: var(--accent);

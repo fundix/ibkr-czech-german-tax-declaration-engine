@@ -2,10 +2,10 @@
   {% with alerts = (live.sell_targets or {}).get("alerts") %}{% include "partials/targets_alerts.html" %}{% endwith %}
   <section class="cards-row">
     {% include "partials/net_worth_card.html" %}
-    <div class="card stat">
+    <div class="card stat nw-side">
       <h3>Nerealizovaný zisk/ztráta</h3>
       <p class="big {{ 'neg' if live.total_unrealized_czk and live.total_unrealized_czk < 0 }}">{{
-        live.total_unrealized_czk | czk }} Kč</p>
+        live.total_unrealized_czk | czk }}<span class="nw-unit">Kč</span></p>
       <p class="muted">vs. pořizovací náklady {{ live.total_cost_czk | czk }} Kč</p>
     </div>
     <div class="card stat">
