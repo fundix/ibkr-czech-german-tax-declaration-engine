@@ -121,6 +121,42 @@ a {
     font-weight: 700;
     margin: 0.2rem 0;
 }
+/* Net-worth card: the positions/cash split under the headline, one row each
+   with the amount right-aligned, and the meta facts as badges instead of a
+   dotted sentence that wrapped mid-number. */
+.nw-split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 1rem;
+    row-gap: 0.25rem;
+    align-items: baseline;
+    margin: 0.55rem 0 0.75rem;
+}
+.nw-split dt {
+    color: var(--muted);
+    font-weight: 400;
+}
+.nw-split dt small {
+    font-size: 0.78rem;
+    margin-left: 0.25rem;
+    white-space: nowrap;
+}
+.nw-split dd {
+    margin: 0;
+    text-align: right;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.nw-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin: 0.2rem 0 0;
+}
+.nw-meta .badge {
+    font-weight: 500;
+}
 .card.highlight {
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent);

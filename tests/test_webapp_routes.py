@@ -61,6 +61,13 @@ class TestPages:
         assert r.text == "ok"
         assert r.headers["content-type"].startswith("text/plain")
 
+    def test_static_assets_are_versioned(self, client):
+        """Templates reload live but a cached stylesheet does not — the link
+        has to change when the file does (see TestAssetUrl)."""
+        r = client.get("/")
+        assert re.search(r'href="/static/style\.css\?v=\d+"', r.text)
+        assert re.search(r'src="/static/htmx\.min\.js\?v=\d+"', r.text)
+
     def test_index_dashboard_surfaces_latest_run(self, client):
         # The home page is now a dashboard: it links to the latest run and
         # offers the "run calculation" call-to-action (the form lives on /runs).
@@ -142,7 +149,7 @@ class TestPages:
         assert "hotovost neznámá" not in r.text
         assert "-18\u00a0819,17" in r.text
         assert "margin" in r.text
-        assert "2026-07-31" in r.text          # the close the balances are as of
+        assert "31. 7. 2026" in r.text         # the close the balances are as of
         assert "GBP" in r.text                 # unconverted currency disclosed
 
     def test_portfolio_live_fragment_renders_its_chart_payloads(self, client):
