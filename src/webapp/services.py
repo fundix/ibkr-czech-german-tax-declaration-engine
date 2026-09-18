@@ -34,7 +34,7 @@ from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -3654,6 +3654,85 @@ class RunService:
             self._execute_run, run_id, tax_year, fx_mode, None, None, None, pairing_method,
             timeout=600,
         )
+
+    # (key, section in the persisted items, label) — the §10 sections that
+    # carry a realised gain/loss. Income sections (§8) carry none.
+    _REALIZED_CATEGORIES = (
+        ("securities", "CZ_10_SECURITIES", "Cenné papíry"),
+        ("options", "CZ_10_OPTIONS", "Opce"),
+        ("currency", "CZ_10_CURRENCY", "Měnové konverze"),
+    )
+
+    def realized_summary(self, run_id: str, mode: str) -> Optional[Dict[str, Any]]:
+        """Every realised gain and loss of the year, exempt items included.
+
+        An information figure for the owner — "how did the year go" — shown
+        next to the tax figures, which it deliberately is NOT: the §10 lines
+        leave out time-test-exempt and under-limit disposals and net per
+        category; this adds them all back and says how much of it is exempt.
+        Read from the persisted result, so cached and older runs show it
+        without a recompute, and per FX mode, because a CZK gain depends on
+        the rate used. Single source for the results page AND the MCP
+        ``get_tax_summary`` tool.
+
+        Sums the exact legs and rounds once, like the engine's own §10 lines,
+        so the totals agree with them to the heller. Items without a figure
+        (pending review, failed FX) are counted, never summed as zero; §8
+        income rows carry no gain/loss and are not "unpriced".
+        """
+        result = self.load_result(run_id, mode)
+        if result is None:
+            return None
+        cents = Decimal("0.01")
+
+        def q(value: Decimal) -> Decimal:
+            return value.quantize(cents, rounding=ROUND_HALF_UP)
+
+        cats: Dict[str, Dict[str, Any]] = {
+            key: {"key": key, "label": label, "gains": Decimal(0),
+                  "losses": Decimal(0), "count": 0, "unpriced_count": 0}
+            for key, _, label in self._REALIZED_CATEGORIES
+        }
+        by_section = {section: key for key, section, _ in self._REALIZED_CATEGORIES}
+        exempt = Decimal(0)
+        for it in result.get("items", []):
+            key = by_section.get(it.get("section"))
+            if key is None:
+                continue
+            cat = cats[key]
+            raw = it.get("gain_loss_czk")
+            if raw is None:
+                cat["unpriced_count"] += 1
+                continue
+            gain = Decimal(str(raw))
+            cat["count"] += 1
+            if gain >= 0:
+                cat["gains"] += gain
+            else:
+                cat["losses"] += gain
+            if it.get("is_exempt") or it.get("exempt_due_to_annual_limit"):
+                exempt += gain
+
+        gains = sum((c["gains"] for c in cats.values()), Decimal(0))
+        losses = sum((c["losses"] for c in cats.values()), Decimal(0))
+        count = sum(c["count"] for c in cats.values())
+        unpriced = sum(c["unpriced_count"] for c in cats.values())
+        return {
+            "has_items": (count + unpriced) > 0,
+            "gains_czk": q(gains),
+            "losses_czk": q(losses),
+            "net_czk": q(gains + losses),
+            "exempt_czk": q(exempt),
+            "count": count,
+            "unpriced_count": unpriced,
+            "by_category": [
+                {"key": c["key"], "label": c["label"],
+                 "gains_czk": q(c["gains"]), "losses_czk": q(c["losses"]),
+                 "net_czk": q(c["gains"] + c["losses"]),
+                 "count": c["count"], "unpriced_count": c["unpriced_count"]}
+                for c in cats.values()
+            ],
+        }
 
     def dividend_summary(self, run_id: str, mode: str) -> Optional[Dict[str, Any]]:
         """Per-asset and per-month dividend aggregation from a persisted run.

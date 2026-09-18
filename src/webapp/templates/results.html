@@ -21,6 +21,28 @@
     </h3>
     <p class="big">{{ s.final_tax_czk | czk }} Kč</p>
     <p class="muted">základ daně {{ s.combined_base_czk | czk }} Kč{% if meta.summary | length > 1 %} · {{ "denní kurz ČNB" if m == "daily" else "jednotný (roční) kurz" }}{% endif %}</p>
+    {#- The economic result of the year, for the owner — NOT a tax figure:
+        every realised gain and loss in the §10 sections, exempt ones
+        included, per this card's FX mode. `realized` may be absent while a
+        server started before this block runs, hence the guarded lookup. -#}
+    {% set r = (realized or {}).get(m) %}
+    {% if r and r.has_items %}
+    <dl class="nw-split sm"
+        title="{% for c in r.by_category if c.count or c.unpriced_count %}{{ c.label }}: {{ c.net_czk | czk }} Kč ({{ c.count }} položek){% if not loop.last %} · {% endif %}{% endfor %}">
+      <dt>Realizované zisky</dt>
+      <dd>{{ r.gains_czk | czk }} Kč</dd>
+      <dt>Realizované ztráty</dt>
+      <dd class="{{ 'neg' if r.losses_czk < 0 }}">{{ r.losses_czk | czk }} Kč</dd>
+      <dt>Čistý výsledek <small>informativní údaj, ne daňová hodnota</small></dt>
+      <dd class="strong {{ 'neg' if r.net_czk < 0 }}">{{ r.net_czk | czk }} Kč</dd>
+    </dl>
+    {% if r.exempt_czk %}
+    <p class="note">Z toho osvobozeno (časový test, limit 100 tis. Kč): {{ r.exempt_czk | czk }} Kč — v základu daně není.</p>
+    {% endif %}
+    {% if r.unpriced_count %}
+    <p class="note">{{ r.unpriced_count }} položek bez částky (k revizi) v součtu není.</p>
+    {% endif %}
+    {% endif %}
   </div>
   {% endfor %}
 </section>

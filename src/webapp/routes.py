@@ -281,8 +281,11 @@ def results(request: Request, run_id: str, mode: Optional[str] = None):
         return RedirectResponse("/", status_code=303)
     meta, modes, active = ctx
     result = svc.load_result(run_id, active) if active else None
+    # One per FX mode: the tax cards are per mode, and a CZK gain depends on
+    # the rate, so each card carries the realised result computed its way.
+    realized = {m: svc.realized_summary(run_id, m) for m in modes}
     return _tpl(request, "results.html", meta=meta, modes=modes, mode=active,
-                result=result, page="results")
+                result=result, realized=realized, page="results")
 
 
 @router.get("/results/{run_id}/items", response_class=HTMLResponse)

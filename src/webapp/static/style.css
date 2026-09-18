@@ -121,7 +121,8 @@ a {
     font-weight: 700;
     margin: 0.2rem 0;
 }
-/* Net-worth card — a header row with the valuation date at the right, the
+/* Net-worth card (and, via .nw-split, the tax card's realised-result rows) —
+   a header row with the valuation date at the right, the
    headline with a small unit, a hairline, then positions and cash each on
    their own row with the amount right-aligned (the ledger date under the cash
    label), and a tinted footer band carrying the live-quote status. Scoped to
@@ -196,6 +197,27 @@ a {
 .nw-split dd.muted {
     font-weight: 400;
     font-size: 0.95rem;
+}
+/* .sm: the same rows in a plain stat card (the tax card's realised result) —
+   tighter, lighter, the total alone in bold. */
+.nw-split.sm {
+    row-gap: 0.45rem;
+    padding-top: 0.7rem;
+    margin: 0.6rem 0 0.4rem;
+}
+.nw-split.sm dt {
+    color: var(--muted);
+}
+.nw-split.sm dt small {
+    font-size: 0.75rem;
+    white-space: normal;
+}
+.nw-split.sm dd {
+    font-weight: 500;
+    font-size: 0.95rem;
+}
+.nw-split.sm dd.strong {
+    font-weight: 700;
 }
 .nw-note {
     margin: 0 0 1rem;

@@ -118,6 +118,14 @@ class TestTools:
         assert line["final_czech_tax_after_credit_czk"] == "3604.00"
         assert data["run_id"] == "2024-mcp"
 
+    def test_get_tax_summary_carries_the_realised_result(self, server):
+        """Same source as the results page (RunService.realized_summary)."""
+        data = _payload(_call(server, "get_tax_summary", {"tax_year": 2024}))
+        assert data["realized"]["net_czk"] == "45848.13"
+        assert data["realized"]["exempt_czk"] == "21810.98"
+        assert [c["key"] for c in data["realized"]["by_category"]] == [
+            "securities", "options", "currency"]
+
     def test_get_form_mapping_has_official_refs(self, server):
         data = _payload(_call(server, "get_form_mapping", {"tax_year": 2024}))
         refs = [ln.get("official_line_ref") for sec in data["sections"]
