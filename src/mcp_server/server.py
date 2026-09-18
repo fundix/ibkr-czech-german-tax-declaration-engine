@@ -125,6 +125,9 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
             "sections": result.get("sections"),
             "warnings": result.get("warnings"),
             "compare": (svc.get_run(run_id) or {}).get("compare_lines"),
+            # Information, not a tax figure: every realised gain and loss of
+            # the year (exempt included) — the same source as the results page.
+            "realized": svc.realized_summary(run_id, fx_mode),
         })
 
     @mcp.tool()

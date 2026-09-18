@@ -186,6 +186,19 @@ class TestPages:
         assert "3 604,00" in r.text  # 3 604,00 Kč, Czech formatting
         assert "§8 ZDP" in r.text
 
+    def test_results_page_shows_the_realised_result_as_info(self, client):
+        """The tax card also answers "how did the year go" — every realised
+        gain and loss, exempt ones included — so the owner need not add up the
+        items page. Golden synthetic 2024: 45 848,13 of which 21 810,98 exempt
+        (see TestRealizedSummary.test_golden_synthetic_year)."""
+        r = client.get("/results/2024-test")
+        assert r.status_code == 200
+        assert "Realizované zisky" in r.text
+        assert "45\u00a0848,13" in r.text
+        assert "Čistý výsledek" in r.text
+        assert "21\u00a0810,98" in r.text          # the exempt part is disclosed
+        assert "informativní" in r.text            # labelled as not a tax figure
+
     def test_results_header_labels_are_self_explanatory(self, client):
         r = client.get("/results/2024-test")
         assert r.status_code == 200

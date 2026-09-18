@@ -774,6 +774,96 @@ class TestLivePortfolio:
         assert live["cash_unconverted"] == ["GBP"]
 
 
+class TestRealizedSummary:
+    """The economic result of the year — every realised gain and loss in the
+    §10 sections, exempt items included — read from the run's persisted
+    result so cached and older runs show it without a recompute."""
+
+    def _write_result(self, svc, run_id, items, mode="daily"):
+        from src.webapp.serializers import dump_json
+        run_dir = svc.runs_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        dump_json({"items": items}, run_dir / f"result.{mode}.json")
+
+    @staticmethod
+    def _item(item_type, section, gain, **extra):
+        base = {"item_type": item_type, "section": section, "gain_loss_czk": gain,
+                "is_exempt": False, "exempt_due_to_annual_limit": False,
+                "exemption_reason": None, "tax_review_status": "RESOLVED"}
+        base.update(extra)
+        return base
+
+    def test_totals_split_gains_losses_and_categories(self, stub_service):
+        self._write_result(stub_service, "r1", [
+            self._item("SECURITY_DISPOSAL", "CZ_10_SECURITIES", "1000.00"),
+            self._item("SECURITY_DISPOSAL", "CZ_10_SECURITIES", "300.00",
+                       is_exempt=True, exemption_reason="TIME_TEST_PASSED"),
+            self._item("SECURITY_DISPOSAL", "CZ_10_SECURITIES", "-250.50"),
+            self._item("OPTION_CLOSE", "CZ_10_OPTIONS", "-100.00"),
+            self._item("CURRENCY_CONVERSION", "CZ_10_CURRENCY", "-5.25"),
+            self._item("CURRENCY_CONVERSION", "CZ_10_CURRENCY", "2.00"),
+            # No figure yet — acquisition unknown; counted, never summed as 0.
+            self._item("SECURITY_DISPOSAL", "CZ_10_SECURITIES", None,
+                       tax_review_status="PENDING_MANUAL_REVIEW"),
+            # Income is not a realised gain and must not count as unpriced.
+            self._item("DIVIDEND", "CZ_8_DIVIDENDS", None),
+        ])
+        r = stub_service.realized_summary("r1", "daily")
+        assert r["has_items"] is True
+        assert r["gains_czk"] == Decimal("1302.00")
+        assert r["losses_czk"] == Decimal("-355.75")
+        assert r["net_czk"] == Decimal("946.25")
+        assert r["exempt_czk"] == Decimal("300.00")
+        assert r["count"] == 6
+        assert r["unpriced_count"] == 1
+        by = {c["key"]: c for c in r["by_category"]}
+        assert by["securities"]["net_czk"] == Decimal("1049.50")
+        assert by["securities"]["count"] == 3          # A, B (exempt), C
+        assert by["securities"]["unpriced_count"] == 1
+        assert by["options"]["losses_czk"] == Decimal("-100.00")
+        assert by["currency"]["net_czk"] == Decimal("-3.25")
+        assert [c["key"] for c in r["by_category"]] == ["securities", "options", "currency"]
+
+    def test_sums_are_rounded_once_not_per_item(self, stub_service):
+        """The engine's own §10 lines add the exact legs and round the total;
+        the info figure must agree with them to the heller."""
+        self._write_result(stub_service, "r2", [
+            self._item("SECURITY_DISPOSAL", "CZ_10_SECURITIES", "0.004"),
+            self._item("SECURITY_DISPOSAL", "CZ_10_SECURITIES", "0.004"),
+        ])
+        r = stub_service.realized_summary("r2", "daily")
+        assert r["gains_czk"] == Decimal("0.01")      # 0.008 → 0.01, not 0.00+0.00
+
+    def test_a_year_without_disposals_has_nothing_to_show(self, stub_service):
+        self._write_result(stub_service, "r3", [
+            self._item("DIVIDEND", "CZ_8_DIVIDENDS", None)])
+        r = stub_service.realized_summary("r3", "daily")
+        assert r["has_items"] is False
+        assert r["count"] == 0 and r["unpriced_count"] == 0
+
+    def test_a_missing_result_is_none(self, stub_service):
+        assert stub_service.realized_summary("nope", "daily") is None
+
+    def test_golden_synthetic_year(self, service):
+        """ALPHA +19 379,40 (taxable), OLDCO +21 810,98 (exempt, time test),
+        PUTX option +4 657,74 — figures pinned by test_golden_e2e_cz.py; the
+        exact legs add to 45 848,126… so the once-rounded total is ,13."""
+        _seed_synthetic_year(service)
+        service._execute_run("2024-test", 2024, "daily",
+                             ecb_provider=GoldenEcbProvider(),
+                             cz_fx_provider=GoldenCnbProvider())
+        r = service.realized_summary("2024-test", "daily")
+        assert r["gains_czk"] == Decimal("45848.13")
+        assert r["losses_czk"] == Decimal("0.00")
+        assert r["net_czk"] == Decimal("45848.13")
+        assert r["exempt_czk"] == Decimal("21810.98")
+        assert r["count"] == 3 and r["unpriced_count"] == 0
+        by = {c["key"]: c for c in r["by_category"]}
+        assert by["securities"]["net_czk"] == Decimal("41190.38")
+        assert by["options"]["net_czk"] == Decimal("4657.74")
+        assert by["currency"]["count"] == 0
+
+
 class TestCashBalances:
     def test_reads_the_runs_cash_ledger(self, stub_service):
         run_dir = stub_service.runs_dir / "2026-x" / "inputs"
