@@ -67,7 +67,9 @@ def _original_cost_of_buy(trade_event) -> Tuple[Optional[Decimal], Optional[str]
     if commission != Decimal(0) and (commission_currency or "").upper() != currency.upper():
         return None, None
 
-    return gross.copy_abs() + commission, currency.upper()
+    # The transaction tax is always in the trade's own currency.
+    tax = getattr(trade_event, "transaction_tax_foreign", None) or Decimal(0)
+    return gross.copy_abs() + commission + tax, currency.upper()
 
 
 def _long_lot_sort_key(lot: "FifoLot"):
@@ -217,6 +219,8 @@ def split_position_flip_event(event: TradeEvent,
             commission_foreign_currency=_scaled(event.commission_foreign_currency, ratio),
             commission_currency=event.commission_currency,
             commission_eur=_scaled(event.commission_eur, ratio),
+            transaction_tax_foreign=_scaled(event.transaction_tax_foreign, ratio),
+            transaction_tax_eur=_scaled(event.transaction_tax_eur, ratio),
             net_proceeds_or_cost_basis_eur=_scaled(event.net_proceeds_or_cost_basis_eur, ratio),
             related_option_event_id=None,  # a flip never arises from an option exercise
             local_currency=event.local_currency,

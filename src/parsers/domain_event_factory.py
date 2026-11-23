@@ -358,6 +358,12 @@ class DomainEventFactory:
                 # proceeds by the very amount IBKR paid back.
                 commission_val = Decimal('0.0') - safe_decimal(
                     rt.ib_commission, default=Decimal('0.0'))
+                # Taxes (stamp duty) is signed the same way -- negative when
+                # charged -- and stored as a cost like the commission. Absent
+                # when the Flex query lacks the column; the Statement of Funds
+                # backfill (processing/trade_tax_backfill) covers that case.
+                transaction_tax_val = Decimal('0.0') - safe_decimal(
+                    rt.taxes, default=Decimal('0.0'))
 
                 trade_event = TradeEvent(
                     asset_internal_id=asset.internal_asset_id,
@@ -367,6 +373,7 @@ class DomainEventFactory:
                     price_foreign_currency=trade_price,
                     commission_foreign_currency=commission_val,
                     commission_currency=rt.ib_commission_currency or rt.currency_primary,
+                    transaction_tax_foreign=transaction_tax_val,
                     local_currency=rt.currency_primary,
                     gross_amount_foreign_currency=calculated_gross_amount.copy_abs(),
                     ibkr_transaction_id=tx_id_primary,

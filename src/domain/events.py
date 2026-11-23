@@ -54,7 +54,15 @@ class TradeEvent(FinancialEvent):
     commission_currency: Optional[str] = None # Currency of the commission
     commission_eur: Optional[Decimal] = None # Commission in EUR (populated by enrichment)
 
-    # Net proceeds (for sales) or cost basis (for buys) in EUR, including commission
+    # Transaction tax the market charged on this trade (stamp duty), signed as a
+    # COST in local_currency: positive when charged. On a buy it is part of the
+    # acquisition cost, on a sale a cost of the disposal. Read from the Trades
+    # export's Taxes column, or backfilled from the Statement of Funds' TradeTax.
+    transaction_tax_foreign: Decimal = Decimal('0')
+    transaction_tax_eur: Optional[Decimal] = None # Populated by enrichment
+
+    # Net proceeds (for sales) or cost basis (for buys) in EUR, including
+    # commission and transaction tax.
     # This can be calculated during processing.
     net_proceeds_or_cost_basis_eur: Optional[Decimal] = None
 
@@ -69,6 +77,8 @@ class TradeEvent(FinancialEvent):
                  commission_foreign_currency: Optional[Decimal] = Decimal('0.0'),
                  commission_currency: Optional[str] = None,
                  commission_eur: Optional[Decimal] = None,
+                 transaction_tax_foreign: Decimal = Decimal('0'),
+                 transaction_tax_eur: Optional[Decimal] = None,
                  net_proceeds_or_cost_basis_eur: Optional[Decimal] = None,
                  related_option_event_id: Optional[uuid.UUID] = None,
                  **kwargs_for_parent_kw_only): # Catches event_id, gross_amount_foreign_currency etc.
@@ -78,6 +88,8 @@ class TradeEvent(FinancialEvent):
         self.commission_foreign_currency = commission_foreign_currency
         self.commission_currency = commission_currency
         self.commission_eur = commission_eur
+        self.transaction_tax_foreign = transaction_tax_foreign or Decimal('0')
+        self.transaction_tax_eur = transaction_tax_eur
         self.net_proceeds_or_cost_basis_eur = net_proceeds_or_cost_basis_eur
         self.related_option_event_id = related_option_event_id
 

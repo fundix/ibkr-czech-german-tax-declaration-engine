@@ -96,6 +96,24 @@ def enrich_financial_events(
                      event.commission_eur = ctx.create_decimal(Decimal(0))
                      eur_commission_conversions_success += 1
 
+            # 2a'. Transaction tax (stamp duty): always in the trade's own
+            # currency, converted on the trade date like the gross amount.
+            tax_foreign = event.transaction_tax_foreign or Decimal(0)
+            if event.transaction_tax_eur is None:
+                if tax_foreign == Decimal(0):
+                    event.transaction_tax_eur = ctx.create_decimal(Decimal(0))
+                elif event.local_currency and event.local_currency.upper() == "EUR":
+                    event.transaction_tax_eur = ctx.create_decimal(tax_foreign)
+                elif event.local_currency:
+                    eur_tax = currency_converter.convert_to_eur(
+                        tax_foreign, event.local_currency, event_date_obj)
+                    if eur_tax is not None:
+                        event.transaction_tax_eur = ctx.create_decimal(eur_tax)
+                    else:
+                        logger.warning(f"Event {event_idx+1} (Trade ID: {event.event_id}): Could not convert transaction tax ({tax_foreign} {event.local_currency}) to EUR.")
+                else:
+                    logger.warning(f"Event {event_idx+1} (Trade ID: {event.event_id}): transaction tax {tax_foreign} has no currency. Cannot convert to EUR.")
+
 
             # 2b. Calculate gross_amount_eur for trade if not already set by general logic above
             if event.gross_amount_eur is None and event.gross_amount_foreign_currency is None and \
@@ -118,23 +136,26 @@ def enrich_financial_events(
 
             # 2c. Net proceeds or cost basis in EUR (HIGH PRECISION)
             if event.net_proceeds_or_cost_basis_eur is None: # Only calculate if not already set
-                if event.gross_amount_eur is not None and event.commission_eur is not None:
-                    # commission_eur is signed as a cost: positive when charged,
-                    # negative for a rebate. Keep the sign — forcing it positive
-                    # would make a rebate raise the basis instead of lowering it.
-                    if event.event_type in [FinancialEventType.TRADE_BUY_LONG, FinancialEventType.TRADE_BUY_SHORT_COVER]:
-                        # Cost basis = gross amount + commission
-                        event.net_proceeds_or_cost_basis_eur = ctx.add(event.gross_amount_eur, event.commission_eur)
-                    elif event.event_type in [FinancialEventType.TRADE_SELL_LONG, FinancialEventType.TRADE_SELL_SHORT_OPEN]:
-                        # Proceeds = gross amount - commission
-                        event.net_proceeds_or_cost_basis_eur = ctx.subtract(event.gross_amount_eur, event.commission_eur)
-                elif event.gross_amount_eur is not None and event.commission_eur is None and event.commission_foreign_currency == Decimal('0.0'):
-                    # If commission is zero, net = gross
-                    event.net_proceeds_or_cost_basis_eur = ctx.create_decimal(event.gross_amount_eur) # ensure it's under context
-                elif event.gross_amount_eur is None:
+                commission_eur = event.commission_eur
+                if commission_eur is None and event.commission_foreign_currency == Decimal('0.0'):
+                    commission_eur = Decimal(0)
+                if event.gross_amount_eur is None:
                      logger.warning(f"Event {event_idx+1} (Trade ID: {event.event_id}): Cannot calculate net_proceeds_or_cost_basis_eur because gross_amount_eur is None.")
-                elif event.commission_eur is None :
+                elif commission_eur is None:
                      logger.warning(f"Event {event_idx+1} (Trade ID: {event.event_id}): Cannot calculate net_proceeds_or_cost_basis_eur because commission_eur is None (and original commission was not 0.0).")
+                elif event.transaction_tax_eur is None:
+                     logger.warning(f"Event {event_idx+1} (Trade ID: {event.event_id}): Cannot calculate net_proceeds_or_cost_basis_eur because the transaction tax could not be converted to EUR.")
+                else:
+                    # Both charges are signed as costs: positive when charged,
+                    # a commission negative for a rebate. Keep the sign —
+                    # forcing it positive would make a rebate raise the basis.
+                    charges = ctx.add(commission_eur, event.transaction_tax_eur)
+                    if event.event_type in [FinancialEventType.TRADE_BUY_LONG, FinancialEventType.TRADE_BUY_SHORT_COVER]:
+                        # Cost basis = gross amount + commission + transaction tax
+                        event.net_proceeds_or_cost_basis_eur = ctx.add(event.gross_amount_eur, charges)
+                    elif event.event_type in [FinancialEventType.TRADE_SELL_LONG, FinancialEventType.TRADE_SELL_SHORT_OPEN]:
+                        # Proceeds = gross amount - commission - transaction tax
+                        event.net_proceeds_or_cost_basis_eur = ctx.subtract(event.gross_amount_eur, charges)
 
         # 3. Enrich CorpActionMergerCash specific fields
         elif isinstance(event, CorpActionMergerCash):

@@ -1,5 +1,6 @@
 # src/pipeline_runner.py
 import logging
+import os
 from decimal import Decimal, getcontext
 from typing import Any, Optional, Tuple, List, Dict # Python 3.8 compatibility for List, Dict
 
@@ -61,6 +62,7 @@ def run_core_processing_pipeline(
     custom_rate_provider: Optional[ExchangeRateProvider] = None, # For testing ECB mock
     country_code: str = "de",
     pairing_method: PairingMethod = PairingMethod.FIFO,
+    statement_of_funds_file_path: Optional[str] = None,
 ) -> ProcessingOutput:
     """
     Runs the core data processing pipeline: parsing, enrichment, and calculations.
@@ -114,6 +116,17 @@ def run_core_processing_pipeline(
             # For now, logging error and continuing.
 
     currency_converter = CurrencyConverter(rate_provider=rate_provider)
+
+    if statement_of_funds_file_path and os.path.exists(statement_of_funds_file_path):
+        # A Trades query without the Taxes column leaves a market's
+        # transaction tax out of cost and proceeds; the Statement of Funds
+        # carries it per TransactionID. Must precede enrichment.
+        from src.parsers.statement_of_funds_parser import parse_statement_of_funds_csv
+        from src.processing.trade_tax_backfill import apply_statement_of_funds_trade_taxes
+        apply_statement_of_funds_trade_taxes(
+            all_financial_events_raw,
+            parse_statement_of_funds_csv(statement_of_funds_file_path),
+        )
 
     logger.info("Enriching financial events (e.g., EUR conversion)...")
     financial_events_enriched = enrich_financial_events(
