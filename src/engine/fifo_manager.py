@@ -396,10 +396,14 @@ class ShortFifoLot:
             self.opening_date_estimated = True
         if not isinstance(self.quantity_shorted, Decimal) or not self.quantity_shorted.is_finite() or self.quantity_shorted <= Decimal(0):
             raise ValueError(f"ShortFifoLot quantity_shorted must be a positive finite Decimal: {self.quantity_shorted}")
-        if not isinstance(self.unit_sale_proceeds_eur, Decimal) or not self.unit_sale_proceeds_eur.is_finite() or self.unit_sale_proceeds_eur < Decimal(0): # Renamed
-            raise ValueError(f"ShortFifoLot unit_sale_proceeds_eur must be a non-negative finite Decimal: {self.unit_sale_proceeds_eur}") # Renamed
-        if not isinstance(self.total_sale_proceeds_eur, Decimal) or not self.total_sale_proceeds_eur.is_finite() or self.total_sale_proceeds_eur < Decimal(0):
-            raise ValueError(f"ShortFifoLot total_sale_proceeds_eur must be a non-negative finite Decimal: {self.total_sale_proceeds_eur}")
+        # Net proceeds may be negative once the sale's own costs exceed its
+        # price (writing a near-worthless option); the cover must keep that
+        # loss. Quantity stays a positive magnitude; proceeds do not
+        # (upstream 3541de7).
+        if not isinstance(self.unit_sale_proceeds_eur, Decimal) or not self.unit_sale_proceeds_eur.is_finite():
+            raise ValueError(f"ShortFifoLot unit_sale_proceeds_eur must be a finite Decimal: {self.unit_sale_proceeds_eur}")
+        if not isinstance(self.total_sale_proceeds_eur, Decimal) or not self.total_sale_proceeds_eur.is_finite():
+            raise ValueError(f"ShortFifoLot total_sale_proceeds_eur must be a finite Decimal: {self.total_sale_proceeds_eur}")
         if not self.source_transaction_id:
             raise ValueError(f"ShortFifoLot requires a non-empty source_transaction_id.")
 
