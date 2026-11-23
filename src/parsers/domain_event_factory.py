@@ -199,12 +199,12 @@ class DomainEventFactory:
                 raw_underlying_conid=rt.underlying_conid, raw_underlying_symbol=rt.underlying_symbol
             )
 
-            trade_datetime_str = f"{rt.trade_date} {rt.trade_time or '00:00:00'}" if rt.trade_date else None
+            # A trade is booked on its contract date, by rule (upstream
+            # 82733e8). Settlement and report dates are not fallbacks: either
+            # would silently move a late-December trade into the next tax
+            # year and onto another day's exchange rate.
             event_date_str_or_none = self._get_prioritized_date(
-                settle_date_str=rt.settle_date_target,
-                trade_or_event_datetime_str=trade_datetime_str,
                 trade_date_str=rt.trade_date,
-                report_date_str=rt.report_date
             )
             if not event_date_str_or_none:
                  logger.error(f"Could not determine a valid event date for trade: {tx_id_primary}, Symbol: {rt.symbol}. Skipping event creation.")
