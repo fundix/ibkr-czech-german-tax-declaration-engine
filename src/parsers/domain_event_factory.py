@@ -199,12 +199,12 @@ class DomainEventFactory:
                 raw_underlying_conid=rt.underlying_conid, raw_underlying_symbol=rt.underlying_symbol
             )
 
-            trade_datetime_str = f"{rt.trade_date} {rt.trade_time or '00:00:00'}" if rt.trade_date else None
+            # A trade is booked on its contract date, by rule (upstream
+            # 82733e8). Settlement and report dates are not fallbacks: either
+            # would silently move a late-December trade into the next tax
+            # year and onto another day's exchange rate.
             event_date_str_or_none = self._get_prioritized_date(
-                settle_date_str=rt.settle_date_target,
-                trade_or_event_datetime_str=trade_datetime_str,
                 trade_date_str=rt.trade_date,
-                report_date_str=rt.report_date
             )
             if not event_date_str_or_none:
                  logger.error(f"Could not determine a valid event date for trade: {tx_id_primary}, Symbol: {rt.symbol}. Skipping event creation.")
@@ -358,6 +358,12 @@ class DomainEventFactory:
                 # proceeds by the very amount IBKR paid back.
                 commission_val = Decimal('0.0') - safe_decimal(
                     rt.ib_commission, default=Decimal('0.0'))
+                # Taxes (stamp duty) is signed the same way -- negative when
+                # charged -- and stored as a cost like the commission. Absent
+                # when the Flex query lacks the column; the Statement of Funds
+                # backfill (processing/trade_tax_backfill) covers that case.
+                transaction_tax_val = Decimal('0.0') - safe_decimal(
+                    rt.taxes, default=Decimal('0.0'))
 
                 trade_event = TradeEvent(
                     asset_internal_id=asset.internal_asset_id,
@@ -367,6 +373,7 @@ class DomainEventFactory:
                     price_foreign_currency=trade_price,
                     commission_foreign_currency=commission_val,
                     commission_currency=rt.ib_commission_currency or rt.currency_primary,
+                    transaction_tax_foreign=transaction_tax_val,
                     local_currency=rt.currency_primary,
                     gross_amount_foreign_currency=calculated_gross_amount.copy_abs(),
                     ibkr_transaction_id=tx_id_primary,

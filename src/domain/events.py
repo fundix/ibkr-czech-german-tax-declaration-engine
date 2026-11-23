@@ -1,4 +1,5 @@
 # src/domain/events.py
+import itertools
 from dataclasses import dataclass, field, KW_ONLY
 from decimal import Decimal
 import uuid
@@ -7,6 +8,14 @@ from typing import Optional
 from .enums import FinancialEventType
 # Removed AssetCategory, InvestmentFundType, TaxReportingCategory imports as they are not directly used in event fields
 # Asset information will be linked via asset_internal_id, and classification is on the Asset object itself.
+
+# Hands out FinancialEvent.creation_sequence -- see that field.
+_creation_sequence_counter = itertools.count()
+
+
+def _next_creation_sequence() -> int:
+    return next(_creation_sequence_counter)
+
 
 @dataclass
 class FinancialEvent:
@@ -18,6 +27,13 @@ class FinancialEvent:
     _: KW_ONLY
     event_type: FinancialEventType # The type of financial event
     event_id: uuid.UUID = field(default_factory=uuid.uuid4) # Unique ID for this event instance
+
+    # The final tie-break of get_event_sort_key. event_id used to be: unique
+    # within a run but redrawn on the next, so events tying on everything else
+    # came out in a different order each run. A construction counter instead
+    # (upstream 80cf74e): every event gets one, including those synthesised
+    # after parsing, and it follows the order rows are read from the input.
+    creation_sequence: int = field(default_factory=_next_creation_sequence)
 
     # Monetary amounts related to the event
     # These are typically in the original currency of the transaction/event
@@ -54,7 +70,15 @@ class TradeEvent(FinancialEvent):
     commission_currency: Optional[str] = None # Currency of the commission
     commission_eur: Optional[Decimal] = None # Commission in EUR (populated by enrichment)
 
-    # Net proceeds (for sales) or cost basis (for buys) in EUR, including commission
+    # Transaction tax the market charged on this trade (stamp duty), signed as a
+    # COST in local_currency: positive when charged. On a buy it is part of the
+    # acquisition cost, on a sale a cost of the disposal. Read from the Trades
+    # export's Taxes column, or backfilled from the Statement of Funds' TradeTax.
+    transaction_tax_foreign: Decimal = Decimal('0')
+    transaction_tax_eur: Optional[Decimal] = None # Populated by enrichment
+
+    # Net proceeds (for sales) or cost basis (for buys) in EUR, including
+    # commission and transaction tax.
     # This can be calculated during processing.
     net_proceeds_or_cost_basis_eur: Optional[Decimal] = None
 
@@ -69,6 +93,8 @@ class TradeEvent(FinancialEvent):
                  commission_foreign_currency: Optional[Decimal] = Decimal('0.0'),
                  commission_currency: Optional[str] = None,
                  commission_eur: Optional[Decimal] = None,
+                 transaction_tax_foreign: Decimal = Decimal('0'),
+                 transaction_tax_eur: Optional[Decimal] = None,
                  net_proceeds_or_cost_basis_eur: Optional[Decimal] = None,
                  related_option_event_id: Optional[uuid.UUID] = None,
                  **kwargs_for_parent_kw_only): # Catches event_id, gross_amount_foreign_currency etc.
@@ -78,6 +104,8 @@ class TradeEvent(FinancialEvent):
         self.commission_foreign_currency = commission_foreign_currency
         self.commission_currency = commission_currency
         self.commission_eur = commission_eur
+        self.transaction_tax_foreign = transaction_tax_foreign or Decimal('0')
+        self.transaction_tax_eur = transaction_tax_eur
         self.net_proceeds_or_cost_basis_eur = net_proceeds_or_cost_basis_eur
         self.related_option_event_id = related_option_event_id
 

@@ -293,7 +293,7 @@ def generate_stock_trade_report_for_symbol(
         print("No trades found for this asset in the specified tax year.")
         return
 
-    asset_trades_in_year.sort(key=lambda e: (e.event_date, e.event_id))
+    asset_trades_in_year.sort(key=lambda e: (e.event_date, e.creation_sequence))
 
     date_w, type_w, qty_w, price_w, curr_w = 10, 22, 15, 15, 4
     val_loc_w, comm_loc_w, net_val_loc_w = 18, 15, 18

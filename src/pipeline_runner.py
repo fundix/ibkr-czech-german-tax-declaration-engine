@@ -1,5 +1,6 @@
 # src/pipeline_runner.py
 import logging
+import os
 from decimal import Decimal, getcontext
 from typing import Any, Optional, Tuple, List, Dict # Python 3.8 compatibility for List, Dict
 
@@ -36,13 +37,17 @@ class ProcessingOutput:
                  all_financial_events_enriched: List[FinancialEvent],
                  asset_resolver: AssetResolver,
                  eoy_mismatch_error_count: int,
-                 fifo_ledgers_by_asset_id: Optional[Dict[Any, Any]] = None):
+                 fifo_ledgers_by_asset_id: Optional[Dict[Any, Any]] = None,
+                 eoy_mismatch_details: Optional[List[Dict[str, Any]]] = None):
         self.realized_gains_losses = realized_gains_losses
         self.vorabpauschale_items = vorabpauschale_items
         self.processed_income_events = processed_income_events
         self.all_financial_events_enriched = all_financial_events_enriched
         self.asset_resolver = asset_resolver
         self.eoy_mismatch_error_count = eoy_mismatch_error_count
+        # One entry per mismatched position (symbol, description, calculated,
+        # reported) -- the CZ aggregation turns it into a blocking review note.
+        self.eoy_mismatch_details = list(eoy_mismatch_details or [])
         # Final FIFO ledgers (open lots after all tax-year events) keyed by
         # asset internal id — end-of-year open positions for portfolio views.
         self.fifo_ledgers_by_asset_id = fifo_ledgers_by_asset_id or {}
@@ -61,6 +66,7 @@ def run_core_processing_pipeline(
     custom_rate_provider: Optional[ExchangeRateProvider] = None, # For testing ECB mock
     country_code: str = "de",
     pairing_method: PairingMethod = PairingMethod.FIFO,
+    statement_of_funds_file_path: Optional[str] = None,
 ) -> ProcessingOutput:
     """
     Runs the core data processing pipeline: parsing, enrichment, and calculations.
@@ -115,6 +121,17 @@ def run_core_processing_pipeline(
 
     currency_converter = CurrencyConverter(rate_provider=rate_provider)
 
+    if statement_of_funds_file_path and os.path.exists(statement_of_funds_file_path):
+        # A Trades query without the Taxes column leaves a market's
+        # transaction tax out of cost and proceeds; the Statement of Funds
+        # carries it per TransactionID. Must precede enrichment.
+        from src.parsers.statement_of_funds_parser import parse_statement_of_funds_csv
+        from src.processing.trade_tax_backfill import apply_statement_of_funds_trade_taxes
+        apply_statement_of_funds_trade_taxes(
+            all_financial_events_raw,
+            parse_statement_of_funds_csv(statement_of_funds_file_path),
+        )
+
     logger.info("Enriching financial events (e.g., EUR conversion)...")
     financial_events_enriched = enrich_financial_events(
         financial_events=all_financial_events_raw,
@@ -126,12 +143,14 @@ def run_core_processing_pipeline(
 
     logger.info(f"Running calculation engine for tax year {tax_year_to_process}...")
     eoy_mismatch_error_count_calc = 0
+    eoy_mismatch_details = []
     try:
         # Ensure run_main_calculations uses the passed tax_year_to_process
         _tax_plugin = get_tax_plugin(country_code)
         _tax_classifier = _tax_plugin.get_tax_classifier()
         logger.info(f"Using tax classifier for country: {country_code}")
-        realized_gains_losses, vorabpauschale_items, processed_income_events, eoy_mismatch_error_count_calc, fifo_ledgers = run_main_calculations(
+        (realized_gains_losses, vorabpauschale_items, processed_income_events,
+         eoy_mismatch_error_count_calc, fifo_ledgers, eoy_mismatch_details) = run_main_calculations(
             financial_events=financial_events_enriched,
             asset_resolver=orchestrator.asset_resolver, # Use the resolver from the orchestrator
             currency_converter=currency_converter,
@@ -173,4 +192,5 @@ def run_core_processing_pipeline(
         asset_resolver=orchestrator.asset_resolver,
         eoy_mismatch_error_count=eoy_mismatch_error_count_calc,
         fifo_ledgers_by_asset_id=fifo_ledgers,
+        eoy_mismatch_details=eoy_mismatch_details,
     )

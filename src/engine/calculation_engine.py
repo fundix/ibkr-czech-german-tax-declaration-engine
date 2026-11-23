@@ -214,6 +214,16 @@ def _apply_historical_option_premiums(
         )
 
 
+
+def _eoy_mismatch_entry(asset_obj, calculated: Decimal, reported: Decimal) -> Dict[str, Any]:
+    """One EOY mismatch, in the shape the review note renders."""
+    return {
+        "symbol": getattr(asset_obj, "ibkr_symbol", None) or asset_obj.get_classification_key(),
+        "description": asset_obj.description or "",
+        "calculated": calculated,
+        "reported": reported,
+    }
+
 def run_main_calculations(
     financial_events: List[FinancialEvent],
     asset_resolver: AssetResolver,
@@ -226,7 +236,7 @@ def run_main_calculations(
     merger_policy: Optional[Any] = None,
     security_price_provider: Optional[Any] = None,
     pairing_method: PairingMethod = PairingMethod.FIFO,
-) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger]]:
+) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger], List[Dict[str, Any]]]:
     """
     Runs the main calculation logic:
     1. Separates historical and current year events.
@@ -239,6 +249,8 @@ def run_main_calculations(
     view, time-test countdown) can read end-of-year open positions.
     5. Calculates Vorabpauschale (currently placeholder).
     6. Returns calculated results (Realized G/L, Vorabpauschale), processed events, and EOY mismatch count.
+    7. The sixth element names each EOY mismatch (symbol, description,
+       calculated and reported quantity) for the blocking review note.
     """
     pairing_method = coerce_pairing_method(pairing_method)
     logger.info(f"Starting main calculation engine for tax year {tax_year} with {len(financial_events)} events (pairing: {pairing_method.value}).")
@@ -262,10 +274,10 @@ def run_main_calculations(
 
     if not tax_year_start_date_obj:
         logger.error(f"Could not parse tax year start date: {tax_year_start_date_str}. Aborting calculations.")
-        return [], [], financial_events, 0
+        return [], [], financial_events, 0, {}, []
     if not tax_year_end_date_obj:
         logger.error(f"Could not parse tax year end date: {tax_year_end_date_str}. Aborting calculations.")
-        return [], [], financial_events, 0
+        return [], [], financial_events, 0, {}, []
 
     logger.info("Separating historical and current year events...")
     filtered_events_count = 0
@@ -534,6 +546,9 @@ def run_main_calculations(
 
     logger.info("Performing End-of-Year (EOY) quantity validation...")
     eoy_mismatch_errors = 0
+    # One entry per mismatched position, so the result can name them all in
+    # a blocking review note instead of only logging them (upstream 1c4c981).
+    eoy_mismatch_details: List[Dict[str, Any]] = []
     for asset_id, asset_obj in asset_resolver.assets_by_internal_id.items():
         if asset_obj.asset_category == AssetCategory.CASH_BALANCE:
             continue
@@ -564,12 +579,16 @@ def run_main_calculations(
                     f"Difference: {calculated_eoy_qty - reported_eoy_qty}"
                 )
                 eoy_mismatch_errors += 1
+                eoy_mismatch_details.append(_eoy_mismatch_entry(
+                    asset_obj, calculated_eoy_qty, reported_eoy_qty))
         elif abs(calculated_eoy_qty) > comparison_tolerance:
             logger.error(
                 f"EOY MISMATCH for {asset_obj.description or asset_obj.get_classification_key()} (ID: {asset_id}): "
                 f"Calculated EOY Qty: {calculated_eoy_qty}, but asset NOT found in EOY positions report (implying reported EOY Qty is 0)."
             )
             eoy_mismatch_errors += 1
+            eoy_mismatch_details.append(_eoy_mismatch_entry(
+                asset_obj, calculated_eoy_qty, Decimal(0)))
 
     if eoy_mismatch_errors > 0:
         logger.error(f"EOY Quantity Validation FAILED with {eoy_mismatch_errors} critical mismatches. Processing will continue, but results may be inaccurate.")
@@ -594,7 +613,8 @@ def run_main_calculations(
     logger.info(f"Calculation engine finished. Produced {len(realized_gains_losses)} RealizedGainLoss records.")
     logger.info(f"Calculation engine produced {len(vorabpauschale_data_items)} VorabpauschaleData records (expected 0 for 2023).")
 
-    return realized_gains_losses, vorabpauschale_data_items, processed_income_events_for_output, eoy_mismatch_errors, fifo_ledgers
+    return (realized_gains_losses, vorabpauschale_data_items, processed_income_events_for_output,
+            eoy_mismatch_errors, fifo_ledgers, eoy_mismatch_details)
 
 
 def _create_excess_dividend_event(original_event, excess_amount, asset_object):

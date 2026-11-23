@@ -173,6 +173,9 @@ class FifoTestCaseBase:
         assert actual_results.eoy_mismatch_error_count == expected_test_outcome.expected_eoy_mismatch_error_count, \
             (f"EOY mismatch error count: Expected {expected_test_outcome.expected_eoy_mismatch_error_count}, "
              f"Got {actual_results.eoy_mismatch_error_count}")
+        # Every counted mismatch must also be named, or the blocking review
+        # note would understate what is wrong.
+        assert len(actual_results.eoy_mismatch_details) == actual_results.eoy_mismatch_error_count
 
         assert len(actual_results.realized_gains_losses) == len(expected_test_outcome.expected_rgls), \
             (f"Number of RGLs: Expected {len(expected_test_outcome.expected_rgls)}, "

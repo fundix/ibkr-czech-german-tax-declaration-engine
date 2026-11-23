@@ -872,6 +872,8 @@ class RunService:
         )
 
         pairing = coerce_pairing_method(pairing_method)
+        sof = inputs.get("statement_of_funds")
+        sof_path = str(sof) if sof else None
         with engine_file_lock():
             processing = run_core_processing_pipeline(
                 trades_file_path=str(inputs["trades"]),
@@ -884,10 +886,8 @@ class RunService:
                 custom_rate_provider=ecb_provider,
                 country_code="cz",
                 pairing_method=pairing,
+                statement_of_funds_file_path=sof_path,
             )
-
-            sof = inputs.get("statement_of_funds")
-            sof_path = str(sof) if sof else None
 
             compare_lines: List[str] = []
             if fx_mode == "compare":

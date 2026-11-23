@@ -67,7 +67,9 @@ def _original_cost_of_buy(trade_event) -> Tuple[Optional[Decimal], Optional[str]
     if commission != Decimal(0) and (commission_currency or "").upper() != currency.upper():
         return None, None
 
-    return gross.copy_abs() + commission, currency.upper()
+    # The transaction tax is always in the trade's own currency.
+    tax = getattr(trade_event, "transaction_tax_foreign", None) or Decimal(0)
+    return gross.copy_abs() + commission + tax, currency.upper()
 
 
 def _long_lot_sort_key(lot: "FifoLot"):
@@ -217,6 +219,8 @@ def split_position_flip_event(event: TradeEvent,
             commission_foreign_currency=_scaled(event.commission_foreign_currency, ratio),
             commission_currency=event.commission_currency,
             commission_eur=_scaled(event.commission_eur, ratio),
+            transaction_tax_foreign=_scaled(event.transaction_tax_foreign, ratio),
+            transaction_tax_eur=_scaled(event.transaction_tax_eur, ratio),
             net_proceeds_or_cost_basis_eur=_scaled(event.net_proceeds_or_cost_basis_eur, ratio),
             related_option_event_id=None,  # a flip never arises from an option exercise
             local_currency=event.local_currency,
@@ -392,10 +396,14 @@ class ShortFifoLot:
             self.opening_date_estimated = True
         if not isinstance(self.quantity_shorted, Decimal) or not self.quantity_shorted.is_finite() or self.quantity_shorted <= Decimal(0):
             raise ValueError(f"ShortFifoLot quantity_shorted must be a positive finite Decimal: {self.quantity_shorted}")
-        if not isinstance(self.unit_sale_proceeds_eur, Decimal) or not self.unit_sale_proceeds_eur.is_finite() or self.unit_sale_proceeds_eur < Decimal(0): # Renamed
-            raise ValueError(f"ShortFifoLot unit_sale_proceeds_eur must be a non-negative finite Decimal: {self.unit_sale_proceeds_eur}") # Renamed
-        if not isinstance(self.total_sale_proceeds_eur, Decimal) or not self.total_sale_proceeds_eur.is_finite() or self.total_sale_proceeds_eur < Decimal(0):
-            raise ValueError(f"ShortFifoLot total_sale_proceeds_eur must be a non-negative finite Decimal: {self.total_sale_proceeds_eur}")
+        # Net proceeds may be negative once the sale's own costs exceed its
+        # price (writing a near-worthless option); the cover must keep that
+        # loss. Quantity stays a positive magnitude; proceeds do not
+        # (upstream 3541de7).
+        if not isinstance(self.unit_sale_proceeds_eur, Decimal) or not self.unit_sale_proceeds_eur.is_finite():
+            raise ValueError(f"ShortFifoLot unit_sale_proceeds_eur must be a finite Decimal: {self.unit_sale_proceeds_eur}")
+        if not isinstance(self.total_sale_proceeds_eur, Decimal) or not self.total_sale_proceeds_eur.is_finite():
+            raise ValueError(f"ShortFifoLot total_sale_proceeds_eur must be a finite Decimal: {self.total_sale_proceeds_eur}")
         if not self.source_transaction_id:
             raise ValueError(f"ShortFifoLot requires a non-empty source_transaction_id.")
 
