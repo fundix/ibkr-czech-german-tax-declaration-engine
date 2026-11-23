@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import date as date_type
 from decimal import Decimal
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional
@@ -73,6 +74,26 @@ class CzCurrencyRealisation:
     @property
     def is_determined(self) -> bool:
         return self.realisation.is_determined
+
+    @property
+    def lacks_movement_rate(self) -> bool:
+        """No ČNB rate for the day the movement itself is attributed to —
+        typically a settlement date that has not happened yet."""
+        return self.realisation.rate is None
+
+    @property
+    def lacks_layer_rate(self) -> bool:
+        """Some consumed layer has no rate — an opening balance with no
+        history behind it, or an acquisition on a day ČNB gave no rate for."""
+        return any(l.rate is None for l in self.realisation.layers)
+
+    def awaits_future_rate(self, today: date_type) -> bool:
+        """Undetermined only because its date lies after *today*: ČNB has not
+        published that day's rate yet, and a re-run after it resolves this.
+        A missing layer rate is never fixed by waiting, so it disqualifies."""
+        on = self.realisation.on
+        return (self.lacks_movement_rate and not self.lacks_layer_rate
+                and on is not None and on > today)
 
     def recognised_under(self, recognition: CzCurrencyRecognition) -> bool:
         """Whether §10 counts this one under *recognition*.

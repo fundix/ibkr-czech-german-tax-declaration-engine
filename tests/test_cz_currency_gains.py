@@ -123,6 +123,97 @@ class TestUndetermined:
         assert len(gains.undetermined()) > 0
 
 
+def _gains_without_rate_on(*missing):
+    """The fixture replayed with ČNB silent on the given days."""
+    def lookup(on, currency):
+        return None if on in missing else stub_rate(on, currency)
+    return compute_currency_gains(parse_statement_of_funds_csv(FIXTURE),
+                                  rate_lookup=lookup)
+
+
+# The fixture's USD.CZK conversion (8004) settles on 14 April and consumes the
+# layer the 12 February sale left behind.
+CONVERSION_SETTLES = date(2026, 4, 14)
+LAYER_OPENED = date(2026, 2, 12)
+
+
+class TestWhyUndetermined:
+    """A run made before a conversion settles has no ČNB rate for that day
+    yet. That is not the same as a missing acquisition rate, and the reader
+    must be told which one it is: the first fixes itself by re-running."""
+
+    def _conversion(self, gains):
+        [r] = gains.for_transaction("8004")
+        assert not r.is_determined
+        return r
+
+    def test_a_missing_settlement_rate_is_told_apart_from_the_layers(self):
+        r = self._conversion(_gains_without_rate_on(CONVERSION_SETTLES))
+        assert r.lacks_movement_rate
+        assert not r.lacks_layer_rate
+
+    def test_a_missing_acquisition_rate_is_told_apart_from_the_movement(self):
+        r = self._conversion(_gains_without_rate_on(LAYER_OPENED))
+        assert r.lacks_layer_rate
+        assert not r.lacks_movement_rate
+
+    def test_only_a_date_after_today_awaits_a_future_rate(self):
+        r = self._conversion(_gains_without_rate_on(CONVERSION_SETTLES))
+        assert r.awaits_future_rate(today=date(2026, 4, 13))
+        assert not r.awaits_future_rate(today=date(2026, 4, 14))
+        assert not r.awaits_future_rate(today=date(2026, 12, 31))
+
+    def test_a_layer_gap_never_awaits_a_future_rate(self):
+        r = self._conversion(_gains_without_rate_on(LAYER_OPENED))
+        assert not r.awaits_future_rate(today=date(2026, 1, 1))
+
+
+class TestUndeterminedItemNote:
+    """The review row names the cause, so the reader knows whether to wait
+    and re-run or to dig out an acquisition rate."""
+
+    def _note(self, gains, today):
+        import uuid
+        from src.classification.asset_classifier import AssetClassifier
+        from src.countries.cz.item_builder import _build_currency_items
+        from src.domain.events import CurrencyConversionEvent
+        from src.identification.asset_resolver import AssetResolver
+
+        conv = CurrencyConversionEvent(
+            asset_internal_id=uuid.uuid4(), event_date="2026-04-10",
+            from_currency="USD", from_amount=Decimal("-500"),
+            to_currency="CZK", to_amount=Decimal("11000"),
+            exchange_rate=Decimal("22"), ibkr_transaction_id="8004",
+        )
+        [item] = _build_currency_items(
+            [conv], AssetResolver(AssetClassifier()), None, [],
+            currency_gains=gains, config=CzTaxConfig(), today=today,
+        )
+        assert item.gain_loss_czk is None
+        return item.tax_review_note
+
+    def test_a_future_settlement_says_to_rerun_after_it(self):
+        note = self._note(_gains_without_rate_on(CONVERSION_SETTLES),
+                          today=date(2026, 4, 13))
+        assert "2026-04-14" in note
+        assert "Spusťte výpočet znovu" in note
+        assert "nabývací kurz" not in note
+        assert "NENÍ to nula" in note
+
+    def test_a_past_date_without_a_rate_says_the_rate_is_missing(self):
+        note = self._note(_gains_without_rate_on(CONVERSION_SETTLES),
+                          today=date(2026, 12, 31))
+        assert "2026-04-14" in note
+        assert "Spusťte výpočet znovu" not in note
+        assert "nabývací kurz" not in note
+
+    def test_a_layer_gap_still_blames_the_acquisition_rate(self):
+        note = self._note(_gains_without_rate_on(LAYER_OPENED),
+                          today=date(2026, 12, 31))
+        assert "nabývací kurz" in note
+        assert "Spusťte výpočet znovu" not in note
+
+
 class TestConfigDefaults:
     def test_the_advisors_defaults_are_the_shipped_ones(self):
         cfg = CzTaxConfig()
@@ -246,6 +337,39 @@ class TestSectionNote:
         note = CzechTaxAggregator(config=CzTaxConfig())._currency_note(13, gains, 2026)
         assert "does not replay" in note
         assert "REVIEW REQUIRED" in note
+
+    def _undetermined_note(self, gains, today):
+        """Scoped to the conversion alone: in the fixture the later debt
+        repayment inherits the gap through the draw it repays, which is a
+        second, genuine cause and would blur what each test pins down."""
+        from src.countries.cz.plugin import CzechTaxAggregator
+
+        only_conversion = CzCurrencyGains(
+            realisations=gains.for_transaction("8004"))
+        return CzechTaxAggregator(config=CzTaxConfig())._currency_note(
+            13, only_conversion, 2026, today=today)
+
+    def test_a_future_settlement_asks_for_a_rerun_not_an_acquisition_rate(self):
+        note = self._undetermined_note(
+            _gains_without_rate_on(CONVERSION_SETTLES), today=date(2026, 4, 13))
+        assert "re-run" in note
+        assert "2026-04-14" in note
+        assert "acquisition rate" not in note
+
+    def test_a_layer_gap_still_requires_review_of_the_acquisition_rate(self):
+        note = self._undetermined_note(
+            _gains_without_rate_on(LAYER_OPENED), today=date(2026, 12, 31))
+        assert "REVIEW REQUIRED" in note
+        assert "acquisition rate" in note
+        assert "re-run" not in note
+
+    def test_a_past_date_without_a_rate_requires_review(self):
+        note = self._undetermined_note(
+            _gains_without_rate_on(CONVERSION_SETTLES), today=date(2026, 12, 31))
+        assert "REVIEW REQUIRED" in note
+        assert "2026-04-14" in note
+        assert "re-run" not in note
+        assert "acquisition rate" not in note
 
     def test_the_2026_letter_caveat_is_year_scoped(self):
         assert "360/2025" in self._note(Decimal("1"), ZERO, year=2026)

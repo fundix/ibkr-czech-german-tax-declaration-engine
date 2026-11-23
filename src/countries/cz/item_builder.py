@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import date
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 import uuid
@@ -143,6 +144,7 @@ def _build_currency_items(
     home_currency: str = "CZK",
     currency_gains: Optional["CzCurrencyGains"] = None,
     config: Optional["CzTaxConfig"] = None,
+    today: Optional[date] = None,
 ) -> List[CzTaxItem]:
     """One item per FX conversion — the disposal of foreign currency.
 
@@ -220,10 +222,9 @@ def _build_currency_items(
             )
         elif not determined:
             item_gain = None
-            note = opening + (
-                "Kurzový rozdíl NELZE určit — u spotřebovaných vrstev chybí "
-                "nabývací kurz. NENÍ to nula. Posuďte ručně."
-            )
+            undetermined = [r for r in recognised if not r.is_determined]
+            note = opening + _undetermined_reason_cz(
+                undetermined, today or date.today())
         else:
             item_gain = sum((r.gain_czk for r in determined), Decimal("0"))
             layers = [l for r in determined for l in r.realisation.layers]
@@ -255,6 +256,37 @@ def _build_currency_items(
             item.fx_conversion_failed = True
         items.append(item)
     return items
+
+
+def _undetermined_reason_cz(undetermined, today: date) -> str:
+    """Why a conversion's FX result cannot be stated, in the reader's terms.
+
+    The causes call for different actions. A settlement date after *today*
+    has no ČNB rate yet — a re-run after it fixes that by itself. A past day
+    without a rate, or a consumed layer without an acquisition rate (an
+    opening balance with no history behind it), needs a human.
+    """
+    if undetermined and all(r.awaits_future_rate(today) for r in undetermined):
+        latest = max(r.realisation.on for r in undetermined)
+        return (
+            f"Kurzový rozdíl zatím NELZE určit — ČNB ke dni vypořádání "
+            f"{latest} kurz ještě nevyhlásila (datum je v budoucnu). NENÍ to "
+            f"nula. Spusťte výpočet znovu po {latest}."
+        )
+    if any(r.lacks_layer_rate for r in undetermined):
+        return (
+            "Kurzový rozdíl NELZE určit — u spotřebovaných vrstev chybí "
+            "nabývací kurz (např. počáteční zůstatek bez historie). NENÍ to "
+            "nula. Posuďte ručně."
+        )
+    days = sorted({str(r.realisation.on) for r in undetermined
+                   if r.lacks_movement_rate and r.realisation.on})
+    if days:
+        return (
+            f"Kurzový rozdíl NELZE určit — ČNB ke dni {', '.join(days)} kurz "
+            f"pro tuto měnu nemá. NENÍ to nula. Posuďte ručně."
+        )
+    return "Kurzový rozdíl NELZE určit. NENÍ to nula. Posuďte ručně."
 
 
 # ---------------------------------------------------------------------------
