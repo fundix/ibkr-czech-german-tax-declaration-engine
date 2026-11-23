@@ -309,7 +309,7 @@ class CzechTaxAggregator:
 
         # §10 netting summary (from loss_offsetting module)
         netting_items = netting.to_line_items(cur)
-        cz10_notes = ["§10/4 expenses: acquisition costs and trade commissions are already reflected in cost basis / net proceeds per item; additional external expenses directly attributable to the sale (if any) must be added manually"]
+        cz10_notes = ["§10/4 expenses: acquisition costs, trade commissions and transaction taxes (e.g. stamp duty) are already reflected in cost basis / net proceeds per item; additional external expenses directly attributable to the sale (if any) must be added manually"]
         # Counted the same way the items are built, or the note would promise
         # more rows than the review page shows: giving up the home currency to
         # buy a foreign one realises nothing.
