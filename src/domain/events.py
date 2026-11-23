@@ -1,4 +1,5 @@
 # src/domain/events.py
+import itertools
 from dataclasses import dataclass, field, KW_ONLY
 from decimal import Decimal
 import uuid
@@ -7,6 +8,14 @@ from typing import Optional
 from .enums import FinancialEventType
 # Removed AssetCategory, InvestmentFundType, TaxReportingCategory imports as they are not directly used in event fields
 # Asset information will be linked via asset_internal_id, and classification is on the Asset object itself.
+
+# Hands out FinancialEvent.creation_sequence -- see that field.
+_creation_sequence_counter = itertools.count()
+
+
+def _next_creation_sequence() -> int:
+    return next(_creation_sequence_counter)
+
 
 @dataclass
 class FinancialEvent:
@@ -18,6 +27,13 @@ class FinancialEvent:
     _: KW_ONLY
     event_type: FinancialEventType # The type of financial event
     event_id: uuid.UUID = field(default_factory=uuid.uuid4) # Unique ID for this event instance
+
+    # The final tie-break of get_event_sort_key. event_id used to be: unique
+    # within a run but redrawn on the next, so events tying on everything else
+    # came out in a different order each run. A construction counter instead
+    # (upstream 80cf74e): every event gets one, including those synthesised
+    # after parsing, and it follows the order rows are read from the input.
+    creation_sequence: int = field(default_factory=_next_creation_sequence)
 
     # Monetary amounts related to the event
     # These are typically in the original currency of the transaction/event

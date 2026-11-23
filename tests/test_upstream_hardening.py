@@ -48,6 +48,55 @@ class TestTradeIsDatedByItsContractDate:
         assert evt.event_date == "2025-12-30"
 
 
+class TestSortKeyIsDeterministic:
+    """Upstream 80cf74e: the last tie-break of the event sort key was
+    event_id, a uuid4 drawn afresh each run -- two events tying on everything
+    else came out in a different order on every run."""
+
+    def _two_tied_trades(self):
+        import uuid
+        from src.classification.asset_classifier import AssetClassifier
+        from src.domain.enums import FinancialEventType
+        from src.identification.asset_resolver import AssetResolver
+        from src.parsers.domain_event_factory import DomainEventFactory
+
+        resolver = AssetResolver(AssetClassifier())
+        factory = DomainEventFactory(resolver)
+        payload = {
+            "ClientAccountID": "U1", "CurrencyPrimary": "USD", "AssetClass": "STK",
+            "Symbol": "SYN", "Description": "SYNTHETIC INC", "ISIN": "US0000000001",
+            "Conid": "700000002", "TradeDate": "2025-12-30", "Quantity": "10",
+            "TradePrice": "5", "Buy/Sell": "BUY", "TransactionID": "9100",
+            "Open/CloseIndicator": "O",
+        }
+        (seed, *_), _, _ = factory.create_events_from_trades([RawTradeRecord(**payload)])
+
+        def _tied(event_id):
+            return TradeEvent(
+                asset_internal_id=seed.asset_internal_id, event_date="2025-12-30",
+                event_type=FinancialEventType.TRADE_BUY_LONG, quantity=Decimal("1"),
+                price_foreign_currency=Decimal("1"), event_id=event_id,
+            )
+        # Built first, but with the LARGER uuid: a uuid tie-break reverses them.
+        first = _tied(uuid.UUID(int=2))
+        second = _tied(uuid.UUID(int=1))
+        return resolver, first, second
+
+    def test_tied_events_keep_construction_order(self):
+        from src.utils.sorting_utils import get_event_sort_key
+
+        resolver, first, second = self._two_tied_trades()
+        ordered = sorted([second, first], key=lambda e: get_event_sort_key(e, resolver))
+        assert ordered == [first, second]
+
+    def test_the_sort_key_carries_no_per_run_identifier(self):
+        from src.utils.sorting_utils import get_event_sort_key
+
+        resolver, first, _ = self._two_tied_trades()
+        key = get_event_sort_key(first, resolver)
+        assert first.event_id not in key[1]
+
+
 class TestShortSaleWhoseCostsExceedItsPrice:
     """Upstream ccd01ed / 3541de7: a short opened for less than its own
     commission (writing a near-worthless option) has negative net proceeds.
