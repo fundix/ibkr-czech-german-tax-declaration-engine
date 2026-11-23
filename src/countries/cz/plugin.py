@@ -388,7 +388,7 @@ class CzechTaxAggregator:
         )
 
     def _currency_note(self, conversion_count, currency_gains, tax_year,
-                       netting=None) -> str:
+                       netting=None, today=None) -> str:
         """The §10 currency line of the review page.
 
         Says what the outcome IS, not what the question was. "REVIEW REQUIRED"
@@ -458,12 +458,8 @@ class CzechTaxAggregator:
                 "exchanging one's own money, not repaying a foreign-currency "
                 "debt, and the treatment for an individual is unsettled."
             )
-        if undetermined:
-            parts.append(
-                f"REVIEW REQUIRED: {len(undetermined)} realisation(s) could not be "
-                "determined at all (an acquisition rate is missing) — those are "
-                "not zero."
-            )
+        parts.extend(_undetermined_parts(undetermined,
+                                         today or datetime.date.today()))
         parts.append(
             "Not carved out automatically: FX on a demonstrably regulated "
             "European market would need its own classification and cannot be "
@@ -481,6 +477,45 @@ class CzechTaxAggregator:
 # ---------------------------------------------------------------------------
 # CzechOutputRenderer
 # ---------------------------------------------------------------------------
+
+def _undetermined_parts(undetermined, today) -> List[str]:
+    """The §10 note's account of FX results that could not be stated, by cause.
+
+    The causes call for different actions, so they are not lumped together:
+    a settlement date after *today* has no ČNB rate yet and resolves itself
+    on a re-run; a past day without a rate, or a consumed layer without an
+    acquisition rate, needs a human. None of them is zero.
+    """
+    waiting = [r for r in undetermined if r.awaits_future_rate(today)]
+    rest = [r for r in undetermined if not r.awaits_future_rate(today)]
+    no_layer_rate = [r for r in rest if r.lacks_layer_rate]
+    no_day_rate = [r for r in rest
+                   if r.lacks_movement_rate and not r.lacks_layer_rate]
+    parts: List[str] = []
+    if waiting:
+        latest = max(r.realisation.on for r in waiting)
+        parts.append(
+            f"NOT YET DETERMINABLE: {len(waiting)} realisation(s) settle after "
+            f"today (latest {latest}), so ČNB has not published those rates "
+            f"yet — they are not zero; re-run the calculation after {latest} "
+            "(ČNB publishes around 14:30)."
+        )
+    if no_layer_rate:
+        parts.append(
+            f"REVIEW REQUIRED: {len(no_layer_rate)} realisation(s) consume "
+            "currency with no acquisition rate (e.g. an opening balance with "
+            "no history behind it; for a repaid debt, no rate for the day it "
+            "was drawn) — those are not zero."
+        )
+    if no_day_rate:
+        days = sorted({str(r.realisation.on) for r in no_day_rate
+                       if r.realisation.on})
+        parts.append(
+            f"REVIEW REQUIRED: {len(no_day_rate)} realisation(s) have no ČNB "
+            f"rate for their own date ({', '.join(days)}) — those are not zero."
+        )
+    return parts
+
 
 class CzechOutputRenderer:
     """
