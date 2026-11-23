@@ -97,6 +97,49 @@ class TestSortKeyIsDeterministic:
         assert first.event_id not in key[1]
 
 
+class TestEoyMismatchBlocksFiling:
+    """Upstream 1c4c981 refuses to declare from a ledger that does not
+    reconcile to the broker's year-end positions. Here the run still completes
+    (a running-year estimate must not die on a moving snapshot), but the
+    result carries a blocking review note naming every position, so it
+    reaches the review page, the MCP checklist, the PDF and the XLSX."""
+
+    MISMATCH = {"symbol": "SYN", "description": "SYNTHETIC INC",
+                "calculated": Decimal("20"), "reported": Decimal("10")}
+
+    def test_the_note_blocks_filing_and_names_each_position(self):
+        from src.countries.cz.aggregation_service import eoy_reconciliation_section
+
+        section = eoy_reconciliation_section([self.MISMATCH])
+        (note,) = section.notes
+        assert "REVIEW REQUIRED" in note and "DO NOT FILE" in note
+        assert "SYN" in note and "20" in note and "10" in note
+
+    def test_a_reconciled_ledger_adds_nothing(self):
+        from src.countries.cz.aggregation_service import eoy_reconciliation_section
+
+        assert eoy_reconciliation_section([]) is None
+
+    def test_the_aggregation_attaches_the_section(self):
+        from types import SimpleNamespace
+        from src.classification.asset_classifier import AssetClassifier
+        from src.countries.cz.aggregation_service import run_cz_aggregation
+        from src.identification.asset_resolver import AssetResolver
+
+        class _NoRates:
+            def get_rate(self, *_a, **_k):
+                return None
+
+        processing = SimpleNamespace(
+            realized_gains_losses=[], processed_income_events=[],
+            asset_resolver=AssetResolver(AssetClassifier()),
+            eoy_mismatch_details=[self.MISMATCH],
+        )
+        result = run_cz_aggregation(processing, 2025, "daily", fx_provider=_NoRates())
+        assert "eoy_reconciliation" in result.sections
+        assert "DO NOT FILE" in result.sections["eoy_reconciliation"].notes[0]
+
+
 class TestShortSaleWhoseCostsExceedItsPrice:
     """Upstream ccd01ed / 3541de7: a short opened for less than its own
     commission (writing a near-worthless option) has negative net proceeds.

@@ -13,7 +13,11 @@ wires a provider for the chosen mode.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, Sequence
+from decimal import Decimal
+
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
+
+from src.countries.base import TaxResultSection
 
 from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.fx_mode_compare import CzFxModeComparison
@@ -55,12 +59,56 @@ def run_cz_aggregation(
             cache_file_path=cfg.cnb_cache_file_path,
         )
     plugin = get_tax_plugin("cz", config=cfg, fx_provider=provider)
-    return plugin.get_tax_aggregator().aggregate(
+    result = plugin.get_tax_aggregator().aggregate(
         realized_gains_losses=processing_results.realized_gains_losses,
         financial_events=processing_results.processed_income_events,
         asset_resolver=processing_results.asset_resolver,
         tax_year=tax_year,
         statement_of_funds_path=statement_of_funds_path,
+    )
+    eoy = eoy_reconciliation_section(
+        getattr(processing_results, "eoy_mismatch_details", None) or [])
+    if eoy is not None:
+        result.sections[eoy.section_key] = eoy
+    return result
+
+
+def eoy_reconciliation_section(
+    mismatches: List[Dict[str, Any]],
+) -> Optional[TaxResultSection]:
+    """A blocking review section when the ledger does not reconcile to the
+    broker's year-end positions, or None when it does.
+
+    If the two disagree about what is held, at least one disposal was missed,
+    double-counted or matched to the wrong lot, so every figure from that
+    ledger is unsafe -- not merely the quantity. Upstream (1c4c981) aborts the
+    run; here it completes, so a running-year estimate survives a moving
+    snapshot, but the note says plainly that the result must not be filed. It
+    reaches the review page, the MCP checklist, the PDF and the XLSX like any
+    other REVIEW note.
+    """
+    if not mismatches:
+        return None
+    listed = "; ".join(
+        f"{m.get('symbol')}"
+        + (f" ({m['description']})" if m.get("description") else "")
+        + f": calculated {m.get('calculated')}, broker reports {m.get('reported')}"
+        for m in mismatches
+    )
+    note = (
+        f"REVIEW REQUIRED — DO NOT FILE: {len(mismatches)} position(s) at year end "
+        f"do not match the broker's report — {listed}. A ledger that disagrees with "
+        "the broker about what is held means a trade is missing, doubled or paired "
+        "with the wrong lot, so every gain computed from it is unsafe. Typical "
+        "causes: trade history that does not reach back far enough, a missing "
+        "corporate action, or a positions file from a different date than the "
+        "trades."
+    )
+    return TaxResultSection(
+        section_key="eoy_reconciliation",
+        label="Kontrola pozic ke konci roku",
+        line_items={"mismatch_count": Decimal(len(mismatches))},
+        notes=[note],
     )
 
 
