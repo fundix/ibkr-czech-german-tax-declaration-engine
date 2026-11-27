@@ -5,6 +5,9 @@ audit:
 
 * V08 — an option on an ETF lost its premium when it was assigned or
   exercised: only stocks were accepted as the delivery leg.
+* V09 — deliveries were matched to exercises/assignments without the side,
+  so two opposite events on one day swapped their premiums depending on the
+  order of the CSV rows.
 
 Everything here is synthetic: invented symbols, ISINs, conids and amounts.
 Expected figures are worked out by hand in each test, in EUR so that no
@@ -14,7 +17,10 @@ from decimal import Decimal
 
 import pytest
 
-from src.domain.enums import AssetCategory, RealizationType
+from src.domain.assets import Option, Stock
+from src.domain.enums import AssetCategory, FinancialEventType, RealizationType
+from src.domain.events import OptionAssignmentEvent, OptionExerciseEvent, TradeEvent
+from src.processing.option_trade_linker import OptionTradeLinker
 from tests.support.base import FifoTestCaseBase
 from tests.support.mock_providers import MockECBExchangeRateProvider
 
@@ -40,6 +46,10 @@ def _trade_row(*, asset_class, sub_category, symbol, description, isin, conid,
 ETF = dict(asset_class="STK", sub_category="ETF", symbol="SYNE",
            description="SYNTHETIC INDEX ETF", isin="US0000000101",
            conid="900000101")
+
+STOCK = dict(asset_class="STK", sub_category="COMMON", symbol="SYNA",
+             description="SYNTHETIC ALPHA INC", isin="US0000000201",
+             conid="900000201")
 
 
 def _option_on(underlying, *, put_call, strike, expiry, conid):
@@ -132,3 +142,111 @@ class TestV08OptionOnAnEtfKeepsItsPremium(FifoTestCaseBase):
         # proceeds: 100 x 45 - 1 commission + 199 premium kept
         assert rgl.total_realization_value_eur == Decimal("4698.00")
         assert rgl.gross_gain_loss_eur == Decimal("697.00")
+
+
+# ---------------------------------------------------------------------------
+# V09 — a delivery is matched to its exercise/assignment on the side as well
+# ---------------------------------------------------------------------------
+
+class TestV09SpreadWithBothLegsInTheMoney(FifoTestCaseBase):
+    """A call spread that expires with both legs in the money is exercised
+    (shares bought at the lower strike) and assigned (shares sold at the
+    higher one) on the same day, for the same quantity of the same stock.
+    Date, underlying and quantity cannot tell the two deliveries apart; the
+    side can. Matched without it, the first delivery row in the file took the
+    first option event, and the two premiums changed places.
+    """
+
+    LONG_CALL = _option_on(STOCK, put_call="C", strike="40", expiry="2025-02-21",
+                           conid="900000211")
+    SHORT_CALL = _option_on(STOCK, put_call="C", strike="45", expiry="2025-02-21",
+                            conid="900000212")
+
+    @pytest.mark.parametrize("delivery_listed_first", ["buy", "sell"])
+    def test_the_result_does_not_depend_on_the_order_of_the_rows(
+            self, delivery_listed_first):
+        bought = _trade_row(**STOCK, trade_date="2025-02-21", quantity="100",
+                            price="40", buy_sell="BUY", open_close="O",
+                            tx_id="2005", notes="Ex")
+        sold = _trade_row(**STOCK, trade_date="2025-02-21", quantity="-100",
+                          price="45", buy_sell="SELL", open_close="C",
+                          tx_id="2006", notes="A")
+        deliveries = [bought, sold] if delivery_listed_first == "buy" else [sold, bought]
+        trades = [
+            # Long call bought for 6.00: 600 paid + 1 commission = 601.
+            _trade_row(**self.LONG_CALL, trade_date="2025-02-03", quantity="1",
+                       price="6.00", buy_sell="BUY", open_close="O", tx_id="2001"),
+            # Short call written for 2.50: 250 received - 1 commission = 249.
+            _trade_row(**self.SHORT_CALL, trade_date="2025-02-03", quantity="-1",
+                       price="2.50", buy_sell="SELL", open_close="O", tx_id="2002"),
+            _trade_row(**self.LONG_CALL, trade_date="2025-02-21", quantity="-1",
+                       price="0", buy_sell="SELL", open_close="C", tx_id="2003",
+                       commission="0", notes="Ex"),
+            _trade_row(**self.SHORT_CALL, trade_date="2025-02-21", quantity="1",
+                       price="0", buy_sell="BUY", open_close="C", tx_id="2004",
+                       commission="0", notes="A"),
+            *deliveries,
+        ]
+
+        out = self._run_pipeline(trades_data=trades, tax_year=TAX_YEAR,
+                                 custom_rate_provider=_one_to_one(),
+                                 country_code="cz")
+
+        (rgl,) = out.realized_gains_losses
+        # bought by exercise: 100 x 40 + 1 commission + 601 paid for the call
+        assert rgl.total_cost_basis_eur == Decimal("4602.00")
+        # sold by assignment: 100 x 45 - 1 commission + 249 kept from the call
+        assert rgl.total_realization_value_eur == Decimal("4748.00")
+        # = the 500 the spread is worth, less 352 net premium and 2 commissions
+        assert rgl.gross_gain_loss_eur == Decimal("146.00")
+
+
+class _MapResolver:
+    def __init__(self, *assets):
+        self._by_id = {a.internal_asset_id: a for a in assets}
+
+    def get_asset_by_id(self, asset_id):
+        return self._by_id.get(asset_id)
+
+
+class TestV09DeliverySideFollowsFromTheOptionAndTheEvent:
+    """The holder of a call buys and the holder of a put sells; the writer
+    who is assigned takes the other side."""
+
+    @pytest.mark.parametrize("event_class, put_call, delivered_by", [
+        (OptionExerciseEvent, "C", "buy"),
+        (OptionAssignmentEvent, "P", "buy"),
+        (OptionExerciseEvent, "P", "sell"),
+        (OptionAssignmentEvent, "C", "sell"),
+    ])
+    def test_only_the_trade_on_the_expected_side_is_linked(
+            self, event_class, put_call, delivered_by):
+        stock = Stock(ibkr_symbol="SYNA", ibkr_conid="900000201")
+        option = Option(option_type=put_call, ibkr_symbol=f"SYNA {put_call}",
+                        underlying_ibkr_conid="900000201",
+                        multiplier=Decimal("100"))
+        event = event_class(asset_internal_id=option.internal_asset_id,
+                            event_date="2025-02-21",
+                            quantity_contracts=Decimal("1"),
+                            ibkr_transaction_id="2100")
+
+        def delivery(side, tx_id):
+            buying = side == "buy"
+            return TradeEvent(
+                asset_internal_id=stock.internal_asset_id, event_date="2025-02-21",
+                quantity=Decimal("100") if buying else Decimal("-100"),
+                price_foreign_currency=Decimal("40"),
+                event_type=(FinancialEventType.TRADE_BUY_LONG if buying
+                            else FinancialEventType.TRADE_SELL_LONG),
+                ibkr_transaction_id=tx_id,
+            )
+
+        other_side = "sell" if delivered_by == "buy" else "buy"
+        wrong = delivery(other_side, "2101")     # listed first
+        right = delivery(delivered_by, "2102")
+
+        linker = OptionTradeLinker(_MapResolver(stock, option))
+        linker.link_trades([wrong, right], linker._build_option_event_lookup([event]))
+
+        assert wrong.related_option_event_id is None
+        assert right.related_option_event_id == event.event_id
