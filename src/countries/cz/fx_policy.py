@@ -111,6 +111,12 @@ class CzCurrencyConverter:
     def policy(self) -> CzFxPolicyConfig:
         return self._policy
 
+    @property
+    def provider(self) -> ExchangeRateProvider:
+        """The rate source behind this converter (e.g. to ask it afterwards
+        which of the rates it served it could not verify)."""
+        return self._provider
+
     # -- public API ---------------------------------------------------------
 
     def convert_to_czk(

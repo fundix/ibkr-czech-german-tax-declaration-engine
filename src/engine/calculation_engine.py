@@ -82,6 +82,17 @@ def _format_asset_info(asset_obj) -> str:
     symbol = asset_obj.ibkr_symbol or "N/A"
     return f"'{desc}' (Symbol: {symbol})"
 
+def _option_events_with_delivery(financial_events: List[FinancialEvent]) -> set:
+    """Ids of the exercise/assignment events some trade is linked to.
+
+    Read off the trades themselves, so it holds however the link was made.
+    """
+    return {
+        event.related_option_event_id for event in financial_events
+        if isinstance(event, TradeEvent) and event.related_option_event_id is not None
+    }
+
+
 def _apply_historical_option_premiums(
     historical_events_by_asset: DefaultDict[uuid.UUID, List[FinancialEvent]],
     asset_resolver: AssetResolver,
@@ -117,6 +128,9 @@ def _apply_historical_option_premiums(
 
     option_ledgers: Dict[uuid.UUID, FifoLedger] = {}
     pending: Dict[uuid.UUID, Dict[str, Any]] = {}
+    # A delivery carries the date of its exercise/assignment, so a prior-year
+    # event's delivery is among these events too.
+    option_events_with_delivery = _option_events_with_delivery(all_hist)
 
     def _ledger_for(option_asset: Option) -> FifoLedger:
         led = option_ledgers.get(option_asset.internal_asset_id)
@@ -154,6 +168,10 @@ def _apply_historical_option_premiums(
                     details = led.consume_long_option_get_cost(event.quantity_contracts)
                 else:
                     details = led.consume_short_option_get_proceeds(event.quantity_contracts)
+                if event.event_id not in option_events_with_delivery:
+                    # Nothing was delivered (cash settlement): the contracts
+                    # are gone and no share leg is waiting for their premium.
+                    continue
                 premium = sum(
                     (d.consumed_quantity * d.value_per_unit_eur for d in details),
                     Decimal(0),
@@ -236,7 +254,8 @@ def run_main_calculations(
     merger_policy: Optional[Any] = None,
     security_price_provider: Optional[Any] = None,
     pairing_method: PairingMethod = PairingMethod.FIFO,
-) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger], List[Dict[str, Any]]]:
+    hold_unapplied_shares_as_placeholders: bool = False,
+) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Runs the main calculation logic:
     1. Separates historical and current year events.
@@ -251,6 +270,13 @@ def run_main_calculations(
     6. Returns calculated results (Realized G/L, Vorabpauschale), processed events, and EOY mismatch count.
     7. The sixth element names each EOY mismatch (symbol, description,
        calculated and reported quantity) for the blocking review note.
+    8. The seventh names each corporate action that moves shares but that no
+       processor applies (see GenericCorporateActionProcessor). The shares
+       such an action adds are held as zero-cost placeholder lots only when
+       ``hold_unapplied_shares_as_placeholders`` is set -- by a country layer
+       whose result reports these actions.
+    9. The eighth names each option exercise or assignment that had neither a
+       delivery trade nor an amount on its row and was closed at zero.
     """
     pairing_method = coerce_pairing_method(pairing_method)
     logger.info(f"Starting main calculation engine for tax year {tax_year} with {len(financial_events)} events (pairing: {pairing_method.value}).")
@@ -263,9 +289,19 @@ def run_main_calculations(
     current_year_events: List[FinancialEvent] = []
 
     pending_option_adjustments: Dict[uuid.UUID, Tuple[Decimal, uuid.UUID, str]] = {}
+    # Exercises and assignments that some trade delivers the shares of. Every
+    # other one delivers nothing -- a cash-settled index option -- and is
+    # closed on the option itself instead of waiting for a share leg.
+    option_events_with_delivery = _option_events_with_delivery(financial_events)
     # Merger event keys already applied in this run. Nothing upstream dedupes
     # corporate-action rows, and applying one twice would rescale the lots again.
     applied_merger_keys: set = set()
+    # Corporate actions that move shares and that no processor applies (a
+    # spin-off, a tender, ...): one entry each, for a blocking review note.
+    unapplied_corporate_actions: List[Dict[str, Any]] = []
+    # Exercises and assignments that came with neither a delivery trade nor an
+    # amount on their own row, and were therefore closed on the option at zero.
+    option_events_closed_at_zero: List[Dict[str, Any]] = []
 
     tax_year_start_date_str = f"{tax_year}-01-01"
     tax_year_end_date_str = f"{tax_year}-12-31"
@@ -274,10 +310,10 @@ def run_main_calculations(
 
     if not tax_year_start_date_obj:
         logger.error(f"Could not parse tax year start date: {tax_year_start_date_str}. Aborting calculations.")
-        return [], [], financial_events, 0, {}, []
+        return [], [], financial_events, 0, {}, [], [], []
     if not tax_year_end_date_obj:
         logger.error(f"Could not parse tax year end date: {tax_year_end_date_str}. Aborting calculations.")
-        return [], [], financial_events, 0, {}, []
+        return [], [], financial_events, 0, {}, [], [], []
 
     logger.info("Separating historical and current year events...")
     filtered_events_count = 0
@@ -450,6 +486,8 @@ def run_main_calculations(
                 context: Dict[str, Any] = {
                     'asset_resolver': asset_resolver,
                     'pending_option_adjustments': pending_option_adjustments,
+                    'option_events_with_delivery': option_events_with_delivery,
+                    'option_events_closed_at_zero': option_events_closed_at_zero,
                     'currency_converter': currency_converter,
                     'tax_classifier': tax_classifier,
                     'merger_policy': merger_policy,
@@ -459,6 +497,8 @@ def run_main_calculations(
                     # target is a loud refusal rather than a silent None.
                     'ledger_for': _make_event_ledger_accessor(event, fifo_ledgers),
                     'applied_merger_keys': applied_merger_keys,
+                    'unapplied_corporate_actions': unapplied_corporate_actions,
+                    'hold_unapplied_shares_as_placeholders': hold_unapplied_shares_as_placeholders,
                     # Past closing prices, for valuing a merger the broker
                     # reports but does not price. Injected like the FX
                     # converter above — also network-backed, also not the
@@ -527,10 +567,11 @@ def run_main_calculations(
 
     logger.info("Finished processing current year events.")
     if pending_option_adjustments:
-        # Any adjustment left here means an option premium is NOT reflected
-        # anywhere (neither an RGL nor a stock-basis adjustment) — the linked
-        # delivery trade was never processed (missing data, cash settlement,
-        # or a linking failure). This silently misstates the tax base.
+        # Any adjustment left here means part of an option premium is NOT
+        # reflected anywhere (neither an RGL nor a share-basis adjustment):
+        # the linked delivery covered less than the contracts call for. (An
+        # event with no delivery at all never waits here -- it is closed on
+        # the option itself.) This silently misstates the tax base.
         for opt_event_id, adj in pending_option_adjustments.items():
             logger.error(
                 f"UNCONSUMED option premium adjustment for option event {opt_event_id}: "
@@ -538,7 +579,7 @@ def run_main_calculations(
                 f"option asset {adj['option_asset_id']} (type {adj['option_type']}), "
                 f"undelivered stock qty {adj['remaining_stock_qty']} of {adj['expected_stock_qty']}. "
                 "The premium is missing from the results — review the input data "
-                "(partial fills, cash settlement, missing delivery trades)."
+                "(a delivery reported in partial fills that do not add up)."
             )
     else:
         logger.info("All pending option adjustments were consumed.")
@@ -614,7 +655,8 @@ def run_main_calculations(
     logger.info(f"Calculation engine produced {len(vorabpauschale_data_items)} VorabpauschaleData records (expected 0 for 2023).")
 
     return (realized_gains_losses, vorabpauschale_data_items, processed_income_events_for_output,
-            eoy_mismatch_errors, fifo_ledgers, eoy_mismatch_details)
+            eoy_mismatch_errors, fifo_ledgers, eoy_mismatch_details,
+            unapplied_corporate_actions, option_events_closed_at_zero)
 
 
 def _create_excess_dividend_event(original_event, excess_amount, asset_object):

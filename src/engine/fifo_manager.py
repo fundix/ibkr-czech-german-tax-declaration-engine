@@ -949,6 +949,31 @@ class FifoLedger:
         self.lots[:] = long_lots
         self.short_lots[:] = short_lots
 
+    def take_over_lots(
+        self,
+        long_lots: List[FifoLot],
+        short_lots: List[ShortFifoLot],
+        carried_from_prefix: str,
+    ) -> None:
+        """Book lots that continue under this asset after an identifier change.
+
+        A split that comes with a new ISIN or conid leaves the holding what it
+        was -- the same purchases, at the same cost, on the same dates -- under
+        another asset. The lots are taken as they are (the split has already
+        rescaled them): nothing is re-derived, so the cost basis and the
+        holding period run on unbroken. Only their origin is noted.
+        """
+        for lot in [*long_lots, *short_lots]:
+            if not lot.carried_from:
+                lot.carried_from = f"{carried_from_prefix}:{lot.source_transaction_id}"
+        self.lots.extend(long_lots)
+        self.lots.sort(key=_long_lot_sort_key)
+        self.short_lots.extend(short_lots)
+        self.short_lots.sort(key=lambda lot: (
+            parse_ibkr_date(lot.opening_date) or datetime.min.date(),
+            numeric_tx_sort_key(lot.source_transaction_id),
+        ))
+
     def receive_carried_lots_from_merger(
         self,
         *,
@@ -1162,6 +1187,35 @@ class FifoLedger:
             ))
         self.lots.sort(key=_long_lot_sort_key)
         return sum((q for q in quantities if q > Decimal(0)), Decimal(0))
+
+    def add_placeholder_lot(
+        self,
+        *,
+        quantity: Decimal,
+        acquisition_date: str,
+        source_transaction_id: str,
+    ) -> None:
+        """Hold shares whose cost the inputs do not give, at zero cost.
+
+        For shares credited by a corporate action the engine cannot apply (a
+        spin-off): that they are held is a fact, what they cost is not on the
+        row. Zero is not a valuation -- it is the one figure that cannot
+        understate a later gain -- and both dates are marked estimated, so a
+        disposal from this lot is never exempted on its holding period and
+        reaches the country layer flagged for review. Without the lot a sale
+        of the shares would find nothing to consume and end the run.
+        """
+        zero = self.ctx.create_decimal(0)
+        self.lots.append(FifoLot(
+            acquisition_date=acquisition_date,
+            quantity=quantity.quantize(global_config.PRECISION_QUANTITY, context=self.ctx),
+            unit_cost_basis_eur=zero,
+            total_cost_basis_eur=zero,
+            source_transaction_id=source_transaction_id,
+            acquisition_date_estimated=True,
+            holding_period_start_estimated=True,
+        ))
+        self.lots.sort(key=_long_lot_sort_key)
 
     def add_long_lot(self, trade_event: TradeEvent):
         if trade_event.event_type != FinancialEventType.TRADE_BUY_LONG: return

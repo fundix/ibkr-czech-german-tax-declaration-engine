@@ -320,3 +320,18 @@ cached runs are recomputed rather than served.
 | Per-state Příloha 3 sheets (§38f odst. 8) | **IMPLEMENTED** — `per_state_credit` on the liability summary; the sheets sum to ř. 328 |
 | PDF filing-support report | **IMPLEMENTED** — `exporters/pdf_exporter.py`, `--output-pdf`; a podklad for manual filing, not the form itself |
 | Official DAP form (PDF vzor / EPO XML) generation | **NOT IMPLEMENTED** — figures must be typed into the form or EPO by hand |
+
+---
+
+## Option delivery and settlement; corporate actions without a rule
+
+What the engine does with the cases fixed after the 2026-11 audit (V08, V09,
+X14, V23, X17). None of these rows is a settled Czech tax position: each says
+what is computed and what is deliberately left open.
+
+| Rule | Status |
+|------|--------|
+| Option exercised or assigned with a share delivery — a stock **or an ETF** | **IMPLEMENTED, interpretation open** — the premium moves into the cost (assigned put, exercised call) or the proceeds (assigned call, exercised put) of the delivered shares, as in the German model the engine came from. Whether a premium *received* must instead be taxed as derivative income in the year of assignment is an open question for the tax advisor |
+| Option exercised or assigned with **no** delivery (cash-settled index option, or a delivery row that is missing) | **IMPLEMENTED** — a closing trade of the option at the amount on its own row, in `CZ_10_OPTIONS`. When neither a delivery nor an amount is there, the option closes at zero and its premium is realised on the option; that means a trade or a settlement amount is missing, and the result says so in the blocking section `option_events_closed_at_zero` ("Opce uplatněné nebo přidělené bez dodávky") |
+| Split reported as two rows (new ISIN) | **IMPLEMENTED** — one event; the lots keep cost, acquisition date and holding period under the new asset. A split of this kind that happened *before* the tax year is not replayed across assets: the new asset's opening lots then come from the start-of-year snapshot |
+| Corporate action with no handler that moves shares (spin-off `SO`, tender `TO`, delisting, …) | **NOT APPLIED — blocks filing** — listed in the result section `unapplied_corporate_actions` ("Neuplatněné korporátní akce"). Shares added are held as a placeholder lot at **zero cost** with both dates marked estimated, so a sale of them is computed against zero and stays `PENDING_MANUAL_REVIEW` (unless the year is under the annual limit, which exempts it whatever the cost); shares removed stay in the ledger. No cost is split off the parent of a spin-off and no income in kind is booked — choosing between those treatments is for the tax advisor |

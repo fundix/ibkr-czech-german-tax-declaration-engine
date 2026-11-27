@@ -49,7 +49,9 @@ celou historii — bootstrap přes „První rok obchodování" ji stáhne sám.
 > Custom Date Range. Když appka stahuje **běžící rok**, žádný rozsah
 > nepředává a spoléhá právě na uložený Period ([services.py](../src/webapp/services.py)) —
 > s „Last Business Day" by dostala jediný den. Pro historii appka posílá
-> `fd`/`td` po letech sama.
+> `fd`/`td` po letech sama — a stejně tak po Novém roce stáhne právě
+> uzavřený rok znovu za celé období 1. 1.–31. 12., protože výpisy stažené
+> během roku končí dnem před stažením.
 
 **General Configuration:**
 

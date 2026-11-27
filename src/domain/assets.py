@@ -124,6 +124,22 @@ class Asset:
         return self.internal_asset_id == other.internal_asset_id
 
 
+# What an option can deliver when it is exercised or assigned. A fund belongs
+# here as much as a stock: an index ETF is the commonest underlying there is.
+# The event factory, the option-to-delivery linker and the trade processor all
+# ask this one question, so a category added here is accepted by all three --
+# an asset that only some of them accepted lost its premium without a trace.
+OPTION_DELIVERABLE_CATEGORIES = frozenset({
+    AssetCategory.STOCK,
+    AssetCategory.INVESTMENT_FUND,
+})
+
+
+def is_option_deliverable(asset: Optional["Asset"]) -> bool:
+    """Whether *asset* can be the share leg of an option exercise or assignment."""
+    return asset is not None and asset.asset_category in OPTION_DELIVERABLE_CATEGORIES
+
+
 @dataclass(eq=False) # Inherit __eq__ and __hash__ from Asset
 class Stock(Asset):
     # Specific attributes for stocks, if any, beyond base Asset

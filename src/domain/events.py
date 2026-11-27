@@ -178,15 +178,27 @@ class WithholdingTaxEvent(FinancialEvent):
 class CorporateActionEvent(FinancialEvent):
     _: KW_ONLY
     ca_action_id_ibkr: Optional[str] = None # IBKR's ActionID for this corporate action
+    # IBKR's code for the kind of action on the row (FS, TC, SO, ...).
+    ca_type_ibkr: Optional[str] = None
+    # Set only on an action that no processor applies (a spin-off, a tender,
+    # a delisting, ...): the net number of shares it adds to (+) or removes
+    # from (-) the asset. What those shares cost or yielded is not on the row,
+    # so the ledger cannot follow the action -- the engine reports it for
+    # manual review instead of dropping it. None on every action it applies.
+    unapplied_quantity_change: Optional[Decimal] = None
     # event_type will be one of CORP_*
     # Specific details will be in subclasses.
     # gross_amount_foreign_currency might be used for cash components of CAs.
     def __init__(self, asset_internal_id: uuid.UUID, event_date: str, *,
                  event_type: FinancialEventType, # Ensure event_type is passed
                  ca_action_id_ibkr: Optional[str] = None,
+                 ca_type_ibkr: Optional[str] = None,
+                 unapplied_quantity_change: Optional[Decimal] = None,
                  **kwargs_for_parent_kw_only):
         super().__init__(asset_internal_id, event_date, event_type=event_type, **kwargs_for_parent_kw_only)
         self.ca_action_id_ibkr = ca_action_id_ibkr
+        self.ca_type_ibkr = ca_type_ibkr
+        self.unapplied_quantity_change = unapplied_quantity_change
 
     def __post_init__(self):
         super().__post_init__()
@@ -195,14 +207,21 @@ class CorporateActionEvent(FinancialEvent):
 class CorpActionSplitForward(CorporateActionEvent):
     _: KW_ONLY
     new_shares_per_old_share: Decimal # e.g., 2 for a 2-for-1 split
+    # The asset the holding continues under when the split comes with a new
+    # ISIN or conid and the broker books the new shares as another asset. None
+    # for the ordinary split, which stays where it is. The lots are rescaled
+    # and then moved as they are: same cost, same acquisition date.
+    new_asset_internal_id: Optional[uuid.UUID] = None
 
     def __init__(self, asset_internal_id: uuid.UUID, event_date: str, *,
                  new_shares_per_old_share: Decimal,
+                 new_asset_internal_id: Optional[uuid.UUID] = None,
                  **kwargs_for_parent_kw_only):
         super().__init__(asset_internal_id, event_date,
                          event_type=FinancialEventType.CORP_SPLIT_FORWARD, # Renamed
                          **kwargs_for_parent_kw_only)
         self.new_shares_per_old_share = new_shares_per_old_share
+        self.new_asset_internal_id = new_asset_internal_id
 
     def __post_init__(self):
         super().__post_init__()
@@ -305,12 +324,24 @@ class OptionLifecycleEvent(FinancialEvent):
     _: KW_ONLY
     quantity_contracts: Decimal # Number of option contracts involved
 
+    # The statement row of an exercise/assignment, read as a plain closing
+    # trade of the option: sold (exercise) or bought back (assignment) at the
+    # row's own price, with its commission and tax. That is all the row is
+    # when nothing is delivered -- a cash-settled contract pays its settlement
+    # amount on this very row -- and it stays unused when shares are delivered
+    # and the premium travels with them instead. It shares the event's
+    # event_id and is not part of the event list; enrichment converts it
+    # together with its event.
+    settlement_trade: Optional[TradeEvent] = None
+
     def __init__(self, asset_internal_id: uuid.UUID, event_date: str, *,
                  event_type: FinancialEventType, # Ensure event_type is passed by subclasses
                  quantity_contracts: Decimal,
+                 settlement_trade: Optional[TradeEvent] = None,
                  **kwargs_for_parent_kw_only):
         super().__init__(asset_internal_id, event_date, event_type=event_type, **kwargs_for_parent_kw_only)
         self.quantity_contracts = quantity_contracts
+        self.settlement_trade = settlement_trade
 
     def __post_init__(self):
         super().__post_init__()

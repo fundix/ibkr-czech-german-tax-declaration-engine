@@ -70,7 +70,99 @@ def run_cz_aggregation(
         getattr(processing_results, "eoy_mismatch_details", None) or [])
     if eoy is not None:
         result.sections[eoy.section_key] = eoy
+    unapplied = unapplied_corporate_actions_section(
+        getattr(processing_results, "unapplied_corporate_actions", None) or [])
+    if unapplied is not None:
+        result.sections[unapplied.section_key] = unapplied
+    closed_at_zero = option_events_closed_at_zero_section(
+        getattr(processing_results, "option_events_closed_at_zero", None) or [])
+    if closed_at_zero is not None:
+        result.sections[closed_at_zero.section_key] = closed_at_zero
     return result
+
+
+def option_events_closed_at_zero_section(
+    events: List[Dict[str, Any]],
+) -> Optional[TaxResultSection]:
+    """A blocking review section for option exercises and assignments that
+    came with neither a delivery trade nor an amount, or None when there are
+    none.
+
+    An exercise or assignment either delivers shares -- then its premium moves
+    into their cost or proceeds -- or settles in cash on the option's own row.
+    One that shows neither was closed on the option at zero so that its premium
+    is not lost, but something is missing from the statements: the delivery
+    trade, or the settlement amount.
+    """
+    if not events:
+        return None
+    listed = "; ".join(
+        f"{e.get('symbol')}"
+        + (f" ({e['description']})" if e.get("description") else "")
+        + f": {e.get('event')} of {e.get('contracts')} contract(s) on {e.get('event_date')}"
+        + f", transaction {e.get('transaction_id') or '?'}"
+        for e in events
+    )
+    note = (
+        f"REVIEW REQUIRED — DO NOT FILE: {len(events)} option exercise(s)/assignment(s) "
+        f"came with neither a delivery trade nor an amount on their own row — {listed}. "
+        "Each was closed on the option at zero, so its premium is in the result as an "
+        "option gain or loss on that day. If shares were delivered, their trade is "
+        "missing from the export or could not be matched to the option, and the "
+        "premium is NOT in their cost or proceeds; if the contract was settled in "
+        "cash, the settlement amount is missing."
+    )
+    return TaxResultSection(
+        section_key="option_events_closed_at_zero",
+        label="Opce uplatněné nebo přidělené bez dodávky",
+        line_items={"event_count": Decimal(len(events))},
+        notes=[note],
+    )
+
+
+def unapplied_corporate_actions_section(
+    actions: List[Dict[str, Any]],
+) -> Optional[TaxResultSection]:
+    """A blocking review section for corporate actions the engine did not
+    apply, or None when there are none.
+
+    A spin-off, a tender or a delisting moves shares, but what the new shares
+    cost -- or what the old ones yielded, and how that is taxed -- is not on
+    the statement row, and the engine has no rule for it. Such an action used
+    to vanish; now the run completes and this note says what is missing.
+    Shares it added are held at ZERO cost as a placeholder: the acquisition
+    cost of spun-off shares (a share of the parent's cost, or their value as
+    income in kind) and whether the parent's holding period carries over is a
+    question for the tax advisor, not something to guess here.
+    """
+    if not actions:
+        return None
+    listed = "; ".join(
+        f"{a.get('symbol')}"
+        + (f" ({a['description']})" if a.get("description") else "")
+        + f": {a.get('quantity_change'):+} on {a.get('event_date')}"
+        + f", type {a.get('ca_type') or '?'}, action {a.get('action_id') or '?'}"
+        + (f" [{a['ca_description']}]" if a.get("ca_description") else "")
+        + (" — held at zero cost" if a.get("placeholder_lot") else " — ledger left as it was")
+        for a in actions
+    )
+    note = (
+        f"REVIEW REQUIRED — DO NOT FILE: {len(actions)} corporate action(s) changed a "
+        f"position in a way the engine has no rule for and did not apply — {listed}. "
+        "Shares ADDED by such an action are held as a placeholder lot at ZERO cost "
+        "with an unestablished acquisition date: a sale of them is computed against "
+        "that zero cost and cannot pass the time test, and the cost of a related "
+        "holding (the parent of a spin-off) is NOT reduced. Their real acquisition "
+        "cost and holding period have to be determined by hand. Where the ledger was "
+        "left as it was, shares the action took away are still in it and whatever "
+        "was received for them is not in the results at all."
+    )
+    return TaxResultSection(
+        section_key="unapplied_corporate_actions",
+        label="Neuplatněné korporátní akce",
+        line_items={"action_count": Decimal(len(actions))},
+        notes=[note],
+    )
 
 
 def eoy_reconciliation_section(
@@ -116,10 +208,17 @@ def run_cz_compare(
     processing_results: "ProcessingOutput",
     tax_year: int,
     statement_of_funds_path: "str | None" = None,
+    daily_fx_provider=None,
 ) -> CzFxModeComparison:
-    """Aggregate under BOTH FX modes and return the comparison."""
+    """Aggregate under BOTH FX modes and return the comparison.
+
+    ``daily_fx_provider`` overrides the daily leg's provider, as
+    ``fx_provider`` does in ``run_cz_aggregation`` — so the caller can ask it
+    afterwards how far its rates could be trusted, and tests can pin them.
+    """
     return CzFxModeComparison(
         daily=run_cz_aggregation(processing_results, tax_year, "daily",
+                                 fx_provider=daily_fx_provider,
                                  statement_of_funds_path=statement_of_funds_path),
         uniform=run_cz_aggregation(processing_results, tax_year, "uniform",
                                    statement_of_funds_path=statement_of_funds_path),

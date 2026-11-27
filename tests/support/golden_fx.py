@@ -106,3 +106,15 @@ class GoldenCnbProvider(ExchangeRateProvider):
 
     def get_max_fallback_days(self) -> int:
         return MAX_FALLBACK_DAYS
+
+
+def golden_cz_converter():
+    """A CZK converter on the pinned ČNB rates, for ``RunService``.
+
+    The service's own default converter sits on the real rate cache under
+    ``cache/`` — see the ``no_real_cnb_cache`` fixture in conftest.py.
+    """
+    from src.countries.cz.config import CzTaxConfig
+    from src.countries.cz.fx_policy import CzCurrencyConverter
+
+    return CzCurrencyConverter(GoldenCnbProvider(), CzTaxConfig().fx_policy)

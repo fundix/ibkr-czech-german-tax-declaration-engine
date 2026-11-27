@@ -1,11 +1,15 @@
 # src/parsers/domain_event_factory.py
 import logging
 import re
-from decimal import Decimal
-from typing import List, Optional, Set, Union, Tuple # Ensure Tuple is here
+import uuid
+from decimal import Decimal, ROUND_FLOOR
+from typing import Dict, List, Optional, Set, Union, Tuple # Ensure Tuple is here
 from datetime import date, datetime
 
-from src.domain.assets import Asset, Option, CashBalance, InvestmentFund, Derivative, Stock, Bond
+from src.domain.assets import (
+    Asset, Option, CashBalance, InvestmentFund, Derivative, Stock, Bond,
+    is_option_deliverable,
+)
 from src.domain.events import (
     FinancialEvent, TradeEvent, CashFlowEvent, WithholdingTaxEvent,
     CorporateActionEvent, CorpActionSplitForward, CorpActionMergerCash,
@@ -19,8 +23,13 @@ from src.parsers.raw_models import (
     RawTradeRecord, RawCashTransactionRecord, RawCorporateActionRecord
 )
 from src.utils.type_utils import parse_ibkr_date, parse_ibkr_datetime, safe_decimal
+import src.config as global_config
 
 logger = logging.getLogger(__name__)
+
+# Two letters of the country, nine characters of the national number, one
+# check digit. No ticker has this shape.
+_ISIN_SHAPE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 
 class DomainEventFactory:
     def __init__(self, asset_resolver: AssetResolver):
@@ -144,6 +153,8 @@ class DomainEventFactory:
                 logger.error(f"Option lifecycle event ({option_event_type.name}) for {asset.get_classification_key()} on {event_date_str} lacks a transaction ID. Skipping event.")
                 return None
 
+            # Zero for an expiry. An exercise or assignment gets the row's own
+            # amount below: its cash settlement, or zero when shares are delivered.
             gross_amount_val = Decimal('0.0')
 
             common_args = {
@@ -168,12 +179,115 @@ class DomainEventFactory:
             if option_event:
                 logger.debug(f"Created {option_event_type.name} for option {asset.get_classification_key()} from trade ID {tx_id_for_event}, Contracts: {qty_contracts}")
 
+                if isinstance(option_event, (OptionExerciseEvent, OptionAssignmentEvent)):
+                    # The same row read as a closing trade: what it is when
+                    # nothing is delivered. A cash-settled contract (an index
+                    # option) pays its settlement amount on this row, so the
+                    # row's price, commission and tax must not be dropped. An
+                    # exercise sells the long option, an assignment buys the
+                    # short one back -- the direction comes from the event, so
+                    # an odd Buy/Sell or Open/Close cannot turn it round.
+                    exercised = isinstance(option_event, OptionExerciseEvent)
+                    option_event.settlement_trade = self._trade_event_from_row(
+                        raw_trade, asset, event_date_str, tx_id_for_event,
+                        event_type=(FinancialEventType.TRADE_SELL_LONG if exercised
+                                    else FinancialEventType.TRADE_BUY_SHORT_COVER),
+                        quantity=-qty_contracts if exercised else qty_contracts,
+                        event_id=option_event.event_id,
+                    )
+                    option_event.gross_amount_foreign_currency = (
+                        option_event.settlement_trade.gross_amount_foreign_currency)
+
                 self.processed_ibkr_trade_ids_for_options.add(tx_id_for_event)
                 if raw_trade.trade_id and raw_trade.trade_id != raw_trade.transaction_id:
                     self.processed_ibkr_trade_ids_for_options.add(raw_trade.trade_id)
 
                 return option_event
         return None
+
+    def _trade_event_from_row(self, rt: RawTradeRecord, asset: Asset, event_date_str: str,
+                              tx_id_primary: str, event_type: FinancialEventType,
+                              quantity: Optional[Decimal] = None,
+                              event_id: Optional[uuid.UUID] = None) -> TradeEvent:
+        """The TradeEvent a Trades row describes: its quantity, price, gross
+        amount, commission and transaction tax.
+
+        *quantity* and *event_id* are given only when an option's exercise or
+        assignment row is read as a closing trade (``_process_option_trade``):
+        the direction then follows from the event rather than from the row's
+        own sign, and the trade shares the event's id.
+        """
+        identity = {} if event_id is None else {"event_id": event_id}
+        trade_quantity_val = safe_decimal(rt.quantity, default=Decimal('0'))
+        trade_price = safe_decimal(rt.trade_price, default=Decimal('0.0'))
+        calculated_gross_amount_raw_source = rt.trade_money if rt.trade_money is not None else rt.proceeds
+        calculated_gross_amount = safe_decimal(calculated_gross_amount_raw_source)
+
+        if calculated_gross_amount is None:
+            asset_multiplier_trade = getattr(asset, 'multiplier', Decimal(1))
+            asset_multiplier_trade = safe_decimal(asset_multiplier_trade, default=Decimal(1))
+            if asset_multiplier_trade == Decimal(0): asset_multiplier_trade = Decimal(1)
+
+            if trade_price is not None and trade_quantity_val is not None:
+                # Initial calculation: Qty * Price
+                raw_calculated_gross = trade_quantity_val.copy_abs() * trade_price
+                
+                # Apply multiplier if it's significant (not 1 or 0)
+                if asset_multiplier_trade != Decimal(1):
+                    raw_calculated_gross *= asset_multiplier_trade
+                    logger.debug(f"Trade {tx_id_primary}: Applied multiplier {asset_multiplier_trade}. Intermediate Q*P*M: {raw_calculated_gross}")
+
+                if isinstance(asset, Bond) or asset.asset_category == AssetCategory.BOND:
+                    # Bond prices are typically percentages of nominal value.
+                    # Gross value = (Nominal Quantity * Percentage Price / 100) * Multiplier
+                    # Since multiplier might already be applied above if it's not 1,
+                    # we just need to divide by 100 here.
+                    # If multiplier was 1, raw_calculated_gross = Qty * Price. We need (Qty * Price / 100).
+                    calculated_gross_amount = raw_calculated_gross / Decimal(100)
+                    logger.debug(f"Trade {tx_id_primary} (Bond {asset.get_classification_key()}): "
+                                 f"Applied /100 for percentage price. Original Q*P*(M if applicable): {raw_calculated_gross}, "
+                                 f"Final Gross amount: {calculated_gross_amount}")
+                else:
+                    calculated_gross_amount = raw_calculated_gross
+                    logger.debug(f"Trade {tx_id_primary} (Non-Bond {asset.get_classification_key()}): "
+                                 f"Calculated gross amount {calculated_gross_amount} from Qty*Price*(Multiplier if applicable).")
+            else:
+                logger.warning(f"Trade {tx_id_primary} for {asset.get_classification_key()} missing proceeds/trade_money and price/quantity for gross amount calculation. Defaulting gross amount to 0.")
+                calculated_gross_amount = Decimal('0.0')
+        else:
+            logger.debug(f"Trade {tx_id_primary}: Using provided gross amount from TradeMoney/Proceeds: {calculated_gross_amount} (Source: '{calculated_gross_amount_raw_source}')")
+
+
+        # IBKR signs IBCommission from the cash side: negative when it
+        # charged you, positive on the occasional rebate. Downstream
+        # wants a COST, so flip it. Taking the magnitude instead would
+        # book a rebate as another fee -- raising a basis and lowering
+        # proceeds by the very amount IBKR paid back.
+        commission_val = Decimal('0.0') - safe_decimal(
+            rt.ib_commission, default=Decimal('0.0'))
+        # Taxes (stamp duty) is signed the same way -- negative when
+        # charged -- and stored as a cost like the commission. Absent
+        # when the Flex query lacks the column; the Statement of Funds
+        # backfill (processing/trade_tax_backfill) covers that case.
+        transaction_tax_val = Decimal('0.0') - safe_decimal(
+            rt.taxes, default=Decimal('0.0'))
+
+        return TradeEvent(
+            asset_internal_id=asset.internal_asset_id,
+            event_date=event_date_str,
+            event_type=event_type,
+            quantity=trade_quantity_val if quantity is None else quantity,
+            price_foreign_currency=trade_price,
+            commission_foreign_currency=commission_val,
+            commission_currency=rt.ib_commission_currency or rt.currency_primary,
+            transaction_tax_foreign=transaction_tax_val,
+            local_currency=rt.currency_primary,
+            gross_amount_foreign_currency=calculated_gross_amount.copy_abs(),
+            ibkr_transaction_id=tx_id_primary,
+            ibkr_activity_description=rt.description,
+            ibkr_notes_codes=rt.notes_codes,
+            **identity
+        )
 
     def create_events_from_trades(self, raw_trades: List[RawTradeRecord]) -> Tuple[List[FinancialEvent], List[OptionLifecycleEvent], List[TradeEvent]]:
         logger.info(f"Processing {len(raw_trades)} raw trade records into domain events (linking deferred)...")
@@ -311,75 +425,7 @@ class DomainEventFactory:
                     logger.error(f"Skipping trade ID {tx_id_primary} due to error determining type: {e}")
                     continue
 
-                trade_quantity_val = safe_decimal(rt.quantity, default=Decimal('0'))
-                trade_price = safe_decimal(rt.trade_price, default=Decimal('0.0'))
-                calculated_gross_amount_raw_source = rt.trade_money if rt.trade_money is not None else rt.proceeds
-                calculated_gross_amount = safe_decimal(calculated_gross_amount_raw_source)
-
-                if calculated_gross_amount is None:
-                    asset_multiplier_trade = getattr(asset, 'multiplier', Decimal(1))
-                    asset_multiplier_trade = safe_decimal(asset_multiplier_trade, default=Decimal(1))
-                    if asset_multiplier_trade == Decimal(0): asset_multiplier_trade = Decimal(1)
-
-                    if trade_price is not None and trade_quantity_val is not None:
-                        # Initial calculation: Qty * Price
-                        raw_calculated_gross = trade_quantity_val.copy_abs() * trade_price
-                        
-                        # Apply multiplier if it's significant (not 1 or 0)
-                        if asset_multiplier_trade != Decimal(1):
-                            raw_calculated_gross *= asset_multiplier_trade
-                            logger.debug(f"Trade {tx_id_primary}: Applied multiplier {asset_multiplier_trade}. Intermediate Q*P*M: {raw_calculated_gross}")
-
-                        if isinstance(asset, Bond) or asset.asset_category == AssetCategory.BOND:
-                            # Bond prices are typically percentages of nominal value.
-                            # Gross value = (Nominal Quantity * Percentage Price / 100) * Multiplier
-                            # Since multiplier might already be applied above if it's not 1,
-                            # we just need to divide by 100 here.
-                            # If multiplier was 1, raw_calculated_gross = Qty * Price. We need (Qty * Price / 100).
-                            calculated_gross_amount = raw_calculated_gross / Decimal(100)
-                            logger.debug(f"Trade {tx_id_primary} (Bond {asset.get_classification_key()}): "
-                                         f"Applied /100 for percentage price. Original Q*P*(M if applicable): {raw_calculated_gross}, "
-                                         f"Final Gross amount: {calculated_gross_amount}")
-                        else:
-                            calculated_gross_amount = raw_calculated_gross
-                            logger.debug(f"Trade {tx_id_primary} (Non-Bond {asset.get_classification_key()}): "
-                                         f"Calculated gross amount {calculated_gross_amount} from Qty*Price*(Multiplier if applicable).")
-                    else:
-                        logger.warning(f"Trade {tx_id_primary} for {asset.get_classification_key()} missing proceeds/trade_money and price/quantity for gross amount calculation. Defaulting gross amount to 0.")
-                        calculated_gross_amount = Decimal('0.0')
-                else:
-                    logger.debug(f"Trade {tx_id_primary}: Using provided gross amount from TradeMoney/Proceeds: {calculated_gross_amount} (Source: '{calculated_gross_amount_raw_source}')")
-
-
-                # IBKR signs IBCommission from the cash side: negative when it
-                # charged you, positive on the occasional rebate. Downstream
-                # wants a COST, so flip it. Taking the magnitude instead would
-                # book a rebate as another fee -- raising a basis and lowering
-                # proceeds by the very amount IBKR paid back.
-                commission_val = Decimal('0.0') - safe_decimal(
-                    rt.ib_commission, default=Decimal('0.0'))
-                # Taxes (stamp duty) is signed the same way -- negative when
-                # charged -- and stored as a cost like the commission. Absent
-                # when the Flex query lacks the column; the Statement of Funds
-                # backfill (processing/trade_tax_backfill) covers that case.
-                transaction_tax_val = Decimal('0.0') - safe_decimal(
-                    rt.taxes, default=Decimal('0.0'))
-
-                trade_event = TradeEvent(
-                    asset_internal_id=asset.internal_asset_id,
-                    event_date=event_date_str,
-                    event_type=event_type,
-                    quantity=trade_quantity_val,
-                    price_foreign_currency=trade_price,
-                    commission_foreign_currency=commission_val,
-                    commission_currency=rt.ib_commission_currency or rt.currency_primary,
-                    transaction_tax_foreign=transaction_tax_val,
-                    local_currency=rt.currency_primary,
-                    gross_amount_foreign_currency=calculated_gross_amount.copy_abs(),
-                    ibkr_transaction_id=tx_id_primary,
-                    ibkr_activity_description=rt.description,
-                    ibkr_notes_codes=rt.notes_codes
-                )
+                trade_event = self._trade_event_from_row(rt, asset, event_date_str, tx_id_primary, event_type)
 
                 # "C;O" indicator: one trade CLOSES the existing position and
                 # OPENS the opposite one (flip). The type above is the CLOSE
@@ -394,12 +440,14 @@ class DomainEventFactory:
                         "will open the opposite position in FIFO."
                     )
 
-                if isinstance(asset, Stock) and rt.notes_codes:
+                # The share leg of an exercise/assignment: a stock or a fund
+                # (an option on an ETF delivers ETF shares).
+                if is_option_deliverable(asset) and rt.notes_codes:
                     notes_codes_parts_stock = {part.strip() for part in (rt.notes_codes or "").upper().split(';') if part.strip()}
                     # Exclude "IA" codes which are Internalized + Automatically Allocated (not option assignments)
                     if ('A' in notes_codes_parts_stock or 'EX' in notes_codes_parts_stock) and 'IA' not in notes_codes_parts_stock:
                         candidate_stock_trades_for_linking.append(trade_event)
-                        logger.debug(f"Collected stock trade {trade_event.ibkr_transaction_id} (Asset: {asset.get_classification_key()}) for later linking.")
+                        logger.debug(f"Collected delivery trade {trade_event.ibkr_transaction_id} (Asset: {asset.get_classification_key()}) for later linking.")
 
                 all_created_events.append(trade_event)
                 logger.debug(f"Created TradeEvent: {trade_event.event_type.name} for {asset.get_classification_key()}, Qty: {trade_event.quantity}, Price: {trade_event.price_foreign_currency}, Gross: {trade_event.gross_amount_foreign_currency} {trade_event.local_currency}")
@@ -577,6 +625,12 @@ class DomainEventFactory:
     def create_events_from_corporate_actions(self, raw_corporate_actions: List[RawCorporateActionRecord]) -> List[CorporateActionEvent]:
         logger.info(f"Processing {len(raw_corporate_actions)} raw corporate action records into domain events...")
         domain_ca_events: List[CorporateActionEvent] = []
+        # Every split event with the signed Quantity of its row: a split
+        # reported as two rows is put back together after the loop.
+        split_legs: List[Tuple[CorpActionSplitForward, Optional[Decimal]]] = []
+        # Every row that maps to no event of its own, with its signed Quantity:
+        # after the loop those that move shares are marked for manual review.
+        unmapped_rows: List[Tuple[CorporateActionEvent, Optional[Decimal]]] = []
 
         for idx, rca in enumerate(raw_corporate_actions):
             logger.debug(f"CA Record {idx+1}/{len(raw_corporate_actions)}: Data: Symbol='{rca.symbol}', Desc='{rca.description}', Type='{rca.type_ca}', ActionID='{rca.action_id_ibkr}'")
@@ -624,6 +678,9 @@ class DomainEventFactory:
             logger.debug(f"CA Record {idx+1}: Parsed CA Type from file: '{ca_type_from_file}', Code: '{ca_code_from_file}', Parsed CA Desc from file (upper): '{ca_desc_from_file[:100]}...'")
 
             domain_ca_event_instance: Optional[CorporateActionEvent] = None
+            # True for a row that deliberately gets no event because another
+            # row's event accounts for it (the acquirer's leg of a merger).
+            row_is_covered_by_another_event = False
             quantity_ca = safe_decimal(rca.quantity)
             logger.debug(f"CA Record {idx+1}: Raw Quantity: {rca.quantity}, Parsed Decimal Quantity: {quantity_ca}")
 
@@ -645,6 +702,7 @@ class DomainEventFactory:
 
             common_ca_params_kw_base = {
                 "ca_action_id_ibkr": rca.action_id_ibkr,
+                "ca_type_ibkr": ca_type_from_file or None,
                 "ibkr_transaction_id": rca.transaction_id,
                 "ibkr_activity_description": rca.action_description or rca.description,
                 "local_currency": rca.currency_primary or affected_asset.currency,
@@ -725,6 +783,7 @@ class DomainEventFactory:
                         asset_internal_id=affected_asset.internal_asset_id, event_date=event_date_str,
                         new_shares_per_old_share=new_per_old_ratio, **common_ca_params_kw
                     )
+                     split_legs.append((domain_ca_event_instance, quantity_ca))
 
             elif ca_type_from_file == "TC": # Merger/Acquisition (can be cash, stock, or mixed)
                 logger.debug(f"CA Record {idx+1}: Identified as potential Merger/Acquisition (TC).")
@@ -779,9 +838,15 @@ class DomainEventFactory:
                     logger.debug(f"CA Record {idx+1} (TC-Stock): Parsed - new_asset_symbol_from_desc: {new_asset_symbol_from_desc}, new_shares_per_old_stock: {new_shares_per_old_stock}")
 
                     if new_shares_per_old_stock is not None and new_asset_symbol_from_desc is not None:
+                         # IBKR names the acquirer by its ISIN ("... WITH
+                         # US0000000000 1 FOR 2 ..."), not by a symbol. Looked up
+                         # as a symbol, the ISIN matched nothing and a new asset
+                         # with neither ISIN nor conid took the acquirer's place.
+                         acquirer_named_by_isin = bool(_ISIN_SHAPE.match(new_asset_symbol_from_desc))
                          new_asset = self.asset_resolver.get_or_create_asset(
-                             raw_isin=None, raw_conid=None,
-                             raw_symbol=new_asset_symbol_from_desc,
+                             raw_isin=new_asset_symbol_from_desc if acquirer_named_by_isin else None,
+                             raw_conid=None,
+                             raw_symbol=None if acquirer_named_by_isin else new_asset_symbol_from_desc,
                              raw_currency=rca.currency_primary or affected_asset.currency,
                              raw_ibkr_asset_class=rca.asset_class or affected_asset.ibkr_asset_class_raw,
                              raw_description=f"New asset from merger: {new_asset_symbol_from_desc}",
@@ -794,6 +859,7 @@ class DomainEventFactory:
                             # Only the disposing leg has lots to carry, so drop this
                             # one here rather than let it reach the processor and be
                             # written into the treatment store as a NEW->NEW key.
+                            row_is_covered_by_another_event = True
                             logger.info(
                                 f"CA Record {idx+1} (TC-Stock): skipping the receiving leg of "
                                 f"CA {rca.action_id_ibkr} — old and new asset are the same "
@@ -862,5 +928,145 @@ class DomainEventFactory:
                      **common_ca_params_kw
                  )
                  domain_ca_events.append(generic_event)
+                 if not row_is_covered_by_another_event:
+                     unmapped_rows.append((generic_event, quantity_ca))
                  logger.info(f"CA Record {idx+1}: Created generic CorporateActionEvent for fallback. Type assigned: {fallback_event_type.name}, Gross: {gross_amount_ca}")
-        return domain_ca_events
+        self._mark_unapplied_quantity_changes(unmapped_rows)
+        return self._one_event_per_split(domain_ca_events, split_legs)
+
+    @staticmethod
+    def _mark_unapplied_quantity_changes(
+        unmapped_rows: List[Tuple[CorporateActionEvent, Optional[Decimal]]],
+    ) -> None:
+        """Mark the corporate actions that move shares but that nothing applies.
+
+        A row that maps to no specific event (a spin-off, a tender, a
+        delisting, ...) passes through as a generic event the engine does not
+        act on, so the shares it adds or removes used to go missing without a
+        word. What such shares cost or yield is not on the row, so the engine
+        still cannot apply the action -- but it can say so, and it does for
+        every generic event that carries ``unapplied_quantity_change``.
+
+        Quantities are netted per ActionID and asset first: a change of ISIN is
+        two rows, -n and +n, that resolve to one asset and move nothing.
+        """
+        net_change: Dict[Tuple[str, uuid.UUID], Decimal] = {}
+        first_event: Dict[Tuple[str, uuid.UUID], CorporateActionEvent] = {}
+        for event, quantity in unmapped_rows:
+            if not quantity:
+                continue
+            # Rows without an ActionID cannot be told to belong together.
+            action = event.ca_action_id_ibkr or f"row:{event.event_id}"
+            key = (action, event.asset_internal_id)
+            net_change[key] = net_change.get(key, Decimal(0)) + quantity
+            first_event.setdefault(key, event)
+
+        for key, change in net_change.items():
+            if change != Decimal(0):
+                first_event[key].unapplied_quantity_change = change
+
+    def _one_event_per_split(
+        self,
+        events: List[CorporateActionEvent],
+        split_legs: List[Tuple[CorpActionSplitForward, Optional[Decimal]]],
+    ) -> List[CorporateActionEvent]:
+        """Put a split that the broker reports as several rows back into one event.
+
+        A split that comes with a new ISIN is two rows under one ActionID: the
+        old security with a negative quantity, the new one with a positive
+        quantity. Read row by row that was two events -- the ratio applied
+        twice when both rows resolve to one asset, or the old asset rescaled
+        and the new one left empty when they are two.
+
+        Per ActionID, the rows of one asset are one split of it and are applied
+        once; and a row on the old security is joined with the row on the new
+        one (see ``_old_and_new_security``) into a single event that stays on
+        the old asset and names the new one as where the holding continues. A
+        split reported as a single row is left exactly as it was.
+        """
+        legs_by_action: Dict[str, List[Tuple[CorpActionSplitForward, Optional[Decimal]]]] = {}
+        for leg in split_legs:
+            if leg[0].ca_action_id_ibkr:
+                legs_by_action.setdefault(leg[0].ca_action_id_ibkr, []).append(leg)
+
+        superseded: Set[uuid.UUID] = set()
+        for legs in legs_by_action.values():
+            if len(legs) < 2:
+                continue
+            legs_by_asset: Dict[uuid.UUID, List[Tuple[CorpActionSplitForward, Optional[Decimal]]]] = {}
+            for leg in legs:
+                legs_by_asset.setdefault(leg[0].asset_internal_id, []).append(leg)
+
+            # The action's id is also on rows of other assets -- the option
+            # contracts on the stock are adjusted under it too -- so the rows
+            # are sorted out per asset, never all thrown together.
+            lone_legs = []
+            for asset_legs in legs_by_asset.values():
+                superseded.update(event.event_id for event, _ in asset_legs[1:])
+                if len(asset_legs) == 1:
+                    lone_legs.append(asset_legs[0])
+
+            for old_event, new_event in self._old_and_new_security(lone_legs):
+                old_event.new_asset_internal_id = new_event.asset_internal_id
+                superseded.add(new_event.event_id)
+                logger.info(
+                    f"Split {old_event.ca_action_id_ibkr}: the holding of asset "
+                    f"{old_event.asset_internal_id} continues under asset {new_event.asset_internal_id}."
+                )
+
+        return [event for event in events if event.event_id not in superseded]
+
+    def _old_and_new_security(
+        self,
+        legs: List[Tuple[CorpActionSplitForward, Optional[Decimal]]],
+    ) -> List[Tuple[CorpActionSplitForward, CorpActionSplitForward]]:
+        """Among split rows that each stand alone on their asset, find the
+        pairs that are the old and the new security of one holding.
+
+        The new row carries the old row's quantity times the split ratio, with
+        the opposite sign: -100 and +20 for a 1-for-5 split of a long holding,
+        +100 and -20 for a short one. A fraction of a share is paid out in
+        cash, so the new row may be that figure rounded down. A security is
+        paired with a security and an option contract with an option contract.
+        A row with no partner, or with more than one candidate, stays alone.
+        """
+        def is_derivative(event: CorpActionSplitForward) -> bool:
+            return isinstance(self.asset_resolver.get_asset_by_id(event.asset_internal_id), Derivative)
+
+        def continues_as(old_qty: Optional[Decimal], new_qty: Optional[Decimal], ratio: Decimal) -> bool:
+            if not old_qty or not new_qty or (old_qty > 0) == (new_qty > 0):
+                return False
+            # On the quantity grid: 300 shares at 1 for 3 are 99.999... before it.
+            exact = (old_qty.copy_abs() * ratio).quantize(global_config.PRECISION_QUANTITY)
+            return new_qty.copy_abs() in (exact, exact.to_integral_value(rounding=ROUND_FLOOR))
+
+        candidates = [
+            (old_event, new_event)
+            for old_event, old_qty in legs
+            for new_event, new_qty in legs
+            if new_event is not old_event
+            and is_derivative(old_event) == is_derivative(new_event)
+            and continues_as(old_qty, new_qty, old_event.new_shares_per_old_share)
+        ]
+        # At a ratio of 1 both rows carry the same number, so each could be the
+        # old one. It is read as a long holding -- shares leave the old security
+        # -- and the split processor turns it round if the lots prove to sit on
+        # the other asset (a short holding).
+        quantity_of = {event.event_id: quantity for event, quantity in legs}
+        both_ways = {(id(old_event), id(new_event)) for old_event, new_event in candidates}
+        candidates = [
+            (old_event, new_event) for old_event, new_event in candidates
+            if (id(new_event), id(old_event)) not in both_ways
+            or quantity_of[old_event.event_id] < 0
+        ]
+        pairs = [
+            (old_event, new_event) for old_event, new_event in candidates
+            if sum(1 for other_old, _ in candidates if other_old is old_event) == 1
+            and sum(1 for _, other_new in candidates if other_new is new_event) == 1
+        ]
+        if len(pairs) != len(candidates):
+            logger.warning(
+                f"Split {legs[0][0].ca_action_id_ibkr}: more than one row could be the new security "
+                "of the same holding. Those rows are applied on their own; verify the positions."
+            )
+        return pairs

@@ -38,7 +38,9 @@ class ProcessingOutput:
                  asset_resolver: AssetResolver,
                  eoy_mismatch_error_count: int,
                  fifo_ledgers_by_asset_id: Optional[Dict[Any, Any]] = None,
-                 eoy_mismatch_details: Optional[List[Dict[str, Any]]] = None):
+                 eoy_mismatch_details: Optional[List[Dict[str, Any]]] = None,
+                 unapplied_corporate_actions: Optional[List[Dict[str, Any]]] = None,
+                 option_events_closed_at_zero: Optional[List[Dict[str, Any]]] = None):
         self.realized_gains_losses = realized_gains_losses
         self.vorabpauschale_items = vorabpauschale_items
         self.processed_income_events = processed_income_events
@@ -48,6 +50,16 @@ class ProcessingOutput:
         # One entry per mismatched position (symbol, description, calculated,
         # reported) -- the CZ aggregation turns it into a blocking review note.
         self.eoy_mismatch_details = list(eoy_mismatch_details or [])
+        # One entry per corporate action that moves shares but that the engine
+        # has no rule for (symbol, date, type, quantity change, whether the
+        # shares are held as a zero-cost placeholder) -- likewise a blocking
+        # review note in the CZ aggregation.
+        self.unapplied_corporate_actions = list(unapplied_corporate_actions or [])
+        # One entry per option exercise or assignment that had neither a
+        # delivery trade nor an amount on its own row: it was closed on the
+        # option at zero, which means a trade or a settlement amount is
+        # missing from the inputs. Also a review note in the CZ aggregation.
+        self.option_events_closed_at_zero = list(option_events_closed_at_zero or [])
         # Final FIFO ledgers (open lots after all tax-year events) keyed by
         # asset internal id — end-of-year open positions for portfolio views.
         self.fifo_ledgers_by_asset_id = fifo_ledgers_by_asset_id or {}
@@ -144,13 +156,16 @@ def run_core_processing_pipeline(
     logger.info(f"Running calculation engine for tax year {tax_year_to_process}...")
     eoy_mismatch_error_count_calc = 0
     eoy_mismatch_details = []
+    unapplied_corporate_actions = []
+    option_events_closed_at_zero = []
     try:
         # Ensure run_main_calculations uses the passed tax_year_to_process
         _tax_plugin = get_tax_plugin(country_code)
         _tax_classifier = _tax_plugin.get_tax_classifier()
         logger.info(f"Using tax classifier for country: {country_code}")
         (realized_gains_losses, vorabpauschale_items, processed_income_events,
-         eoy_mismatch_error_count_calc, fifo_ledgers, eoy_mismatch_details) = run_main_calculations(
+         eoy_mismatch_error_count_calc, fifo_ledgers, eoy_mismatch_details,
+         unapplied_corporate_actions, option_events_closed_at_zero) = run_main_calculations(
             financial_events=financial_events_enriched,
             asset_resolver=orchestrator.asset_resolver, # Use the resolver from the orchestrator
             currency_converter=currency_converter,
@@ -162,6 +177,12 @@ def run_core_processing_pipeline(
             merger_policy=getattr(_tax_plugin, "get_merger_policy", lambda: None)(),
             security_price_provider=HistoricalPriceProvider(),
             pairing_method=pairing_method,
+            # A placeholder lot yields a figure that is only safe next to a
+            # note saying so. A country layer whose result reports unapplied
+            # corporate actions says it does; for any other the engine holds
+            # nothing and stops at a sale it cannot match, as it always did.
+            hold_unapplied_shares_as_placeholders=bool(
+                getattr(_tax_plugin, "reports_unapplied_corporate_actions", False)),
         )
     except Exception as e:
         logger.critical(f"Calculation engine failed with unexpected error: {e}", exc_info=True)
@@ -193,4 +214,6 @@ def run_core_processing_pipeline(
         eoy_mismatch_error_count=eoy_mismatch_error_count_calc,
         fifo_ledgers_by_asset_id=fifo_ledgers,
         eoy_mismatch_details=eoy_mismatch_details,
+        unapplied_corporate_actions=unapplied_corporate_actions,
+        option_events_closed_at_zero=option_events_closed_at_zero,
     )

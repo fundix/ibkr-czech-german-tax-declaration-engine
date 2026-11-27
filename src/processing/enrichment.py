@@ -36,10 +36,19 @@ def enrich_financial_events(
     eur_corp_action_detail_conversions_success = 0
     eur_corp_action_detail_conversions_failed = 0
 
-    for event_idx, event in enumerate(financial_events):
+    # An option exercise or assignment carries its own row a second time, read
+    # as a closing trade (OptionLifecycleEvent.settlement_trade). That trade is
+    # not in the event list, so it is converted here, by the rules of any trade.
+    events_to_enrich: List[FinancialEvent] = list(financial_events)
+    events_to_enrich.extend(
+        event.settlement_trade for event in financial_events
+        if getattr(event, "settlement_trade", None) is not None
+    )
+
+    for event_idx, event in enumerate(events_to_enrich):
         event_date_obj = parse_ibkr_date(event.event_date)
         if not event_date_obj:
-            logger.warning(f"Event {event_idx+1}/{len(financial_events)} (ID: {event.event_id}): Could not parse event_date '{event.event_date}'. Skipping EUR conversion for this event.")
+            logger.warning(f"Event {event_idx+1}/{len(events_to_enrich)} (ID: {event.event_id}): Could not parse event_date '{event.event_date}'. Skipping EUR conversion for this event.")
             events_skipped_date_parsing += 1
             continue
 

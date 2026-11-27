@@ -9,7 +9,7 @@ from src.domain.results import RealizedGainLoss
 from src.engine.fifo_manager import FifoLedger
 from src.domain.enums import FinancialEventType, AssetCategory
 from src.identification.asset_resolver import AssetResolver # Added
-from src.domain.assets import Option, Asset # Added Option and Asset
+from src.domain.assets import Option, Asset, is_option_deliverable
 from .base_processor import EventProcessor
 
 logger = logging.getLogger(__name__)
@@ -67,8 +67,8 @@ class TradeProcessor(EventProcessor):
             asset_symbol = f"UNKNOWN_ASSET_ID_{event.asset_internal_id}"
 
 
-        # Adjustment logic for STOCKS linked to option events
-        if event_asset_obj and event_asset_obj.asset_category == AssetCategory.STOCK and event.related_option_event_id:
+        # Adjustment logic for the share leg (stock or fund) linked to an option event
+        if is_option_deliverable(event_asset_obj) and event.related_option_event_id:
             stock_asset_obj = event_asset_obj # To avoid confusion with option_asset_obj
             logger.info(f"Stock trade event {event.event_id} ({event.event_type.name}) for asset {asset_symbol} (ID: {event.asset_internal_id}) is linked to option event {event.related_option_event_id}. Attempting adjustment.")
 
@@ -190,7 +190,7 @@ class TradeProcessor(EventProcessor):
         
         # Log if a stock trade looks like it should be linked but isn't
         # Note: Exclude "IA" codes which are Internalized + Automatically Allocated (not option assignments)
-        elif event_asset_obj and event_asset_obj.asset_category == AssetCategory.STOCK and \
+        elif is_option_deliverable(event_asset_obj) and \
              event.related_option_event_id is None and \
              event.ibkr_notes_codes and \
              'IA' not in (event.ibkr_notes_codes or "").upper() and \
