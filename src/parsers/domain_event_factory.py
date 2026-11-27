@@ -26,6 +26,10 @@ from src.utils.type_utils import parse_ibkr_date, parse_ibkr_datetime, safe_deci
 
 logger = logging.getLogger(__name__)
 
+# Two letters of the country, nine characters of the national number, one
+# check digit. No ticker has this shape.
+_ISIN_SHAPE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+
 class DomainEventFactory:
     def __init__(self, asset_resolver: AssetResolver):
         self.asset_resolver = asset_resolver
@@ -822,9 +826,15 @@ class DomainEventFactory:
                     logger.debug(f"CA Record {idx+1} (TC-Stock): Parsed - new_asset_symbol_from_desc: {new_asset_symbol_from_desc}, new_shares_per_old_stock: {new_shares_per_old_stock}")
 
                     if new_shares_per_old_stock is not None and new_asset_symbol_from_desc is not None:
+                         # IBKR names the acquirer by its ISIN ("... WITH
+                         # US0000000000 1 FOR 2 ..."), not by a symbol. Looked up
+                         # as a symbol, the ISIN matched nothing and a new asset
+                         # with neither ISIN nor conid took the acquirer's place.
+                         acquirer_named_by_isin = bool(_ISIN_SHAPE.match(new_asset_symbol_from_desc))
                          new_asset = self.asset_resolver.get_or_create_asset(
-                             raw_isin=None, raw_conid=None,
-                             raw_symbol=new_asset_symbol_from_desc,
+                             raw_isin=new_asset_symbol_from_desc if acquirer_named_by_isin else None,
+                             raw_conid=None,
+                             raw_symbol=None if acquirer_named_by_isin else new_asset_symbol_from_desc,
                              raw_currency=rca.currency_primary or affected_asset.currency,
                              raw_ibkr_asset_class=rca.asset_class or affected_asset.ibkr_asset_class_raw,
                              raw_description=f"New asset from merger: {new_asset_symbol_from_desc}",

@@ -11,6 +11,8 @@ audit:
 * X14 — an exercise or assignment that delivers no shares (a cash-settled
   index option) ended the run with an exception, and its settlement amount
   was dropped.
+* X15 — a stock-for-stock merger that names the acquirer by its ISIN created
+  a phantom asset instead of finding the acquirer.
 
 Everything here is synthetic: invented symbols, ISINs, conids and amounts.
 Expected figures are worked out by hand in each test, in EUR so that no
@@ -20,9 +22,15 @@ from decimal import Decimal
 
 import pytest
 
+from src.classification.asset_classifier import AssetClassifier
 from src.domain.assets import Option, Stock
 from src.domain.enums import AssetCategory, FinancialEventType, RealizationType
-from src.domain.events import OptionAssignmentEvent, OptionExerciseEvent, TradeEvent
+from src.domain.events import (
+    CorpActionMergerStock, OptionAssignmentEvent, OptionExerciseEvent, TradeEvent,
+)
+from src.identification.asset_resolver import AssetResolver
+from src.parsers.domain_event_factory import DomainEventFactory
+from src.parsers.raw_models import RawCorporateActionRecord
 from src.processing.option_trade_linker import OptionTradeLinker
 from tests.support.base import FifoTestCaseBase
 from tests.support.mock_providers import MockECBExchangeRateProvider
@@ -350,3 +358,88 @@ class TestX14ExerciseOrAssignmentWithoutDelivery(FifoTestCaseBase):
         gains = [(r.realization_type, r.gross_gain_loss_eur)
                  for r in out.realized_gains_losses]
         assert gains == [(RealizationType.OPTION_TRADE_CLOSE_SHORT, Decimal("299.00"))]
+
+
+# ---------------------------------------------------------------------------
+# X15 — a merger names the acquirer by ISIN
+# ---------------------------------------------------------------------------
+
+def _resolver(tmp_path):
+    """A resolver whose classification cache lives in the test's temp dir."""
+    return AssetResolver(AssetClassifier(
+        cache_file_path=str(tmp_path / "classifications.json")))
+
+
+def _corporate_action(**fields):
+    row = {"ClientAccountID": ACCOUNT, "CurrencyPrimary": "USD",
+           "AssetClass": "STK", "Proceeds": "0", "Value": "0"}
+    row.update(fields)
+    return RawCorporateActionRecord(**row)
+
+
+class TestX15MergerNamesTheAcquirerByIsin:
+    """IBKR writes a stock-for-stock merger as
+    "OLD(isin) MERGED(Acquisition) WITH <ISIN of the acquirer> n FOR m (...)".
+    The token after WITH was taken for a symbol, so a new asset with that
+    "symbol" and neither ISIN nor conid was created, and both rows of the
+    merger pointed at it instead of at the acquirer already in the book.
+    """
+
+    MERGER = ("OLDC(US0000000401) MERGED(Acquisition) WITH US0000000402 1 FOR 2 "
+              "({symbol}, {name}, {isin})")
+
+    def test_both_rows_resolve_to_the_acquirer_already_in_the_book(self, tmp_path):
+        resolver = _resolver(tmp_path)
+        old = resolver.get_or_create_asset(
+            raw_isin="US0000000401", raw_conid="900000401", raw_symbol="OLDC",
+            raw_currency="USD", raw_ibkr_asset_class="STK",
+            raw_description="OLDCO INC", description_source_type="trade")
+        acquirer = resolver.get_or_create_asset(
+            raw_isin="US0000000402", raw_conid="900000402", raw_symbol="NEWC",
+            raw_currency="USD", raw_ibkr_asset_class="STK",
+            raw_description="NEWCO CORP", description_source_type="position")
+        rows = [
+            _corporate_action(
+                Symbol="OLDC", ISIN="US0000000401", Conid="900000401",
+                Description=self.MERGER.format(symbol="OLDC", name="OLDCO INC",
+                                               isin="US0000000401"),
+                Type="TC", ActionID="7001", Quantity="-100",
+                **{"Report Date": "2025-06-10"}),
+            _corporate_action(
+                Symbol="NEWC", ISIN="US0000000402", Conid="900000402",
+                Description=self.MERGER.format(symbol="NEWC", name="NEWCO CORP",
+                                               isin="US0000000402"),
+                Type="TC", ActionID="7001", Quantity="50",
+                **{"Report Date": "2025-06-10"}),
+        ]
+
+        events = DomainEventFactory(resolver).create_events_from_corporate_actions(rows)
+
+        # One merger: the disposing row. The receiving row names the same
+        # asset on both sides and is dropped as before.
+        mergers = [(e.asset_internal_id, e.new_asset_internal_id,
+                    e.new_shares_received_per_old)
+                   for e in events if isinstance(e, CorpActionMergerStock)]
+        assert mergers == [(old.internal_asset_id, acquirer.internal_asset_id,
+                            Decimal("0.5"))]
+        # ... and no asset was invented on the way.
+        assert set(resolver.assets_by_internal_id) == {
+            old.internal_asset_id, acquirer.internal_asset_id}
+
+    def test_an_acquirer_seen_for_the_first_time_is_created_under_its_isin(self, tmp_path):
+        resolver = _resolver(tmp_path)
+        rows = [_corporate_action(
+            Symbol="OLDC", ISIN="US0000000401", Conid="900000401",
+            Description=self.MERGER.format(symbol="OLDC", name="OLDCO INC",
+                                           isin="US0000000401"),
+            Type="TC", ActionID="7001", Quantity="-100",
+            **{"Report Date": "2025-06-10"})]
+
+        (merger,) = [e for e in DomainEventFactory(resolver)
+                     .create_events_from_corporate_actions(rows)
+                     if isinstance(e, CorpActionMergerStock)]
+
+        new_asset = resolver.get_asset_by_id(merger.new_asset_internal_id)
+        assert new_asset.ibkr_isin == "US0000000402"
+        # A later row that carries the ISIN finds this asset, not a second one.
+        assert resolver.get_asset_by_alias("ISIN:US0000000402") is new_asset
