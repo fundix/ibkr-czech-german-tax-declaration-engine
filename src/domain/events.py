@@ -305,12 +305,24 @@ class OptionLifecycleEvent(FinancialEvent):
     _: KW_ONLY
     quantity_contracts: Decimal # Number of option contracts involved
 
+    # The statement row of an exercise/assignment, read as a plain closing
+    # trade of the option: sold (exercise) or bought back (assignment) at the
+    # row's own price, with its commission and tax. That is all the row is
+    # when nothing is delivered -- a cash-settled contract pays its settlement
+    # amount on this very row -- and it stays unused when shares are delivered
+    # and the premium travels with them instead. It shares the event's
+    # event_id and is not part of the event list; enrichment converts it
+    # together with its event.
+    settlement_trade: Optional[TradeEvent] = None
+
     def __init__(self, asset_internal_id: uuid.UUID, event_date: str, *,
                  event_type: FinancialEventType, # Ensure event_type is passed by subclasses
                  quantity_contracts: Decimal,
+                 settlement_trade: Optional[TradeEvent] = None,
                  **kwargs_for_parent_kw_only):
         super().__init__(asset_internal_id, event_date, event_type=event_type, **kwargs_for_parent_kw_only)
         self.quantity_contracts = quantity_contracts
+        self.settlement_trade = settlement_trade
 
     def __post_init__(self):
         super().__post_init__()

@@ -1,6 +1,7 @@
 # src/parsers/domain_event_factory.py
 import logging
 import re
+import uuid
 from decimal import Decimal
 from typing import List, Optional, Set, Union, Tuple # Ensure Tuple is here
 from datetime import date, datetime
@@ -147,6 +148,8 @@ class DomainEventFactory:
                 logger.error(f"Option lifecycle event ({option_event_type.name}) for {asset.get_classification_key()} on {event_date_str} lacks a transaction ID. Skipping event.")
                 return None
 
+            # Zero for an expiry. An exercise or assignment gets the row's own
+            # amount below: its cash settlement, or zero when shares are delivered.
             gross_amount_val = Decimal('0.0')
 
             common_args = {
@@ -171,12 +174,115 @@ class DomainEventFactory:
             if option_event:
                 logger.debug(f"Created {option_event_type.name} for option {asset.get_classification_key()} from trade ID {tx_id_for_event}, Contracts: {qty_contracts}")
 
+                if isinstance(option_event, (OptionExerciseEvent, OptionAssignmentEvent)):
+                    # The same row read as a closing trade: what it is when
+                    # nothing is delivered. A cash-settled contract (an index
+                    # option) pays its settlement amount on this row, so the
+                    # row's price, commission and tax must not be dropped. An
+                    # exercise sells the long option, an assignment buys the
+                    # short one back -- the direction comes from the event, so
+                    # an odd Buy/Sell or Open/Close cannot turn it round.
+                    exercised = isinstance(option_event, OptionExerciseEvent)
+                    option_event.settlement_trade = self._trade_event_from_row(
+                        raw_trade, asset, event_date_str, tx_id_for_event,
+                        event_type=(FinancialEventType.TRADE_SELL_LONG if exercised
+                                    else FinancialEventType.TRADE_BUY_SHORT_COVER),
+                        quantity=-qty_contracts if exercised else qty_contracts,
+                        event_id=option_event.event_id,
+                    )
+                    option_event.gross_amount_foreign_currency = (
+                        option_event.settlement_trade.gross_amount_foreign_currency)
+
                 self.processed_ibkr_trade_ids_for_options.add(tx_id_for_event)
                 if raw_trade.trade_id and raw_trade.trade_id != raw_trade.transaction_id:
                     self.processed_ibkr_trade_ids_for_options.add(raw_trade.trade_id)
 
                 return option_event
         return None
+
+    def _trade_event_from_row(self, rt: RawTradeRecord, asset: Asset, event_date_str: str,
+                              tx_id_primary: str, event_type: FinancialEventType,
+                              quantity: Optional[Decimal] = None,
+                              event_id: Optional[uuid.UUID] = None) -> TradeEvent:
+        """The TradeEvent a Trades row describes: its quantity, price, gross
+        amount, commission and transaction tax.
+
+        *quantity* and *event_id* are given only when an option's exercise or
+        assignment row is read as a closing trade (``_process_option_trade``):
+        the direction then follows from the event rather than from the row's
+        own sign, and the trade shares the event's id.
+        """
+        identity = {} if event_id is None else {"event_id": event_id}
+        trade_quantity_val = safe_decimal(rt.quantity, default=Decimal('0'))
+        trade_price = safe_decimal(rt.trade_price, default=Decimal('0.0'))
+        calculated_gross_amount_raw_source = rt.trade_money if rt.trade_money is not None else rt.proceeds
+        calculated_gross_amount = safe_decimal(calculated_gross_amount_raw_source)
+
+        if calculated_gross_amount is None:
+            asset_multiplier_trade = getattr(asset, 'multiplier', Decimal(1))
+            asset_multiplier_trade = safe_decimal(asset_multiplier_trade, default=Decimal(1))
+            if asset_multiplier_trade == Decimal(0): asset_multiplier_trade = Decimal(1)
+
+            if trade_price is not None and trade_quantity_val is not None:
+                # Initial calculation: Qty * Price
+                raw_calculated_gross = trade_quantity_val.copy_abs() * trade_price
+                
+                # Apply multiplier if it's significant (not 1 or 0)
+                if asset_multiplier_trade != Decimal(1):
+                    raw_calculated_gross *= asset_multiplier_trade
+                    logger.debug(f"Trade {tx_id_primary}: Applied multiplier {asset_multiplier_trade}. Intermediate Q*P*M: {raw_calculated_gross}")
+
+                if isinstance(asset, Bond) or asset.asset_category == AssetCategory.BOND:
+                    # Bond prices are typically percentages of nominal value.
+                    # Gross value = (Nominal Quantity * Percentage Price / 100) * Multiplier
+                    # Since multiplier might already be applied above if it's not 1,
+                    # we just need to divide by 100 here.
+                    # If multiplier was 1, raw_calculated_gross = Qty * Price. We need (Qty * Price / 100).
+                    calculated_gross_amount = raw_calculated_gross / Decimal(100)
+                    logger.debug(f"Trade {tx_id_primary} (Bond {asset.get_classification_key()}): "
+                                 f"Applied /100 for percentage price. Original Q*P*(M if applicable): {raw_calculated_gross}, "
+                                 f"Final Gross amount: {calculated_gross_amount}")
+                else:
+                    calculated_gross_amount = raw_calculated_gross
+                    logger.debug(f"Trade {tx_id_primary} (Non-Bond {asset.get_classification_key()}): "
+                                 f"Calculated gross amount {calculated_gross_amount} from Qty*Price*(Multiplier if applicable).")
+            else:
+                logger.warning(f"Trade {tx_id_primary} for {asset.get_classification_key()} missing proceeds/trade_money and price/quantity for gross amount calculation. Defaulting gross amount to 0.")
+                calculated_gross_amount = Decimal('0.0')
+        else:
+            logger.debug(f"Trade {tx_id_primary}: Using provided gross amount from TradeMoney/Proceeds: {calculated_gross_amount} (Source: '{calculated_gross_amount_raw_source}')")
+
+
+        # IBKR signs IBCommission from the cash side: negative when it
+        # charged you, positive on the occasional rebate. Downstream
+        # wants a COST, so flip it. Taking the magnitude instead would
+        # book a rebate as another fee -- raising a basis and lowering
+        # proceeds by the very amount IBKR paid back.
+        commission_val = Decimal('0.0') - safe_decimal(
+            rt.ib_commission, default=Decimal('0.0'))
+        # Taxes (stamp duty) is signed the same way -- negative when
+        # charged -- and stored as a cost like the commission. Absent
+        # when the Flex query lacks the column; the Statement of Funds
+        # backfill (processing/trade_tax_backfill) covers that case.
+        transaction_tax_val = Decimal('0.0') - safe_decimal(
+            rt.taxes, default=Decimal('0.0'))
+
+        return TradeEvent(
+            asset_internal_id=asset.internal_asset_id,
+            event_date=event_date_str,
+            event_type=event_type,
+            quantity=trade_quantity_val if quantity is None else quantity,
+            price_foreign_currency=trade_price,
+            commission_foreign_currency=commission_val,
+            commission_currency=rt.ib_commission_currency or rt.currency_primary,
+            transaction_tax_foreign=transaction_tax_val,
+            local_currency=rt.currency_primary,
+            gross_amount_foreign_currency=calculated_gross_amount.copy_abs(),
+            ibkr_transaction_id=tx_id_primary,
+            ibkr_activity_description=rt.description,
+            ibkr_notes_codes=rt.notes_codes,
+            **identity
+        )
 
     def create_events_from_trades(self, raw_trades: List[RawTradeRecord]) -> Tuple[List[FinancialEvent], List[OptionLifecycleEvent], List[TradeEvent]]:
         logger.info(f"Processing {len(raw_trades)} raw trade records into domain events (linking deferred)...")
@@ -314,75 +420,7 @@ class DomainEventFactory:
                     logger.error(f"Skipping trade ID {tx_id_primary} due to error determining type: {e}")
                     continue
 
-                trade_quantity_val = safe_decimal(rt.quantity, default=Decimal('0'))
-                trade_price = safe_decimal(rt.trade_price, default=Decimal('0.0'))
-                calculated_gross_amount_raw_source = rt.trade_money if rt.trade_money is not None else rt.proceeds
-                calculated_gross_amount = safe_decimal(calculated_gross_amount_raw_source)
-
-                if calculated_gross_amount is None:
-                    asset_multiplier_trade = getattr(asset, 'multiplier', Decimal(1))
-                    asset_multiplier_trade = safe_decimal(asset_multiplier_trade, default=Decimal(1))
-                    if asset_multiplier_trade == Decimal(0): asset_multiplier_trade = Decimal(1)
-
-                    if trade_price is not None and trade_quantity_val is not None:
-                        # Initial calculation: Qty * Price
-                        raw_calculated_gross = trade_quantity_val.copy_abs() * trade_price
-                        
-                        # Apply multiplier if it's significant (not 1 or 0)
-                        if asset_multiplier_trade != Decimal(1):
-                            raw_calculated_gross *= asset_multiplier_trade
-                            logger.debug(f"Trade {tx_id_primary}: Applied multiplier {asset_multiplier_trade}. Intermediate Q*P*M: {raw_calculated_gross}")
-
-                        if isinstance(asset, Bond) or asset.asset_category == AssetCategory.BOND:
-                            # Bond prices are typically percentages of nominal value.
-                            # Gross value = (Nominal Quantity * Percentage Price / 100) * Multiplier
-                            # Since multiplier might already be applied above if it's not 1,
-                            # we just need to divide by 100 here.
-                            # If multiplier was 1, raw_calculated_gross = Qty * Price. We need (Qty * Price / 100).
-                            calculated_gross_amount = raw_calculated_gross / Decimal(100)
-                            logger.debug(f"Trade {tx_id_primary} (Bond {asset.get_classification_key()}): "
-                                         f"Applied /100 for percentage price. Original Q*P*(M if applicable): {raw_calculated_gross}, "
-                                         f"Final Gross amount: {calculated_gross_amount}")
-                        else:
-                            calculated_gross_amount = raw_calculated_gross
-                            logger.debug(f"Trade {tx_id_primary} (Non-Bond {asset.get_classification_key()}): "
-                                         f"Calculated gross amount {calculated_gross_amount} from Qty*Price*(Multiplier if applicable).")
-                    else:
-                        logger.warning(f"Trade {tx_id_primary} for {asset.get_classification_key()} missing proceeds/trade_money and price/quantity for gross amount calculation. Defaulting gross amount to 0.")
-                        calculated_gross_amount = Decimal('0.0')
-                else:
-                    logger.debug(f"Trade {tx_id_primary}: Using provided gross amount from TradeMoney/Proceeds: {calculated_gross_amount} (Source: '{calculated_gross_amount_raw_source}')")
-
-
-                # IBKR signs IBCommission from the cash side: negative when it
-                # charged you, positive on the occasional rebate. Downstream
-                # wants a COST, so flip it. Taking the magnitude instead would
-                # book a rebate as another fee -- raising a basis and lowering
-                # proceeds by the very amount IBKR paid back.
-                commission_val = Decimal('0.0') - safe_decimal(
-                    rt.ib_commission, default=Decimal('0.0'))
-                # Taxes (stamp duty) is signed the same way -- negative when
-                # charged -- and stored as a cost like the commission. Absent
-                # when the Flex query lacks the column; the Statement of Funds
-                # backfill (processing/trade_tax_backfill) covers that case.
-                transaction_tax_val = Decimal('0.0') - safe_decimal(
-                    rt.taxes, default=Decimal('0.0'))
-
-                trade_event = TradeEvent(
-                    asset_internal_id=asset.internal_asset_id,
-                    event_date=event_date_str,
-                    event_type=event_type,
-                    quantity=trade_quantity_val,
-                    price_foreign_currency=trade_price,
-                    commission_foreign_currency=commission_val,
-                    commission_currency=rt.ib_commission_currency or rt.currency_primary,
-                    transaction_tax_foreign=transaction_tax_val,
-                    local_currency=rt.currency_primary,
-                    gross_amount_foreign_currency=calculated_gross_amount.copy_abs(),
-                    ibkr_transaction_id=tx_id_primary,
-                    ibkr_activity_description=rt.description,
-                    ibkr_notes_codes=rt.notes_codes
-                )
+                trade_event = self._trade_event_from_row(rt, asset, event_date_str, tx_id_primary, event_type)
 
                 # "C;O" indicator: one trade CLOSES the existing position and
                 # OPENS the opposite one (flip). The type above is the CLOSE

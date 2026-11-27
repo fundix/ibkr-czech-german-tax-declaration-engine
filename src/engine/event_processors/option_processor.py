@@ -6,7 +6,7 @@ from decimal import Decimal, Context
 
 from src.domain.events import (
     OptionExerciseEvent, OptionAssignmentEvent, OptionExpirationWorthlessEvent,
-    FinancialEvent
+    OptionLifecycleEvent, FinancialEvent, TradeEvent
 )
 from src.domain.assets import Option, Asset
 from src.domain.enums import AssetCategory, FinancialEventType, TaxReportingCategory, RealizationType
@@ -39,6 +39,75 @@ def _make_pending_adjustment(premium_eur: Decimal, event, option_asset: Option) 
     }
 
 
+def _has_delivery(event: OptionLifecycleEvent, context: Dict[str, Any]) -> bool:
+    """Whether some trade delivers the shares of this exercise/assignment."""
+    delivered = context.get('option_events_with_delivery')
+    if delivered is None:
+        logger.critical(f"Missing option_events_with_delivery in context for option event {event.event_id}.")
+        raise ValueError("Missing required context for option exercise/assignment processing.")
+    return event.event_id in delivered
+
+
+def _closing_trade(event: OptionLifecycleEvent, exercised: bool) -> TradeEvent:
+    """*event* as the trade that closes the option when nothing is delivered.
+
+    The event factory attaches it: the statement row read as a trade, with its
+    own price, commission and tax, converted to EUR like any other trade. An
+    event built without one closes at zero -- that the contracts are gone is
+    still a fact, and so is what was paid or received for them.
+    """
+    if event.settlement_trade is not None:
+        return event.settlement_trade
+    return TradeEvent(
+        asset_internal_id=event.asset_internal_id,
+        event_date=event.event_date,
+        event_type=(FinancialEventType.TRADE_SELL_LONG if exercised
+                    else FinancialEventType.TRADE_BUY_SHORT_COVER),
+        quantity=-event.quantity_contracts if exercised else event.quantity_contracts,
+        price_foreign_currency=Decimal(0),
+        net_proceeds_or_cost_basis_eur=Decimal(0),
+        ibkr_transaction_id=event.ibkr_transaction_id,
+        event_id=event.event_id,
+    )
+
+
+def _close_without_delivery(event: OptionLifecycleEvent, ledger: FifoLedger,
+                            option_asset: Option, exercised: bool) -> List[RealizedGainLoss]:
+    """Realise an exercise or assignment that delivers no shares.
+
+    A cash-settled contract (an index option) delivers nothing: its settlement
+    amount is paid on the option's own row, which is then a closing trade like
+    any other -- the long option sold at that amount, the short one bought back
+    at it. With no share leg to carry the premium, the result is realised here,
+    on the option.
+
+    The same applies when shares should have come but no delivery trade is
+    linked (its row is missing from the export, or could not be matched): the
+    row then closes the option at zero and the premium is realised on it,
+    rather than left waiting for a trade that never arrives.
+    """
+    trade = _closing_trade(event, exercised)
+    if not trade.gross_amount_foreign_currency:
+        logger.error(
+            f"{event.event_type.name} of {event.quantity_contracts} contract(s) of "
+            f"{option_asset.ibkr_symbol or option_asset.get_classification_key()} on {event.event_date} "
+            f"(TxID {event.ibkr_transaction_id or 'N/A'}): no delivery trade is linked and the row "
+            "carries no amount. The option is closed at zero, so its premium is realised on the "
+            "option itself. If shares were delivered, their trade is missing from the export or "
+            "could not be matched; if the contract was settled in cash, the settlement amount is."
+        )
+    else:
+        logger.info(
+            f"{event.event_type.name} of {event.quantity_contracts} contract(s) of "
+            f"{option_asset.ibkr_symbol or option_asset.get_classification_key()} on {event.event_date}: "
+            f"no shares delivered -- closed at the row's own amount "
+            f"({trade.gross_amount_foreign_currency} {trade.local_currency})."
+        )
+    if exercised:
+        return ledger.consume_long_lots_for_sale(trade)
+    return ledger.consume_short_lots_for_cover(trade)
+
+
 class OptionExerciseProcessor(EventProcessor):
     def process(self, event: FinancialEvent, ledger: FifoLedger, context: Dict[str, Any]) -> List[RealizedGainLoss]:
         if not isinstance(event, OptionExerciseEvent):
@@ -61,6 +130,11 @@ class OptionExerciseProcessor(EventProcessor):
         if not isinstance(option_asset, Option):
             logger.error(f"Event {event.event_id} (Exercise) references asset {event.asset_internal_id} which is not an Option type ({type(option_asset).__name__}). Skipping adjustment storage.")
             return []
+
+        if not _has_delivery(event, context):
+            # Nothing is delivered (a cash-settled index option, typically):
+            # the long option is sold at the amount on its own row.
+            return _close_without_delivery(event, ledger, option_asset, exercised=True)
 
         if option_asset.underlying_asset_internal_id is None:
             logger.critical(f"Option asset {option_asset.get_classification_key()} (ID: {option_asset.internal_asset_id}) "
@@ -117,6 +191,11 @@ class OptionAssignmentProcessor(EventProcessor):
         if not isinstance(option_asset, Option):
             logger.error(f"Event {event.event_id} (Assignment) references asset {event.asset_internal_id} which is not an Option type ({type(option_asset).__name__}). Skipping adjustment storage.")
             return []
+
+        if not _has_delivery(event, context):
+            # Nothing is delivered (a cash-settled index option, typically):
+            # the short option is bought back at the amount on its own row.
+            return _close_without_delivery(event, ledger, option_asset, exercised=False)
 
         if option_asset.underlying_asset_internal_id is None:
             logger.critical(f"Option asset {option_asset.get_classification_key()} (ID: {option_asset.internal_asset_id}) "

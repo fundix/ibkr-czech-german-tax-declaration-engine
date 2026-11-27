@@ -82,6 +82,17 @@ def _format_asset_info(asset_obj) -> str:
     symbol = asset_obj.ibkr_symbol or "N/A"
     return f"'{desc}' (Symbol: {symbol})"
 
+def _option_events_with_delivery(financial_events: List[FinancialEvent]) -> set:
+    """Ids of the exercise/assignment events some trade is linked to.
+
+    Read off the trades themselves, so it holds however the link was made.
+    """
+    return {
+        event.related_option_event_id for event in financial_events
+        if isinstance(event, TradeEvent) and event.related_option_event_id is not None
+    }
+
+
 def _apply_historical_option_premiums(
     historical_events_by_asset: DefaultDict[uuid.UUID, List[FinancialEvent]],
     asset_resolver: AssetResolver,
@@ -117,6 +128,9 @@ def _apply_historical_option_premiums(
 
     option_ledgers: Dict[uuid.UUID, FifoLedger] = {}
     pending: Dict[uuid.UUID, Dict[str, Any]] = {}
+    # A delivery carries the date of its exercise/assignment, so a prior-year
+    # event's delivery is among these events too.
+    option_events_with_delivery = _option_events_with_delivery(all_hist)
 
     def _ledger_for(option_asset: Option) -> FifoLedger:
         led = option_ledgers.get(option_asset.internal_asset_id)
@@ -154,6 +168,10 @@ def _apply_historical_option_premiums(
                     details = led.consume_long_option_get_cost(event.quantity_contracts)
                 else:
                     details = led.consume_short_option_get_proceeds(event.quantity_contracts)
+                if event.event_id not in option_events_with_delivery:
+                    # Nothing was delivered (cash settlement): the contracts
+                    # are gone and no share leg is waiting for their premium.
+                    continue
                 premium = sum(
                     (d.consumed_quantity * d.value_per_unit_eur for d in details),
                     Decimal(0),
@@ -263,6 +281,10 @@ def run_main_calculations(
     current_year_events: List[FinancialEvent] = []
 
     pending_option_adjustments: Dict[uuid.UUID, Tuple[Decimal, uuid.UUID, str]] = {}
+    # Exercises and assignments that some trade delivers the shares of. Every
+    # other one delivers nothing -- a cash-settled index option -- and is
+    # closed on the option itself instead of waiting for a share leg.
+    option_events_with_delivery = _option_events_with_delivery(financial_events)
     # Merger event keys already applied in this run. Nothing upstream dedupes
     # corporate-action rows, and applying one twice would rescale the lots again.
     applied_merger_keys: set = set()
@@ -450,6 +472,7 @@ def run_main_calculations(
                 context: Dict[str, Any] = {
                     'asset_resolver': asset_resolver,
                     'pending_option_adjustments': pending_option_adjustments,
+                    'option_events_with_delivery': option_events_with_delivery,
                     'currency_converter': currency_converter,
                     'tax_classifier': tax_classifier,
                     'merger_policy': merger_policy,
@@ -527,10 +550,11 @@ def run_main_calculations(
 
     logger.info("Finished processing current year events.")
     if pending_option_adjustments:
-        # Any adjustment left here means an option premium is NOT reflected
-        # anywhere (neither an RGL nor a stock-basis adjustment) — the linked
-        # delivery trade was never processed (missing data, cash settlement,
-        # or a linking failure). This silently misstates the tax base.
+        # Any adjustment left here means part of an option premium is NOT
+        # reflected anywhere (neither an RGL nor a share-basis adjustment):
+        # the linked delivery covered less than the contracts call for. (An
+        # event with no delivery at all never waits here -- it is closed on
+        # the option itself.) This silently misstates the tax base.
         for opt_event_id, adj in pending_option_adjustments.items():
             logger.error(
                 f"UNCONSUMED option premium adjustment for option event {opt_event_id}: "
@@ -538,7 +562,7 @@ def run_main_calculations(
                 f"option asset {adj['option_asset_id']} (type {adj['option_type']}), "
                 f"undelivered stock qty {adj['remaining_stock_qty']} of {adj['expected_stock_qty']}. "
                 "The premium is missing from the results — review the input data "
-                "(partial fills, cash settlement, missing delivery trades)."
+                "(a delivery reported in partial fills that do not add up)."
             )
     else:
         logger.info("All pending option adjustments were consumed.")

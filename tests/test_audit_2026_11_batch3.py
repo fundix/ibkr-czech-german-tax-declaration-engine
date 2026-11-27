@@ -8,6 +8,9 @@ audit:
 * V09 — deliveries were matched to exercises/assignments without the side,
   so two opposite events on one day swapped their premiums depending on the
   order of the CSV rows.
+* X14 — an exercise or assignment that delivers no shares (a cash-settled
+  index option) ended the run with an exception, and its settlement amount
+  was dropped.
 
 Everything here is synthetic: invented symbols, ISINs, conids and amounts.
 Expected figures are worked out by hand in each test, in EUR so that no
@@ -50,6 +53,9 @@ ETF = dict(asset_class="STK", sub_category="ETF", symbol="SYNE",
 STOCK = dict(asset_class="STK", sub_category="COMMON", symbol="SYNA",
              description="SYNTHETIC ALPHA INC", isin="US0000000201",
              conid="900000201")
+
+# An index: options are written on it, but it never appears as a row itself.
+INDEX = dict(symbol="SYNX", conid="900000301")
 
 
 def _option_on(underlying, *, put_call, strike, expiry, conid):
@@ -250,3 +256,97 @@ class TestV09DeliverySideFollowsFromTheOptionAndTheEvent:
 
         assert wrong.related_option_event_id is None
         assert right.related_option_event_id == event.event_id
+
+
+# ---------------------------------------------------------------------------
+# X14 — an exercise/assignment without a delivery is a closing trade
+# ---------------------------------------------------------------------------
+
+class TestX14ExerciseOrAssignmentWithoutDelivery(FifoTestCaseBase):
+    """An index option is settled in cash: nothing is delivered, and the
+    option's own row carries the settlement amount. The processors expected a
+    delivery to hand the premium to, raised when the option had no underlying
+    in the inputs, and the factory had already replaced the row's amount by
+    zero. Such a row is a closing trade of the option at that amount.
+    """
+
+    def test_exercised_index_call_is_sold_at_its_settlement_amount(self):
+        call = _option_on(INDEX, put_call="C", strike="5000", expiry="2025-05-16",
+                          conid="900000311")
+        trades = [
+            # Bought for 20.00: 2000 paid + 1.50 commission.
+            _trade_row(**call, trade_date="2025-05-05", quantity="1", price="20.00",
+                       buy_sell="BUY", open_close="O", tx_id="3001",
+                       commission="-1.50"),
+            # Settled in cash at 35.25: 3525 received - 0.50 charged on the row.
+            _trade_row(**call, trade_date="2025-05-16", quantity="-1", price="35.25",
+                       buy_sell="SELL", open_close="C", tx_id="3002",
+                       commission="-0.50", notes="C;Ex"),
+        ]
+
+        out = self._run_pipeline(trades_data=trades, tax_year=TAX_YEAR,
+                                 custom_rate_provider=_one_to_one(),
+                                 country_code="cz")
+
+        (rgl,) = out.realized_gains_losses
+        assert rgl.realization_type is RealizationType.OPTION_TRADE_CLOSE_LONG
+        assert rgl.quantity_realized == Decimal("1")
+        assert rgl.acquisition_date == "2025-05-05"
+        assert rgl.realization_date == "2025-05-16"
+        assert rgl.total_cost_basis_eur == Decimal("2001.50")
+        assert rgl.total_realization_value_eur == Decimal("3524.50")
+        assert rgl.gross_gain_loss_eur == Decimal("1523.00")
+
+    def test_assigned_index_put_is_bought_back_at_its_settlement_amount(self):
+        put = _option_on(INDEX, put_call="P", strike="5100", expiry="2025-05-16",
+                         conid="900000312")
+        trades = [
+            # Written for 30.00: 3000 received - 1.50 commission.
+            _trade_row(**put, trade_date="2025-05-05", quantity="-1", price="30.00",
+                       buy_sell="SELL", open_close="O", tx_id="3101",
+                       commission="-1.50"),
+            # Settled in cash at 42.00: 4200 paid.
+            _trade_row(**put, trade_date="2025-05-16", quantity="1", price="42.00",
+                       buy_sell="BUY", open_close="C", tx_id="3102",
+                       commission="0", notes="A;C"),
+        ]
+
+        out = self._run_pipeline(trades_data=trades, tax_year=TAX_YEAR,
+                                 custom_rate_provider=_one_to_one(),
+                                 country_code="cz")
+
+        (rgl,) = out.realized_gains_losses
+        assert rgl.realization_type is RealizationType.OPTION_TRADE_CLOSE_SHORT
+        assert rgl.quantity_realized == Decimal("1")
+        assert rgl.total_cost_basis_eur == Decimal("4200.00")
+        assert rgl.total_realization_value_eur == Decimal("2998.50")
+        assert rgl.gross_gain_loss_eur == Decimal("-1201.50")
+
+    def test_premium_is_not_lost_when_the_delivery_row_is_missing(self):
+        """The underlying is known and shares should have come, but no
+        delivery row does. The premium used to wait for it and then vanish;
+        it is realised on the option, which the row closes at zero."""
+        put = _option_on(STOCK, put_call="P", strike="50", expiry="2025-03-21",
+                         conid="900000213")
+        trades = [
+            _trade_row(**STOCK, trade_date="2025-01-10", quantity="10", price="48",
+                       buy_sell="BUY", open_close="O", tx_id="3201"),
+            # Written for 3.00: 300 received - 1 commission.
+            _trade_row(**put, trade_date="2025-03-03", quantity="-1", price="3.00",
+                       buy_sell="SELL", open_close="O", tx_id="3202"),
+            _trade_row(**put, trade_date="2025-03-21", quantity="1", price="0",
+                       buy_sell="BUY", open_close="C", tx_id="3203",
+                       commission="0", notes="A"),
+        ]
+        held = [[ACCOUNT, "EUR", "STK", "COMMON", "SYNA", "SYNTHETIC ALPHA INC",
+                 "US0000000201", "10", "480", "48", "481", None, "900000201",
+                 None, "1"]]
+
+        out = self._run_pipeline(trades_data=trades, positions_end_data=held,
+                                 tax_year=TAX_YEAR,
+                                 custom_rate_provider=_one_to_one(),
+                                 country_code="cz")
+
+        gains = [(r.realization_type, r.gross_gain_loss_eur)
+                 for r in out.realized_gains_losses]
+        assert gains == [(RealizationType.OPTION_TRADE_CLOSE_SHORT, Decimal("299.00"))]
