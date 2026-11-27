@@ -17,8 +17,12 @@ per-asset min-cost flow); at the ledger level it falls back to FIFO order
 """
 from __future__ import annotations
 
+import hashlib
+import json
+from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import Enum
-from typing import List
+from typing import List, Mapping, Optional, Tuple
 
 
 class PairingMethod(str, Enum):
@@ -63,6 +67,62 @@ def coerce(method) -> PairingMethod:
     if isinstance(method, PairingMethod):
         return method
     return PairingMethod(str(method))
+
+
+# One filed sale of an ``optimal`` year: which lots it consumed, as
+# ((lot source_transaction_id, quantity), ...).
+PlanEntry = Tuple[Tuple[str, Decimal], ...]
+
+
+def _quantity_text(q: Decimal) -> str:
+    """A canonical spelling of a quantity: 2, 2.0 and 2.00 are one quantity."""
+    text = format(Decimal(q).normalize(), "f")
+    return text
+
+
+@dataclass(frozen=True)
+class PairingHistory:
+    """How each year BEFORE the tax year was filed.
+
+    The start-of-year lots are rebuilt by replaying every earlier year; each
+    year has to be replayed with the method it was filed with, or the opening
+    lots (their cost and their dates) disagree with the returns already
+    filed. A year that is not listed was filed FIFO, the statutory default.
+
+    ``plans`` holds, for a year filed ``optimal``, the solver's assignment:
+    sale IBKR TransactionID -> ((lot source_transaction_id, quantity), ...).
+    The solver itself cannot be re-run for a past year (its answer depends on
+    the rates and on fixes made since), so the filed answer is stored.
+    """
+
+    methods: Mapping[int, PairingMethod] = field(default_factory=dict)
+    plans: Mapping[int, Mapping[str, PlanEntry]] = field(default_factory=dict)
+    default: PairingMethod = PairingMethod.FIFO
+
+    def method_for(self, year: int) -> PairingMethod:
+        return coerce(self.methods.get(year, self.default))
+
+    def plan_for(self, year: int, sale_tx_id) -> Optional[PlanEntry]:
+        if not sale_tx_id:
+            return None
+        return (self.plans.get(year) or {}).get(str(sale_tx_id))
+
+    def fingerprint(self) -> str:
+        """A stable text naming this history, for a run's input fingerprint."""
+        methods = ",".join(
+            f"{year}:{coerce(m).value}" for year, m in sorted(self.methods.items())
+        )
+        canonical = {
+            str(year): {
+                str(tx): [[str(lot), _quantity_text(qty)] for lot, qty in entry]
+                for tx, entry in sorted(plan.items())
+            }
+            for year, plan in sorted(self.plans.items())
+        }
+        digest = hashlib.sha256(
+            json.dumps(canonical, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        return f"methods={methods}|default={coerce(self.default).value}|plans={digest}"
 
 
 def consumption_order_indices(num_lots: int, method: PairingMethod) -> List[int]:

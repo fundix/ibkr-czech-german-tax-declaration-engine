@@ -20,7 +20,7 @@ from src.utils.currency_converter import CurrencyConverter
 from src.utils.historical_price_provider import HistoricalPriceProvider
 from src.utils.exchange_rate_provider import ECBExchangeRateProvider, ExchangeRateProvider # Added base for custom provider
 from src.engine.calculation_engine import run_main_calculations
-from src.engine.pairing import PairingMethod
+from src.engine.pairing import PairingHistory, PairingMethod
 from src.identification.asset_resolver import AssetResolver
 from src.countries.registry import get_tax_plugin
 
@@ -40,7 +40,10 @@ class ProcessingOutput:
                  fifo_ledgers_by_asset_id: Optional[Dict[Any, Any]] = None,
                  eoy_mismatch_details: Optional[List[Dict[str, Any]]] = None,
                  unapplied_corporate_actions: Optional[List[Dict[str, Any]]] = None,
-                 option_events_closed_at_zero: Optional[List[Dict[str, Any]]] = None):
+                 option_events_closed_at_zero: Optional[List[Dict[str, Any]]] = None,
+                 pairing_method: Optional[PairingMethod] = None,
+                 pairing_plan: Optional[Dict[str, List[Tuple[str, Decimal]]]] = None,
+                 soy_unverified_symbols: Optional[List[str]] = None):
         self.realized_gains_losses = realized_gains_losses
         self.vorabpauschale_items = vorabpauschale_items
         self.processed_income_events = processed_income_events
@@ -60,6 +63,16 @@ class ProcessingOutput:
         # option at zero, which means a trade or a settlement amount is
         # missing from the inputs. Also a review note in the CZ aggregation.
         self.option_events_closed_at_zero = list(option_events_closed_at_zero or [])
+        # The method this run paired with, and -- for ``optimal`` -- which lots
+        # each tax-year sale consumed (sale TransactionID -> [(lot
+        # TransactionID, quantity)]). Stored when the year is marked filed so
+        # a later year can replay it.
+        self.pairing_method = pairing_method
+        self.pairing_plan = dict(pairing_plan or {})
+        # Symbols whose start-of-year lots came from a fallback after an
+        # earlier year filed with a non-FIFO method: which lots they are is
+        # not established, so their dates are marked estimated.
+        self.soy_unverified_symbols = list(soy_unverified_symbols or [])
         # Final FIFO ledgers (open lots after all tax-year events) keyed by
         # asset internal id — end-of-year open positions for portfolio views.
         self.fifo_ledgers_by_asset_id = fifo_ledgers_by_asset_id or {}
@@ -79,6 +92,7 @@ def run_core_processing_pipeline(
     country_code: str = "de",
     pairing_method: PairingMethod = PairingMethod.FIFO,
     statement_of_funds_file_path: Optional[str] = None,
+    pairing_history: Optional[PairingHistory] = None,
 ) -> ProcessingOutput:
     """
     Runs the core data processing pipeline: parsing, enrichment, and calculations.
@@ -183,6 +197,7 @@ def run_core_processing_pipeline(
             # nothing and stops at a sale it cannot match, as it always did.
             hold_unapplied_shares_as_placeholders=bool(
                 getattr(_tax_plugin, "reports_unapplied_corporate_actions", False)),
+            pairing_history=pairing_history,
         )
     except Exception as e:
         logger.critical(f"Calculation engine failed with unexpected error: {e}", exc_info=True)
@@ -205,6 +220,12 @@ def run_core_processing_pipeline(
             classifier=_tax_classifier.classify,
         )
 
+    soy_unverified_symbols = sorted({
+        _symbol_of(orchestrator.asset_resolver, asset_id)
+        for asset_id, ledger in fifo_ledgers.items()
+        if getattr(ledger, "soy_lots_unverified", False)
+    })
+
     return ProcessingOutput(
         realized_gains_losses=realized_gains_losses,
         vorabpauschale_items=vorabpauschale_items,
@@ -216,4 +237,13 @@ def run_core_processing_pipeline(
         eoy_mismatch_details=eoy_mismatch_details,
         unapplied_corporate_actions=unapplied_corporate_actions,
         option_events_closed_at_zero=option_events_closed_at_zero,
+        pairing_method=pairing_method,
+        soy_unverified_symbols=soy_unverified_symbols,
     )
+
+
+def _symbol_of(asset_resolver: AssetResolver, asset_id) -> str:
+    asset = asset_resolver.get_asset_by_id(asset_id)
+    if asset is None:
+        return str(asset_id)
+    return asset.ibkr_symbol or asset.get_classification_key()
