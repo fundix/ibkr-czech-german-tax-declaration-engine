@@ -900,3 +900,178 @@ class TestOptimalAcrossYears:
     def test_fifo_run_writes_no_plan(self, two_years):
         _execute(two_years, "2024-fifo", 2024)
         assert not list((two_years.runs_dir / "2024-fifo").glob("pairing_plan.*"))
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups (F1-F6)
+# ---------------------------------------------------------------------------
+
+from src.engine.fifo_manager import FifoLot, plan_key  # noqa: E402
+
+
+def _carried_lot(qty, total, hps, carried_from, src="M1"):
+    return FifoLot(
+        acquisition_date="2023-11-01", quantity=Decimal(qty),
+        unit_cost_basis_eur=Decimal(total) / Decimal(qty),
+        total_cost_basis_eur=Decimal(total), source_transaction_id=src,
+        holding_period_start=hps, carried_from=carried_from)
+
+
+def _merger_ledger(carried=("OLD:11", "OLD:12")):
+    ledger = _ledger(PairingMethod.OPTIMAL)
+    ledger.lots = [
+        _carried_lot("10", "1000", "2023-01-10", carried[0]),
+        _carried_lot("10", "2000", "2023-06-12", carried[1]),
+    ]
+    ledger._reset_bookkeeping()
+    return ledger
+
+
+class TestF1PlanKeys:
+
+    def test_carried_lots_replay_to_the_lot_the_filed_run_sold(self):
+        from src.countries.cz.optimal_pairing import rematch_cz_optimal
+        filed = _merger_ledger()
+        rgls = _sell(filed, "2024-06-10", "10", "15000", "103")
+        out = rematch_cz_optimal(rgls, {filed.asset_internal_id: filed}, [], 2024)
+        # The optimum sells the 2 000-cost lot (a loss) ...
+        (r,) = out.realized_gains_losses
+        assert r.total_cost_basis_eur == Decimal("2000")
+        assert out.plan == {"103": [("OLD:12", Decimal("10"))]}
+        assert plan_key(filed.lots[0]) == "OLD:11"
+
+        replay = _merger_ledger()
+        replay.consume_long_lots_for_sale(
+            _ev(replay, FinancialEventType.TRADE_SELL_LONG, "2024-06-10",
+                "-10", "15000", "103"),
+            is_historical_simulation=True, method=PairingMethod.OPTIMAL,
+            plan=tuple(out.plan["103"]))
+        # ... so the replay keeps the 1 000-cost lot, like the filed run.
+        assert [l.total_cost_basis_eur for l in replay.lots] == [Decimal("1000")]
+        assert [l.total_cost_basis_eur for l in filed.lots] == [Decimal("1000")]
+
+    def test_lots_sharing_a_key_are_ambiguous(self):
+        ledger = _merger_ledger(carried=(None, None))
+        with pytest.raises(UserWarning, match="ambiguous|nejednozn"):
+            ledger.consume_long_lots_for_sale(
+                _ev(ledger, FinancialEventType.TRADE_SELL_LONG, "2024-06-10",
+                    "-10", "15000", "103"),
+                is_historical_simulation=True, method=PairingMethod.OPTIMAL,
+                plan=(("M1", Decimal("10")),))
+        assert ledger._replayed_non_fifo_disposal is True
+
+    def test_ambiguous_plan_ends_in_the_flagged_fallback(self, run):
+        trades = [
+            _trade(PAIRA, "2024-01-10", "10", "100", "101"),
+            _trade(PAIRA, "2024-03-11", "10", "130", "101"),
+            _trade(PAIRA, "2024-06-10", "-10", "150", "103"),
+            _trade(PAIRA, "2025-06-10", "-10", "160", "104"),
+        ]
+        history = PairingHistory(
+            methods={2024: PairingMethod.OPTIMAL},
+            plans={2024: {"103": (("101", Decimal("10")),)}})
+        out = run(trades, tax_year=2025, soy=[_position(PAIRA, "10", "1000")],
+                  history=history)
+        (r,) = out.realized_gains_losses
+        assert r.is_acquisition_estimated
+        assert out.soy_unverified_symbols == ["PAIRA"]
+
+
+def test_f2_cli_warns_that_earlier_years_are_fifo(caplog):
+    from src.main import warn_cli_pairing_history
+    with caplog.at_level("WARNING"):
+        warn_cli_pairing_history("lifo")
+    assert any("FIFO" in r.message and r.levelname == "WARNING" for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        warn_cli_pairing_history("compare")
+    assert caplog.records
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        warn_cli_pairing_history("fifo")
+    assert not caplog.records
+
+
+def test_f3_sale_without_transaction_id_keeps_fifo():
+    from src.countries.cz.optimal_pairing import rematch_cz_optimal
+    ledger = _ledger(PairingMethod.OPTIMAL)
+    _buy(ledger, "2024-01-10", "10", "1000", "101")
+    _buy(ledger, "2024-03-11", "10", "1300", "102")
+    sale = _ev(ledger, FinancialEventType.TRADE_SELL_LONG, "2024-06-10",
+               "-10", "1500", None)
+    rgls = ledger.consume_long_lots_for_sale(sale)
+    out = rematch_cz_optimal(rgls, {ledger.asset_internal_id: ledger}, [], 2024)
+    assert out.rematched_asset_ids == set()
+    assert out.realized_gains_losses == rgls
+    assert [l.source_transaction_id for l in ledger.lots] == ["102"]
+
+
+class TestF4NormalisedHistory:
+
+    def test_fifo_years_do_not_change_the_fingerprint(self):
+        assert PairingHistory(methods={2023: PairingMethod.FIFO}).fingerprint() \
+            == PairingHistory().fingerprint()
+        assert PairingHistory(methods={2023: PairingMethod.LIFO}).fingerprint() \
+            != PairingHistory().fingerprint()
+
+    def test_adding_an_older_year_does_not_flag_runs(self, two_years):
+        svc = two_years
+        _execute(svc, "2025-fifo", 2025)
+        _write_dataset(svc, 2023, trades=[], eoy=[])
+        assert not svc.get_run("2025-fifo").get("pairing_history_changed")
+        _execute(svc, "2024-lifo", 2024, "lifo")
+        svc.mark_run_filed("2024-lifo")
+        assert svc.get_run("2025-fifo").get("pairing_history_changed") is True
+
+
+def test_f5_components_add_up_exactly_after_awkward_sales():
+    ledger = _ledger(PairingMethod.WEIGHTED_AVERAGE)
+    _buy(ledger, "2024-01-10", "3", "100.01", "101")
+    _buy(ledger, "2024-02-12", "7", "233.37", "102")
+    _buy(ledger, "2024-03-11", "11", "419.13", "103")
+    rgls = []
+    for n, qty in enumerate(("1.3333", "2.7", "0.07", "4.1", "3.33333333")):
+        rgls += _sell(ledger, f"2024-0{n + 4}-10", qty, "77.7", f"20{n}")
+        _buy(ledger, f"2024-0{n + 4}-11", "0.9", "31.17", f"30{n}")
+    for r in rgls:
+        assert sum((a for _d, a in r.cost_basis_components_eur), Decimal(0)) \
+            == r.total_cost_basis_eur
+    for lot in ledger.lots:
+        if lot.cost_components is not None:
+            assert sum((a for _d, a in lot.cost_components), Decimal(0)) \
+                == lot.total_cost_basis_eur
+
+
+def test_f6_mark_error_is_a_full_page(two_years):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from src.webapp.app import create_app
+    _execute(two_years, "2024-lifo", 2024, "lifo")
+    two_years._today = lambda: date(2024, 12, 1)
+    with TestClient(create_app(services=two_years)) as tc:
+        r = tc.post("/results/2024-lifo/filed", data={"mode": "daily"})
+    assert r.status_code == 200
+    assert "<html" in r.text.lower()
+    assert "neskončil" in r.text
+
+
+def test_f5_scaled_components_sum_to_the_target_to_the_last_digit():
+    """A case where proportional parts at 28 digits plus a remainder used to
+    miss the target in the last digit (found by a random search)."""
+    import random
+    from decimal import Context
+    from src.engine.fifo_manager import _scale_components
+    ctx = Context(prec=28)
+    target = Decimal("2315.130951050763493281567505")
+    parts = _scale_components(
+        [("2024-01-10", Decimal("2511.0")), ("2024-02-12", Decimal("3852.6159"))],
+        target, ctx)
+    assert sum((a for _d, a in parts), Decimal(0)) == target
+    rng = random.Random(7)
+    for _ in range(500):
+        comps = [(str(k), Decimal(str(round(rng.uniform(0.001, 5000), rng.randint(0, 6)))))
+                 for k in range(rng.randint(2, 5))]
+        target = ctx.divide(Decimal(str(rng.uniform(1, 9999))),
+                            Decimal(str(rng.uniform(0.3, 7))))
+        parts = _scale_components(comps, target, ctx)
+        assert sum((a for _d, a in parts), Decimal(0)) == target

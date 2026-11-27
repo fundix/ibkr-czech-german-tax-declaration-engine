@@ -4186,13 +4186,13 @@ class RunService:
         if meta["filed"]:
             meta["filed_mode"] = entry.get("fx_mode")
         meta["can_mark_filed"] = year < self._today().year
-        if "prior_year_pairing" in meta:
-            history, methods, _assumed = self._pairing_history(year)
-            now = {str(y): m.value for y, m in sorted(methods.items())}
-            stored_fp = meta.get("prior_year_pairing_fingerprint")
-            changed = (meta.get("prior_year_pairing") != now
-                       or (stored_fp is not None and stored_fp != history.fingerprint()))
-            if changed:
+        stored_fp = meta.get("prior_year_pairing_fingerprint")
+        if stored_fp is not None:
+            # The normalised fingerprint: only years filed non-FIFO and stored
+            # plans count, so an older dataset year added later (taken as
+            # FIFO, like an absent one) does not read as a changed marking.
+            history, _methods, _assumed = self._pairing_history(year)
+            if stored_fp != history.fingerprint():
                 meta["pairing_history_changed"] = True
                 meta["notes"] = list(meta.get("notes") or []) + [
                     "Od tohoto výpočtu se změnilo označení podaných dřívějších let "

@@ -46,7 +46,7 @@ from src.domain.results import RealizedGainLoss
 from src.engine.pairing_solver import (
     Assignment, SaleDemand, SupplyLot, solve_optimal_matching,
 )
-from src.engine.fifo_manager import _scale_components
+from src.engine.fifo_manager import _scale_components, plan_key
 from src.utils.type_utils import parse_ibkr_date
 
 logger = logging.getLogger(__name__)
@@ -311,6 +311,12 @@ def _rematch_from_journal(
     sales = list(getattr(ledger, "tax_year_sales", []))
     if not sales:
         return None
+    if any(not s.ibkr_transaction_id for s in sales):
+        # The plan names a sale by its TransactionID; a sale without one
+        # could not be replayed as filed, so the asset stays FIFO.
+        logger.info("Optimal pairing: asset %s has a sale without a TransactionID "
+                    "— keeping FIFO.", asset_id)
+        return None
     sold = sum((s.quantity for s in sales), ZERO)
     if sold != sum((r.quantity_realized for r in rgls), ZERO):
         logger.info("Optimal pairing: asset %s journal disagrees with its "
@@ -392,7 +398,7 @@ def _rematch_from_journal(
         new_rgls.append(rgl)
         if sale.ibkr_transaction_id:
             plan.setdefault(str(sale.ibkr_transaction_id), []).append(
-                (str(lot.source_transaction_id), qty))
+                (plan_key(lot), qty))
 
     # W05: the open lots are what the assignment left, not what FIFO left.
     remaining = []

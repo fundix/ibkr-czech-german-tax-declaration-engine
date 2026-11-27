@@ -32,6 +32,25 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
+def warn_cli_pairing_history(cz_pairing_method: str) -> None:
+    """Say that the CLI replays every earlier year as filed FIFO.
+
+    The opening lots come from replaying the earlier years, each with the
+    method it was filed with; only the web app records that method
+    (filed_years.json). For a FIFO run the assumption changes nothing, for
+    any other it may.
+    """
+    if (cz_pairing_method or "fifo") == "fifo":
+        return
+    logger.warning(
+        "Pairing method '%s': the CLI replays every earlier year as filed FIFO "
+        "when it rebuilds the start-of-year lots. If an earlier year was filed "
+        "with another method, the opening lots may differ from that filing; the "
+        "per-year filed method can only be recorded in the web app (\"Podáno\").",
+        cz_pairing_method,
+    )
+
+
 def main_application():
     """
     Main application entry point.
@@ -44,6 +63,8 @@ def main_application():
 
     from src.engine.pairing import PairingMethod
     cz_pairing_method = getattr(args, "cz_pairing_method", "fifo")
+    if args.country == "cz":
+        warn_cli_pairing_history(cz_pairing_method)
     # For a single chosen method, run the core with it up front; 'compare'
     # re-runs the core per method later via the matrix driver, so start on FIFO.
     _initial_pairing = (

@@ -89,6 +89,18 @@ def _long_lot_sort_key(lot: "FifoLot"):
     )
 
 
+def plan_key(lot: "FifoLot") -> str:
+    """How a filed pairing plan names a lot.
+
+    The IBKR TransactionID of its purchase -- except for a lot carried in by
+    a merger, which carries the merger's id like every other lot of that
+    merger; its ``carried_from`` (old asset + the original purchase) tells
+    it apart. Used where a plan is written and where it is replayed, so the
+    two cannot name lots differently.
+    """
+    return str(lot.carried_from or lot.source_transaction_id)
+
+
 def _lot_cost_date(lot: "FifoLot") -> str:
     """The day a lot's cost was paid: where its holding began."""
     return lot.holding_period_start or lot.acquisition_date
@@ -118,15 +130,22 @@ def _scale_components(components: List[Tuple[str, Decimal]], target: Decimal,
     """
     if not components:
         return []
+    # Every part but the last is put on a grid no finer than the target's
+    # own last digit, so the parts, their running sum and the remainder all
+    # fit the working precision without rounding: the last part is then the
+    # exact remainder and the parts add up to the target to the last digit.
+    wide = Context(prec=2 * ctx.prec + 10)
+    grid = Decimal(1).scaleb(min(target.as_tuple().exponent, -12))
     base = sum((amount for _d, amount in components), Decimal(0))
     scaled: List[Tuple[str, Decimal]] = []
     running = Decimal(0)
     for day, amount in components[:-1]:
-        part = (ctx.divide(ctx.multiply(amount, target), base)
+        part = (wide.divide(wide.multiply(amount, target), base)
                 if base != Decimal(0) else Decimal(0))
+        part = part.quantize(grid, context=wide)
         scaled.append((day, part))
-        running += part
-    scaled.append((components[-1][0], ctx.subtract(target, running)))
+        running = wide.add(running, part)
+    scaled.append((components[-1][0], wide.subtract(target, running)))
     return scaled
 
 
@@ -1514,11 +1533,16 @@ class FifoLedger:
         taken: dict = {}
         for lot_id, qty in plan:
             need = Decimal(qty)
-            for index, lot in enumerate(self.lots):
-                if need <= Decimal(0):
-                    break
-                if str(lot.source_transaction_id) != str(lot_id):
-                    continue
+            matching = [index for index, lot in enumerate(self.lots)
+                        if plan_key(lot) == str(lot_id)]
+            if len(matching) > 1:
+                # Several lots answer to the name: picking one would be a
+                # guess, and a wrong guess claims one cost twice.
+                raise UserWarning(
+                    f"Filed pairing plan for sale {label} names lot {lot_id}, which is "
+                    f"ambiguous: {len(matching)} replayed lots carry that key.")
+            for index in matching:
+                lot = self.lots[index]
                 free = lot.quantity - taken.get(index, Decimal(0))
                 if free <= Decimal(0):
                     continue

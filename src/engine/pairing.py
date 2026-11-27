@@ -108,16 +108,22 @@ class PairingHistory:
         return (self.plans.get(year) or {}).get(str(sale_tx_id))
 
     def fingerprint(self) -> str:
-        """A stable text naming this history, for a run's input fingerprint."""
+        """A stable text naming this history, for a run's input fingerprint.
+
+        Covers only what differs from FIFO: a year filed FIFO, a year assumed
+        FIFO and a year not listed at all replay identically, so adding an
+        unrelated older year or marking an assumed-FIFO year changes nothing.
+        """
         methods = ",".join(
             f"{year}:{coerce(m).value}" for year, m in sorted(self.methods.items())
+            if coerce(m) != PairingMethod.FIFO
         )
         canonical = {
             str(year): {
                 str(tx): [[str(lot), _quantity_text(qty)] for lot, qty in entry]
                 for tx, entry in sorted(plan.items())
             }
-            for year, plan in sorted(self.plans.items())
+            for year, plan in sorted(self.plans.items()) if plan
         }
         digest = hashlib.sha256(
             json.dumps(canonical, sort_keys=True).encode("utf-8")

@@ -7,6 +7,7 @@
     {% if meta.tax_year >= today_year() %} · <span class="badge warn" title="Rok ještě není uzavřen — obchody a pozice jsou k datu posledního stažení, daňová čísla jsou průběžný odhad.">běžící rok — průběžný odhad</span>{% endif %}
     {% if meta.get("filed") %} · <span class="badge ok" title="Podle tohoto výpočtu bylo podáno přiznání ({{ fx_labels.get(meta.get('filed_mode'), meta.get('filed_mode')) }}). Pozdější roky přehrávají tento rok jeho metodou párování.">Podáno</span>{% endif %}
   </p>
+  {% if filed_error %}<p class="note">⚠ Označení „Podáno“ se nepodařilo: {{ filed_error }}</p>{% endif %}
   {% if meta.get("can_mark_filed") and not meta.get("filed") %}
   <form method="post" action="/results/{{ meta.run_id }}/filed" class="inline"
         onsubmit="return confirm('Označit tento výpočet jako podané přiznání roku {{ meta.tax_year }}? Pozdější roky pak přehrají rok {{ meta.tax_year }} jeho metodou párování.');">
