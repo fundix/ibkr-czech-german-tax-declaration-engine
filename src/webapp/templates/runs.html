@@ -59,7 +59,7 @@
         <option value="fifo" data-desc="Prodej se páruje s nejdříve nakoupenými kusy (zákonný default). Nejdřív „vyčerpá“ staré nákupy, takže dlouho držené pozice snáze splní 3letý časový test (§4/1/u) a jsou osvobozené.">FIFO (nejstarší první)</option>
         <option value="lifo" data-desc="Prodej se páruje s naposledy nakoupenými kusy. U nedávno rostoucích titulů dává vyšší pořizovací cenu, a tím nižší zisk — čerstvé nákupy ale časový test zpravidla nesplní.">LIFO (nejnovější první)</option>
         <option value="weighted_average" data-desc="Pořizovací cena = vážený průměr celého drženého poolu. Identita lotů pro časový test se drží podle FIFO, přepisuje se jen cena.">Vážený průměr</option>
-        <option value="optimal" data-desc="Nástroj sám vybere kombinaci párování s nejnižší výslednou daní (nikdy není horší než FIFO). Počítá se pro každý titul zvlášť.">Daňově optimální</option>
+        <option value="optimal" data-desc="Nástroj sám spáruje prodeje s nákupy tak, aby byl základ daně v Kč co nejnižší. Počítá se pro každý titul zvlášť a jen s konkrétním kurzem — zvolte denní kurz ČNB nebo jednotný kurz, ne porovnání obou.">Daňově optimální</option>
       </select>
     </label>
     <p class="note" id="pairing-method-desc"></p>
@@ -77,7 +77,9 @@
   <h2>Datové sady</h2>
   {% if datasets %}
   <table>
-    <thead><tr><th>Rok</th><th>Obchody</th><th>Cash</th><th>Pozice začátek</th><th>Pozice konec</th><th>Korp. akce</th><th>Stav</th></tr></thead>
+    {# "filed" exists only when the running code knows about filed years. #}
+    {% set show_filed = datasets[0].filed is defined %}
+    <thead><tr><th>Rok</th><th>Obchody</th><th>Cash</th><th>Pozice začátek</th><th>Pozice konec</th><th>Korp. akce</th><th>Stav</th>{% if show_filed %}<th>Podáno</th>{% endif %}</tr></thead>
     <tbody>
       {% for ds in datasets | reverse %}
       <tr>
@@ -92,6 +94,18 @@
           {% else %}<span class="badge warn">chybí soubory</span>{% endif %}
           {% for note in ds.notes %}<div class="note">{{ note }}</div>{% endfor %}
         </td>
+        {% if show_filed %}
+        <td>
+          {% if ds.filed %}
+          <span class="badge ok" title="Podáno podle výpočtu {{ ds.filed.run_id }} ({{ ds.filed.fx_mode }})">Podáno · {{ ds.filed.pairing_method }}</span>
+          <a href="/results/{{ ds.filed.run_id }}">{{ ds.filed.run_id }}</a>
+          <form method="post" action="/runs/filed/{{ ds.year }}/delete" class="inline"
+                onsubmit="return confirm('Zrušit označení podaného výpočtu roku {{ ds.year }}? Rok se pak bere jako podaný metodou FIFO.');">
+            <button type="submit" class="link">zrušit</button>
+          </form>
+          {% else %}<span class="muted" title="Bez označení se rok bere jako podaný metodou FIFO.">– (FIFO)</span>{% endif %}
+        </td>
+        {% endif %}
       </tr>
       {% endfor %}
     </tbody>
@@ -113,7 +127,7 @@
         <td>{{ run.tax_year }}</td>
         <td>{{ run.account_ids | join(", ") if run.account_ids else "–" }}</td>
         <td>{{ run.fx_mode }}</td>
-        <td>{{ run.pairing_method or "fifo" }}</td>
+        <td>{{ run.pairing_method or "fifo" }}{% if run.filed %} <span class="badge ok">Podáno</span>{% endif %}</td>
         <td class="num">{% if run.summary.daily %}{{ run.summary.daily.final_tax_czk | czk }} Kč{% else %}–{% endif %}</td>
         <td>{{ run.duration_s }} s</td>
         <td><a href="/results/{{ run.run_id }}">Výsledky →</a></td>

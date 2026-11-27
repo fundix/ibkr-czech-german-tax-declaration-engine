@@ -109,12 +109,15 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
                 "missing": ds.missing_required,
                 "notes": ds.notes,
                 "latest_run_id": svc.latest_run_id(ds.year),
+                # Which run the year was filed from (marked on the web GUI), or
+                # None: an unmarked year is replayed as filed FIFO.
+                "filed": ds.filed,
             })
         return _jsonable({"datasets": years, "runs": svc.list_runs(limit=10)})
 
     @mcp.tool()
     def run_pipeline(tax_year: int, fx_mode: str = "compare", pairing_method: str = "fifo") -> dict:
-        """Run the full tax computation for a year. fx_mode: daily | uniform | compare. pairing_method: fifo | lifo | weighted_average | optimal (the §10 lot-matching method for disposed securities; 'optimal' is the tax-minimising solver). Takes seconds with warm FX caches, up to ~1 min cold. Returns the run summary."""
+        """Run the full tax computation for a year. fx_mode: daily | uniform | compare. pairing_method: fifo | lifo | weighted_average | optimal (the §10 lot-matching method for disposed securities; 'optimal' is the tax-minimising solver and needs fx_mode daily or uniform, since the CZK optimum depends on the rates). Earlier years are replayed with the method they were marked as filed with on the web GUI (unmarked = FIFO). Takes seconds with warm FX caches, up to ~1 min cold. Returns the run summary."""
         return _jsonable(svc.run_pipeline_sync(tax_year, fx_mode, pairing_method))
 
     @mcp.tool()

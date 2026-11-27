@@ -5,7 +5,19 @@
   <p class="muted">Kurz: {{ fx_labels.get(meta.fx_mode, meta.fx_mode) }} · Metoda párování §10: {{ pairing_labels.get(meta.get("pairing_method", "fifo"), "FIFO") }} · {{ meta.created_at[:19] | replace("T", " ") }} · {{ meta.duration_s }} s
     {% if meta.eoy_mismatch_error_count %} · <span class="badge warn">{{ meta.eoy_mismatch_error_count }} neshod EOY pozic!</span>{% endif %}
     {% if meta.tax_year >= today_year() %} · <span class="badge warn" title="Rok ještě není uzavřen — obchody a pozice jsou k datu posledního stažení, daňová čísla jsou průběžný odhad.">běžící rok — průběžný odhad</span>{% endif %}
+    {% if meta.get("filed") %} · <span class="badge ok" title="Podle tohoto výpočtu bylo podáno přiznání ({{ fx_labels.get(meta.get('filed_mode'), meta.get('filed_mode')) }}). Pozdější roky přehrávají tento rok jeho metodou párování.">Podáno</span>{% endif %}
   </p>
+  {% if meta.get("can_mark_filed") and not meta.get("filed") %}
+  <form method="post" action="/results/{{ meta.run_id }}/filed" class="inline"
+        onsubmit="return confirm('Označit tento výpočet jako podané přiznání roku {{ meta.tax_year }}? Pozdější roky pak přehrají rok {{ meta.tax_year }} jeho metodou párování.');">
+    {% if modes | length > 1 %}
+    <label>Podáno s kurzem
+      <select name="mode">{% for m in modes %}<option value="{{ m }}" {{ 'selected' if m == mode }}>{{ fx_labels.get(m, m) }}</option>{% endfor %}</select>
+    </label>
+    {% elif mode %}<input type="hidden" name="mode" value="{{ mode }}">{% endif %}
+    <button type="submit" title="Pozdější roky sestaví loty k 1. 1. podle metody párování tohoto výpočtu.">Podáno</button>
+  </form>
+  {% endif %}
   {% for note in meta.get("notes", []) %}<p class="note">⚠ {{ note }}</p>{% endfor %}
 
   {% if modes | length > 1 %}

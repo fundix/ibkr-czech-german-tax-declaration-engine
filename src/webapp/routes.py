@@ -243,6 +243,25 @@ def start_run(
     return _tpl(request, "partials/job_status.html", job_id=job_id, run_id=run_id)
 
 
+@router.post("/results/{run_id}/filed", response_class=HTMLResponse)
+def mark_filed(request: Request, run_id: str, mode: Optional[str] = Form(None)):
+    """Mark the run its (closed) year was filed from."""
+    svc = _svc(request)
+    try:
+        svc.mark_run_filed(run_id, mode or None)
+    except ValueError as exc:
+        return _tpl(request, "partials/job_error.html", error=str(exc))
+    target = f"/results/{run_id}" + (f"?mode={quote_plus(mode)}" if mode else "")
+    return RedirectResponse(target, status_code=303)
+
+
+@router.post("/runs/filed/{year}/delete")
+def unmark_filed(request: Request, year: int):
+    """Forget which run a year was filed from (it is then taken as FIFO)."""
+    _svc(request).unmark_filed_year(year)
+    return RedirectResponse("/runs", status_code=303)
+
+
 @router.get("/runs/{job_id}/status", response_class=HTMLResponse)
 def job_status(request: Request, job_id: str):
     svc = _svc(request)

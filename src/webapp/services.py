@@ -42,7 +42,9 @@ import src.config as config
 from src.countries.cz.aggregation_service import run_cz_aggregation, run_cz_compare
 from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.time_test import time_test_deadline
-from src.engine.pairing import PairingMethod, coerce as coerce_pairing_method
+from src.engine.pairing import (
+    PairingHistory, PairingMethod, coerce as coerce_pairing_method,
+)
 from src.parsers.positions_parser import parse_positions_csv
 from src.parsers.statement_of_funds_parser import (
     EndingBalances, ending_balances, parse_statement_of_funds_csv,
@@ -199,6 +201,14 @@ SELL_TARGETS_VERSION = 1
 MAX_ZONES_PER_SYMBOL = 10
 MAX_TARGET_SYMBOLS = 200
 MAX_IMPORT_LINES = 500
+
+# Which run each closed year was FILED with -- user state, not a run artifact.
+# The start-of-year lots of a later year are rebuilt by replaying the earlier
+# years, each with the method it was filed with (audit V04); an unmarked year
+# is taken as filed FIFO.
+FILED_YEARS_FILE = "filed_years.json"
+FILED_YEARS_LOCK = "filed_years.lock"
+FILED_YEARS_VERSION = 1
 
 # Live quotes are one HTTP round trip per symbol (~200 ms), fetched inline by
 # the sell-zone ladder before it can render. Measured on the real portfolio:
@@ -483,11 +493,23 @@ def _effective_fx_mode(fx_mode: str, tax_year: int, current_year: int):
     return fx_mode, []
 
 
+def _reject_optimal_with_compare(pairing_method: str, fx_mode: str) -> None:
+    """``optimal`` minimises the CZK base, which depends on the rates: the
+    pairing found for one FX mode is not the optimum of the other (W06)."""
+    if pairing_method == PairingMethod.OPTIMAL.value and fx_mode == "compare":
+        raise ValueError(
+            "Daňově optimální párování závisí na kurzu — zvolte denní kurz ČNB "
+            "nebo jednotný kurz, ne porovnání obou.")
+
+
 @dataclass
 class YearDataset:
     year: int
     files: Dict[str, Optional[Path]]  # slot -> path or None
     notes: List[str] = field(default_factory=list)
+    # The filed_years.json entry of this year (pairing_method, fx_mode,
+    # run_id, marked_at), or None when no run is marked as filed.
+    filed: Optional[Dict[str, Any]] = None
 
     @property
     def missing_required(self) -> List[str]:
@@ -530,6 +552,7 @@ class RunService:
 
     def list_years(self) -> List[YearDataset]:
         datasets = []
+        filed = self.load_filed_years().get("years", {})
         if self.data_dir.is_dir():
             for year_dir in sorted(self.data_dir.iterdir()):
                 if not (year_dir.is_dir() and year_dir.name.isdigit()):
@@ -539,7 +562,8 @@ class RunService:
                     slot: (year_dir / name if (year_dir / name).is_file() else None)
                     for slot, name in settings.SLOT_FILES.items()
                 }
-                ds = YearDataset(year=year, files=files)
+                ds = YearDataset(year=year, files=files,
+                                 filed=filed.get(str(year)))
                 if files["positions_start"] is None:
                     prev = self._positions_end_of(year - 1)
                     ds.notes.append(
@@ -797,6 +821,15 @@ class RunService:
             f"{_FINGERPRINT_VERSION}|year={tax_year}|fx={eff_mode}"
             f"|pairing={pairing_method}".encode()
         )
+        # How the earlier years were filed decides the opening lots. The
+        # years only ASSUMED to be FIFO are hashed only when the run warns
+        # about them: marking such a year FIFO changes nothing then, and must
+        # not make a run without the warning look stale.
+        pairing = self._pairing_context(tax_year, pairing_method)
+        h.update(f"|history={pairing['history'].fingerprint()}".encode())
+        if pairing["warn_assumed"]:
+            h.update(("|assumed-fifo=" + ",".join(
+                str(y) for y in pairing["assumed"])).encode())
         if self._unsettled_statements_from(tax_year) is not None:
             # A closed year computed from statements of a year still open
             # carries a warning. The same files were hashed while the year
@@ -868,6 +901,189 @@ class RunService:
         return sorted(accounts) or [DEFAULT_ACCOUNT]
 
     # ------------------------------------------------------------------
+    # Filed years (which run each closed year was filed with)
+    # ------------------------------------------------------------------
+
+    @property
+    def filed_years_path(self) -> Path:
+        return self.data_dir / FILED_YEARS_FILE
+
+    def load_filed_years(self) -> Dict[str, Any]:
+        """The filed-years registry; an empty one when there is none yet."""
+        empty = {"version": FILED_YEARS_VERSION, "updated_at": None, "years": {}}
+        path = self.filed_years_path
+        if not path.is_file():
+            return empty
+        try:
+            store = load_json(path)
+        except Exception:  # noqa: BLE001 — an unreadable file must not stop a run
+            logger.warning(f"Unreadable {path}; treating every year as filed FIFO.")
+            return empty
+        if not isinstance(store, dict) or not isinstance(store.get("years"), dict):
+            return empty
+        return store
+
+    def _write_filed_years(self, mutator) -> None:
+        """Read-modify-write under its own lock (pattern: _write_sell_targets)."""
+        with engine_file_lock(lock_file=self.data_dir / FILED_YEARS_LOCK):
+            store = self.load_filed_years()
+            mutator(store)
+            store["version"] = FILED_YEARS_VERSION
+            store["updated_at"] = _utc_now_iso()
+            self.filed_years_path.parent.mkdir(parents=True, exist_ok=True)
+            dump_json(store, self.filed_years_path)
+
+    def mark_run_filed(self, run_id: str, mode: Optional[str] = None) -> Dict[str, Any]:
+        """Record that the tax return of a closed year was filed from *run_id*.
+
+        Later years then replay this year with the run's pairing method (and,
+        for ``optimal``, with the assignment the run stored). Returns the entry.
+        """
+        meta = self.get_run(run_id)
+        if meta is None:
+            raise ValueError(f"Výpočet {run_id} neexistuje.")
+        year = meta.get("tax_year")
+        if not isinstance(year, int) or year >= self._today().year:
+            raise ValueError(
+                f"Rok {year} ještě neskončil — jako podaný lze označit jen výpočet "
+                "uzavřeného roku.")
+        modes = list(meta.get("modes") or [])
+        mode = mode or (modes[0] if modes else meta.get("fx_mode"))
+        if modes and mode not in modes:
+            raise ValueError(f"Výpočet {run_id} nemá kurzový režim {mode}.")
+        method = meta.get("pairing_method") or PairingMethod.FIFO.value
+        entry: Dict[str, Any] = {
+            "pairing_method": method,
+            "fx_mode": mode,
+            "run_id": run_id,
+            "marked_at": _utc_now_iso(),
+        }
+        if method == PairingMethod.OPTIMAL.value:
+            plan_path = self.runs_dir / run_id / f"pairing_plan.{mode}.json"
+            if not plan_path.is_file():
+                raise ValueError(
+                    f"Výpočet {run_id} nemá uložené párování prodejů s nákupy "
+                    "(vznikl ve starší verzi programu). Rok "
+                    f"{year} přepočítejte metodou „daňově optimální“ se stejným "
+                    "kurzem a označte jako podaný nový výpočet.")
+            entry["pairing_plan"] = (load_json(plan_path) or {}).get("plan") or {}
+
+        def _mutate(store: Dict[str, Any]) -> None:
+            store.setdefault("years", {})[str(year)] = entry
+
+        self._write_filed_years(_mutate)
+        logger.info(f"Year {year} marked as filed from run {run_id} ({method}, {mode}).")
+        return entry
+
+    def unmark_filed_year(self, year: int) -> bool:
+        """Forget which run *year* was filed with; True when there was a mark."""
+        removed = {"hit": False}
+
+        def _mutate(store: Dict[str, Any]) -> None:
+            removed["hit"] = store.setdefault("years", {}).pop(str(year), None) is not None
+
+        self._write_filed_years(_mutate)
+        return removed["hit"]
+
+    def _pairing_history(
+        self, tax_year: int,
+    ) -> Tuple[PairingHistory, Dict[int, PairingMethod], List[int]]:
+        """How every year before *tax_year* was filed.
+
+        Returns the history for the engine, the effective method per year, and
+        the years with no filed mark (taken as FIFO, the statutory default).
+        """
+        registry = self.load_filed_years().get("years", {})
+        years = {ds.year for ds in self.list_years() if ds.year < tax_year}
+        years |= {int(y) for y in registry if str(y).isdigit() and int(y) < tax_year}
+        methods: Dict[int, PairingMethod] = {}
+        plans: Dict[int, Dict[str, Tuple[Tuple[str, Decimal], ...]]] = {}
+        assumed: List[int] = []
+        for year in sorted(years):
+            entry = registry.get(str(year))
+            if not isinstance(entry, dict):
+                methods[year] = PairingMethod.FIFO
+                assumed.append(year)
+                continue
+            try:
+                method = coerce_pairing_method(entry.get("pairing_method"))
+            except ValueError:
+                method = PairingMethod.FIFO
+            methods[year] = method
+            plan = entry.get("pairing_plan")
+            if method == PairingMethod.OPTIMAL and isinstance(plan, dict):
+                plans[year] = {
+                    str(tx): tuple((str(lot), Decimal(str(qty))) for lot, qty in rows)
+                    for tx, rows in plan.items()
+                }
+        return PairingHistory(methods=methods, plans=plans), methods, assumed
+
+    def _raw_run_metas(self) -> List[Dict[str, Any]]:
+        """Every stored meta.json as written (no read-time flags)."""
+        metas = []
+        if self.runs_dir.is_dir():
+            for run_dir in self.runs_dir.iterdir():
+                meta_path = run_dir / "meta.json"
+                if meta_path.is_file():
+                    try:
+                        metas.append(load_json(meta_path))
+                    except Exception:
+                        logger.warning(f"Unreadable meta.json in {run_dir}")
+        return metas
+
+    def _pairing_context(self, tax_year: int, pairing_method: str) -> Dict[str, Any]:
+        """The pairing history of a run and whether it has to warn about it.
+
+        The warning about years assumed FIFO is written only when something
+        other than FIFO is in play -- this run's method, a year marked filed
+        with another method, or a stored run of an unmarked year computed
+        with another method. Otherwise FIFO everywhere is the plain truth.
+        """
+        history, methods, assumed = self._pairing_history(tax_year)
+        warn = False
+        if assumed:
+            try:
+                own = coerce_pairing_method(pairing_method)
+            except ValueError:
+                own = PairingMethod.FIFO
+            warn = (
+                own != PairingMethod.FIFO
+                or any(m != PairingMethod.FIFO
+                       for y, m in methods.items() if y not in assumed)
+                or any(
+                    meta.get("tax_year") in assumed
+                    and (meta.get("pairing_method") or "fifo") != PairingMethod.FIFO.value
+                    for meta in self._raw_run_metas()
+                )
+            )
+        return {"history": history, "methods": methods, "assumed": assumed,
+                "warn_assumed": warn}
+
+    @staticmethod
+    def _pairing_notes(tax_year: int, ctx: Dict[str, Any]) -> List[str]:
+        """Czech notes for a run's header about the earlier years' pairing."""
+        notes: List[str] = []
+        if ctx["warn_assumed"]:
+            years = ", ".join(str(y) for y in ctx["assumed"])
+            notes.append(
+                f"Roky {years} nejsou označené jako podané — loty k 1. 1. {tax_year} "
+                "vycházejí z předpokladu, že byly podány metodou FIFO. Byl-li "
+                "některý z nich podán jinou metodou, označte jeho podaný výpočet "
+                "tlačítkem „Podáno“ a rok "
+                f"{tax_year} přepočítejte."
+            )
+        non_fifo = [
+            f"{y} – {m.label_cs}" for y, m in sorted(ctx["methods"].items())
+            if m != PairingMethod.FIFO
+        ]
+        if non_fifo:
+            notes.append(
+                f"Loty k 1. 1. {tax_year} vycházejí z párování podaných dřívějších "
+                f"let: {'; '.join(non_fifo)}."
+            )
+        return notes
+
+    # ------------------------------------------------------------------
     # Runs
     # ------------------------------------------------------------------
 
@@ -889,6 +1105,7 @@ class RunService:
             raise ValueError(f"Neznámý kurzový režim: {fx_mode}")
         if pairing_method not in PAIRING_METHODS:
             raise ValueError(f"Neznámá párovací metoda: {pairing_method}")
+        _reject_optimal_with_compare(pairing_method, fx_mode)
         ds = self.get_year(tax_year)
         if ds is None:
             raise ValueError(f"Pro rok {tax_year} nejsou nahraná žádná data.")
@@ -928,6 +1145,7 @@ class RunService:
         """
         started = time.monotonic()
         requested_fx_mode = fx_mode  # before compare→daily downgrade, for the fingerprint
+        _reject_optimal_with_compare(pairing_method, requested_fx_mode)
         run_dir = self.runs_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -946,6 +1164,9 @@ class RunService:
         )
 
         pairing = coerce_pairing_method(pairing_method)
+        # Earlier years are replayed with the method they were FILED with.
+        pairing_ctx = self._pairing_context(tax_year, pairing.value)
+        run_notes.extend(self._pairing_notes(tax_year, pairing_ctx))
         sof = inputs.get("statement_of_funds")
         sof_path = str(sof) if sof else None
         with engine_file_lock():
@@ -972,7 +1193,18 @@ class RunService:
                 country_code="cz",
                 pairing_method=pairing,
                 statement_of_funds_file_path=sof_path,
+                pairing_history=pairing_ctx["history"],
             )
+            unverified_symbols = list(
+                getattr(processing, "soy_unverified_symbols", None) or [])
+            if unverified_symbols:
+                run_notes.append(
+                    "U titulů " + ", ".join(unverified_symbols) + " nelze ověřit, "
+                    f"které loty zůstaly k 1. 1. {tax_year}: dřívější rok byl podán "
+                    "jinou metodou než FIFO a loty se musely převzít z výpisu "
+                    "brokera, který páruje FIFO. Data nabytí jsou označena jako "
+                    "odhadnutá — časový test těchto titulů zkontrolujte ručně."
+                )
 
             compare_lines: List[str] = []
             if fx_mode == "compare":
@@ -1037,7 +1269,16 @@ class RunService:
             # Which version of the calculation made this run — see
             # _flag_stale_run for what reads it.
             "fingerprint_version": _FINGERPRINT_VERSION,
+            # How the earlier years were taken to be filed when this run was
+            # computed; _flag_stale_run compares it with the registry now.
+            "prior_year_pairing": {
+                str(y): m.value for y, m in sorted(pairing_ctx["methods"].items())
+            },
+            "prior_year_pairing_assumed": list(pairing_ctx["assumed"]),
+            "prior_year_pairing_fingerprint": pairing_ctx["history"].fingerprint(),
         }
+        if unverified_symbols:
+            meta["soy_unverified_symbols"] = unverified_symbols
         if unsettled_from is not None:
             # Structured twin of the note above (the dashboard card reads it).
             meta["unsettled_statements_from"] = unsettled_from.date().isoformat()
@@ -3847,15 +4088,7 @@ class RunService:
         almost daily, so the newest hundred runs soon all belong to it and a
         capped lookup stops seeing the closed years at all.
         """
-        metas = []
-        if self.runs_dir.is_dir():
-            for run_dir in self.runs_dir.iterdir():
-                meta_path = run_dir / "meta.json"
-                if meta_path.is_file():
-                    try:
-                        metas.append(load_json(meta_path))
-                    except Exception:
-                        logger.warning(f"Unreadable meta.json in {run_dir}")
+        metas = self._raw_run_metas()
         metas.sort(key=lambda m: m.get("created_at", ""), reverse=True)
         return [self._flag_stale_run(m) for m in metas[:limit]]
 
@@ -3890,6 +4123,40 @@ class RunService:
                 "změnil výpočet nebo kurzy, ze kterých vychází. Než čísla "
                 f"použijete, rok {year} přepočítejte."
             ]
+        return self._flag_filed_and_history(meta)
+
+    def _flag_filed_and_history(self, meta: Dict[str, Any]) -> Dict[str, Any]:
+        """Filed-year flags, decided on every read and never stored.
+
+        * ``filed`` -- the registry names this run as the one its year was
+          filed from (``filed_mode``: with which FX mode);
+        * ``can_mark_filed`` -- its year is closed, so it can be marked;
+        * ``pairing_history_changed`` -- the earlier years are now marked
+          differently from when this run was computed, so its opening lots
+          would come out differently.
+        """
+        year = meta.get("tax_year")
+        if not isinstance(year, int):
+            return meta
+        entry = self.load_filed_years().get("years", {}).get(str(year))
+        meta["filed"] = bool(isinstance(entry, dict)
+                             and entry.get("run_id") == meta.get("run_id"))
+        if meta["filed"]:
+            meta["filed_mode"] = entry.get("fx_mode")
+        meta["can_mark_filed"] = year < self._today().year
+        if "prior_year_pairing" in meta:
+            history, methods, _assumed = self._pairing_history(year)
+            now = {str(y): m.value for y, m in sorted(methods.items())}
+            stored_fp = meta.get("prior_year_pairing_fingerprint")
+            changed = (meta.get("prior_year_pairing") != now
+                       or (stored_fp is not None and stored_fp != history.fingerprint()))
+            if changed:
+                meta["pairing_history_changed"] = True
+                meta["notes"] = list(meta.get("notes") or []) + [
+                    "Od tohoto výpočtu se změnilo označení podaných dřívějších let "
+                    f"(metoda párování) — loty k 1. 1. {year} by teď vyšly jinak. "
+                    f"Rok {year} přepočítejte."
+                ]
         return meta
 
     def _flag_run_from_an_open_year(self, meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -3985,6 +4252,7 @@ class RunService:
             raise ValueError(f"Neznámý kurzový režim: {fx_mode}")
         if pairing_method not in PAIRING_METHODS:
             raise ValueError(f"Neznámá párovací metoda: {pairing_method}")
+        _reject_optimal_with_compare(pairing_method, fx_mode)
         if not force:
             cached = self.find_cached_run(tax_year, fx_mode, pairing_method)
             if cached:

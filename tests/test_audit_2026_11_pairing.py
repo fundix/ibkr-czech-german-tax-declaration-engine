@@ -310,3 +310,226 @@ class TestPairingHistory:
                            plans={2025: {"7": (("1", Decimal("2")),)}})
         assert c.fingerprint() != a.fingerprint()
         assert c.fingerprint() == d.fingerprint()
+
+
+# ---------------------------------------------------------------------------
+# V04 — the web service: filed years, notes, fingerprint, routes, MCP
+# ---------------------------------------------------------------------------
+
+from tests.support.golden_fx import GoldenCnbProvider, GoldenEcbProvider  # noqa: E402
+
+
+class PairingCnb(GoldenCnbProvider):
+    """Synthetic CZK per EUR for the dates of the two-year scenario."""
+
+    CZK_PER_UNIT = {
+        ("EUR", date(2024, 1, 10)): Decimal("25"),
+        ("EUR", date(2024, 3, 11)): Decimal("24"),
+        ("EUR", date(2024, 6, 10)): Decimal("25"),
+        ("EUR", date(2025, 2, 3)): Decimal("25"),
+        ("EUR", date(2025, 6, 10)): Decimal("25"),
+    }
+
+
+def _write_dataset(svc, year, *, trades, eoy=(), soy=None):
+    year_dir = svc.data_dir / str(year)
+    year_dir.mkdir(parents=True, exist_ok=True)
+    (year_dir / "trades.csv").write_text(create_trades_csv_string(list(trades)))
+    (year_dir / "cash_transactions.csv").write_text(
+        create_cash_transactions_csv_string([]))
+    (year_dir / "positions_end.csv").write_text(
+        create_positions_csv_string(list(eoy)))
+    if soy is not None:
+        (year_dir / "positions_start.csv").write_text(
+            create_positions_csv_string(list(soy)))
+
+
+@pytest.fixture
+def two_years(tmp_path):
+    """A service with the two-year scenario: 2024 and 2025 are closed."""
+    from src.webapp.services import RunService
+    svc = RunService(data_dir=tmp_path / "data", runs_dir=tmp_path / "runs")
+    svc._today = lambda: date(2026, 3, 1)
+    _write_dataset(svc, 2024, trades=YEAR1, eoy=[_position(PAIRA, "10", "1000")])
+    _write_dataset(svc, 2025, trades=YEAR2)
+    yield svc
+    svc.runner.shutdown(wait=False)
+
+
+def _execute(svc, run_id, year, method="fifo", fx="daily"):
+    return svc._execute_run(run_id, year, fx, ecb_provider=GoldenEcbProvider(),
+                            cz_fx_provider=PairingCnb(), pairing_method=method)
+
+
+def _disposals(svc, run_id, mode="daily"):
+    result = svc.load_result(run_id, mode)
+    return [it for it in result["items"]
+            if it.get("item_type") == "SECURITY_DISPOSAL"]
+
+
+class TestV04Service:
+
+    def test_marked_lifo_year_drives_the_next_year(self, two_years):
+        svc = two_years
+        _execute(svc, "2024-lifo", 2024, "lifo")
+        entry = svc.mark_run_filed("2024-lifo")
+        assert entry["pairing_method"] == "lifo" and entry["fx_mode"] == "daily"
+        assert svc.load_filed_years()["years"]["2024"]["run_id"] == "2024-lifo"
+
+        meta = _execute(svc, "2025-fifo", 2025)
+        (item,) = _disposals(svc, "2025-fifo")
+        assert Decimal(item["cost_basis_eur"]) == Decimal("1000")
+        assert item["acquisition_date"] == "2024-01-10"
+        assert meta["prior_year_pairing"] == {"2024": "lifo"}
+        assert meta["prior_year_pairing_assumed"] == []
+        assert any("2024 – LIFO" in n for n in meta["notes"])
+        assert not any("nejsou označené" in n for n in meta["notes"])
+
+    def test_unmarked_fifo_world_has_no_warning(self, two_years):
+        meta = _execute(two_years, "2025-fifo", 2025)
+        assert meta["prior_year_pairing"] == {"2024": "fifo"}
+        assert meta["prior_year_pairing_assumed"] == [2024]
+        assert not any("nejsou označené" in n for n in meta["notes"])
+        (item,) = _disposals(two_years, "2025-fifo")
+        assert Decimal(item["cost_basis_eur"]) == Decimal("1300")
+
+    def test_non_fifo_run_warns_about_unmarked_years(self, two_years):
+        meta = _execute(two_years, "2025-lifo", 2025, "lifo")
+        assert any("Roky 2024 nejsou označené" in n for n in meta["notes"])
+
+    def test_unmarked_year_with_a_non_fifo_run_warns(self, two_years):
+        _execute(two_years, "2024-lifo", 2024, "lifo")
+        meta = _execute(two_years, "2025-fifo", 2025)
+        assert any("Roky 2024 nejsou označené" in n for n in meta["notes"])
+
+    def test_marking_fifo_keeps_a_run_without_warning_current(self, two_years):
+        svc = two_years
+        _execute(svc, "2024-fifo", 2024)
+        _execute(svc, "2025-fifo", 2025)
+        assert svc.find_cached_run(2025, "daily", "fifo") == "2025-fifo"
+        svc.mark_run_filed("2024-fifo")
+        assert svc.find_cached_run(2025, "daily", "fifo") == "2025-fifo"
+        assert not svc.get_run("2025-fifo").get("pairing_history_changed")
+
+    def test_marking_another_method_makes_later_runs_stale(self, two_years):
+        svc = two_years
+        _execute(svc, "2025-fifo", 2025)
+        _execute(svc, "2024-lifo", 2024, "lifo")
+        svc.mark_run_filed("2024-lifo")
+        assert svc.find_cached_run(2025, "daily", "fifo") is None
+        meta = svc.get_run("2025-fifo")
+        assert meta["pairing_history_changed"] is True
+        assert any("přepočítejte" in n for n in meta["notes"])
+        # Unmarking restores what the run was computed with.
+        assert svc.unmark_filed_year(2024) is True
+        assert not svc.get_run("2025-fifo").get("pairing_history_changed")
+        assert svc.unmark_filed_year(2024) is False
+
+    def test_read_time_flags(self, two_years):
+        svc = two_years
+        _execute(svc, "2024-fifo", 2024)
+        meta = svc.get_run("2024-fifo")
+        assert meta["can_mark_filed"] is True and meta["filed"] is False
+        svc.mark_run_filed("2024-fifo")
+        meta = svc.get_run("2024-fifo")
+        assert meta["filed"] is True and meta["filed_mode"] == "daily"
+        assert svc.get_year(2024).filed["run_id"] == "2024-fifo"
+        assert svc.get_year(2025).filed is None
+
+    def test_mark_refuses_open_year_and_unknown_run(self, two_years):
+        svc = two_years
+        _execute(svc, "2024-fifo", 2024)
+        with pytest.raises(ValueError, match="neexistuje"):
+            svc.mark_run_filed("nope")
+        svc._today = lambda: date(2024, 12, 1)
+        with pytest.raises(ValueError, match="neskončil"):
+            svc.mark_run_filed("2024-fifo")
+        assert svc.get_run("2024-fifo")["can_mark_filed"] is False
+
+    def test_optimal_run_without_stored_plan_cannot_be_marked(self, two_years):
+        svc = two_years
+        _execute(svc, "2024-opt", 2024, "optimal")
+        plan = svc.runs_dir / "2024-opt" / "pairing_plan.daily.json"
+        if plan.exists():
+            plan.unlink()
+        with pytest.raises(ValueError, match="přepočítejte"):
+            svc.mark_run_filed("2024-opt")
+
+    def test_optimal_with_compare_is_refused(self, two_years):
+        svc = two_years
+        with pytest.raises(ValueError, match="denní kurz"):
+            svc.start_run(2025, "compare", "optimal")
+        with pytest.raises(ValueError, match="denní kurz"):
+            svc.run_pipeline_sync(2025, "compare", "optimal")
+        with pytest.raises(ValueError, match="denní kurz"):
+            _execute(svc, "2025-x", 2025, "optimal", fx="compare")
+
+
+def test_unverified_opening_lots_are_named_in_the_notes(tmp_path):
+    """2024 filed LIFO, but the broker reports 5 shares where the replay
+    leaves 10: the trimmed lots cannot be trusted, and the run says so."""
+    from src.webapp.services import RunService
+    svc = RunService(data_dir=tmp_path / "data", runs_dir=tmp_path / "runs")
+    svc._today = lambda: date(2026, 3, 1)
+    try:
+        _write_dataset(svc, 2024, trades=YEAR1, eoy=[_position(PAIRA, "5", "500")])
+        _write_dataset(svc, 2025, trades=[
+            _trade(PAIRA, "2025-06-10", "-5", "160", "104")])
+        _execute(svc, "2024-lifo", 2024, "lifo")
+        svc.mark_run_filed("2024-lifo")
+        meta = _execute(svc, "2025-fifo", 2025)
+        assert meta["soy_unverified_symbols"] == ["PAIRA"]
+        assert any("U titulů PAIRA nelze ověřit" in n for n in meta["notes"])
+    finally:
+        svc.runner.shutdown(wait=False)
+
+
+class TestV04Routes:
+
+    @pytest.fixture
+    def client(self, two_years):
+        fastapi = pytest.importorskip("fastapi")  # noqa: F841
+        from fastapi.testclient import TestClient
+        from src.webapp.app import create_app
+        _execute(two_years, "2024-lifo", 2024, "lifo")
+        with TestClient(create_app(services=two_years)) as tc:
+            yield tc, two_years
+
+    def test_mark_and_unmark_through_the_routes(self, client):
+        tc, svc = client
+        page = tc.get("/results/2024-lifo").text
+        assert 'action="/results/2024-lifo/filed"' in page
+
+        r = tc.post("/results/2024-lifo/filed", data={"mode": "daily"},
+                    follow_redirects=False)
+        assert r.status_code == 303
+        assert svc.load_filed_years()["years"]["2024"]["pairing_method"] == "lifo"
+
+        page = tc.get("/results/2024-lifo").text
+        assert ">Podáno</span>" in page
+        assert 'action="/results/2024-lifo/filed"' not in page
+        runs = tc.get("/runs").text
+        assert "<th>Podáno</th>" in runs
+        assert "Podáno · lifo" in runs
+
+        r = tc.post("/runs/filed/2024/delete", follow_redirects=False)
+        assert r.status_code == 303
+        assert svc.load_filed_years()["years"] == {}
+
+    def test_mark_error_is_shown(self, client):
+        tc, svc = client
+        svc._today = lambda: date(2024, 12, 1)
+        r = tc.post("/results/2024-lifo/filed", data={"mode": "daily"})
+        assert "neskončil" in r.text
+
+
+def test_mcp_list_datasets_reports_filed(two_years):
+    pytest.importorskip("mcp")
+    from tests.test_mcp_server import _call, _payload
+    from src.mcp_server.server import create_server
+    _execute(two_years, "2024-fifo", 2024)
+    two_years.mark_run_filed("2024-fifo")
+    data = _payload(_call(create_server(two_years), "list_datasets"))
+    years = {d["tax_year"]: d for d in data["datasets"]}
+    assert years[2024]["filed"]["run_id"] == "2024-fifo"
+    assert years[2025]["filed"] is None
