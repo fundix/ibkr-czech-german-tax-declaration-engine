@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Tuple
 from decimal import Decimal # Import Decimal
 
 from src.domain.events import TradeEvent, OptionLifecycleEvent, OptionExerciseEvent, OptionAssignmentEvent
-from src.domain.assets import Stock, Option
+from src.domain.assets import Option, is_option_deliverable
 from src.identification.asset_resolver import AssetResolver
 
 logger = logging.getLogger(__name__)
@@ -81,9 +81,9 @@ class OptionTradeLinker:
 
         for stock_trade in stock_trades_to_link:
             stock_asset = self.asset_resolver.get_asset_by_id(stock_trade.asset_internal_id)
-            if not isinstance(stock_asset, Stock) or not stock_asset.ibkr_conid:
-                logger.warning(f"Stock trade {stock_trade.ibkr_transaction_id} (Event ID: {stock_trade.event_id}) "
-                               f"is missing valid Stock asset or ibkr_conid. Cannot attempt linking.")
+            if not is_option_deliverable(stock_asset) or not stock_asset.ibkr_conid:
+                logger.warning(f"Delivery trade {stock_trade.ibkr_transaction_id} (Event ID: {stock_trade.event_id}) "
+                               f"is not on a deliverable asset (stock or fund) or lacks ibkr_conid. Cannot attempt linking.")
                 continue
 
             stock_qty_abs = stock_trade.quantity.copy_abs()

@@ -5,7 +5,10 @@ from decimal import Decimal
 from typing import List, Optional, Set, Union, Tuple # Ensure Tuple is here
 from datetime import date, datetime
 
-from src.domain.assets import Asset, Option, CashBalance, InvestmentFund, Derivative, Stock, Bond
+from src.domain.assets import (
+    Asset, Option, CashBalance, InvestmentFund, Derivative, Stock, Bond,
+    is_option_deliverable,
+)
 from src.domain.events import (
     FinancialEvent, TradeEvent, CashFlowEvent, WithholdingTaxEvent,
     CorporateActionEvent, CorpActionSplitForward, CorpActionMergerCash,
@@ -394,12 +397,14 @@ class DomainEventFactory:
                         "will open the opposite position in FIFO."
                     )
 
-                if isinstance(asset, Stock) and rt.notes_codes:
+                # The share leg of an exercise/assignment: a stock or a fund
+                # (an option on an ETF delivers ETF shares).
+                if is_option_deliverable(asset) and rt.notes_codes:
                     notes_codes_parts_stock = {part.strip() for part in (rt.notes_codes or "").upper().split(';') if part.strip()}
                     # Exclude "IA" codes which are Internalized + Automatically Allocated (not option assignments)
                     if ('A' in notes_codes_parts_stock or 'EX' in notes_codes_parts_stock) and 'IA' not in notes_codes_parts_stock:
                         candidate_stock_trades_for_linking.append(trade_event)
-                        logger.debug(f"Collected stock trade {trade_event.ibkr_transaction_id} (Asset: {asset.get_classification_key()}) for later linking.")
+                        logger.debug(f"Collected delivery trade {trade_event.ibkr_transaction_id} (Asset: {asset.get_classification_key()}) for later linking.")
 
                 all_created_events.append(trade_event)
                 logger.debug(f"Created TradeEvent: {trade_event.event_type.name} for {asset.get_classification_key()}, Qty: {trade_event.quantity}, Price: {trade_event.price_foreign_currency}, Gross: {trade_event.gross_amount_foreign_currency} {trade_event.local_currency}")
