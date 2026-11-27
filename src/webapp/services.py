@@ -412,12 +412,13 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 #     ISIN; a corporate action with no handler is reported and its shares held
 #     as a zero-cost placeholder. Statements with any of these events give
 #     different figures — or a result where the run used to stop.
-# v10: five corrections to the tax and credit figures (audit 2026-11, batch
+# v10: six corrections to the tax and credit figures (audit 2026-11, batch
 #     2). Not v8, which was never released: v9 reached main first, and a run
 #     stamped v9 was computed without these corrections, so it has to count
 #     as older too.
 #     The §16a comparison now moves foreign interest into the separate base
-#     together with the dividends, divides the §38f ratio there by the
+#     together with the dividends, keeps the taxable §10 currency result in
+#     the general base of that scenario, divides the §38f ratio there by the
 #     unrounded base like the general path, and no longer reports a difference
 #     of rounding as a saving — its figures and its advice change. Korean
 #     dividends are credited at the 5 % treaty rate instead of the 15 %

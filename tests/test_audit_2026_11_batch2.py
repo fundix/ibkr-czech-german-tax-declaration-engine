@@ -18,6 +18,9 @@ Czech tax-liability / foreign-tax-credit path:
   income row a tax row was linked to depended on a per-run random event id.
 * X20 — the summary listed only preliminary per-state credit amounts, which
   do not add up to the credit on Příloha č. 3.
+* V02 — added to the batch at the owner's request: the general base of the
+  §16a scenario left out the taxable §10 currency result, so that scenario
+  came out cheaper by the whole tax on it.
 
 Everything here is synthetic: invented amounts and states, no real statement,
 rate or account (U1234567 where a stored run needs one). Expected figures are
@@ -89,15 +92,21 @@ def _section_total(items, section: CzTaxSection) -> Decimal:
     return sum((it.amount_czk for it in items if it.section == section), ZERO)
 
 
-def _netting(securities_net: str = "0") -> CzLossOffsettingResult:
+def _netting(securities_net: str = "0",
+             currency_gains: str = "0") -> CzLossOffsettingResult:
+    """§10 results. *currency_gains* above 50 000 are taxable in full (the
+    occasional-income exemption is a cliff on the sum of positive gains)."""
     netting = CzLossOffsettingResult()
     netting.securities.taxable_gains = Decimal(securities_net)
+    netting.currency.gains = Decimal(currency_gains)
+    netting.currency_exemption_enabled = True
+    netting.currency_exemption_threshold = Decimal("50000")
     netting.compute_combined()
     return netting
 
 
 def _liability(items, securities_net: str = "0", config: CzTaxConfig = None,
-               tax_year: int = 2025):
+               tax_year: int = 2025, currency_gains: str = "0"):
     """Run the real §38f evaluator and the liability over *items*.
 
     The same two calls the plugin makes, in the same order, so the credit a
@@ -108,7 +117,7 @@ def _liability(items, securities_net: str = "0", config: CzTaxConfig = None,
     return compute_tax_liability(
         taxable_dividends=_section_total(items, CzTaxSection.CZ_8_DIVIDENDS),
         taxable_interest=_section_total(items, CzTaxSection.CZ_8_INTEREST),
-        netting=_netting(securities_net),
+        netting=_netting(securities_net, currency_gains),
         ftc_summary=ftc,
         config=cfg,
         tax_year=tax_year,
@@ -430,31 +439,108 @@ class TestW26NoSavingFromRoundingAlone:
         assert cmp.saving == Decimal("3996")
         assert cmp.recommended_mode == "separate"
 
-    def test_a_difference_is_called_rounding_only_when_it_can_be_nothing_else(self):
-        """The general base of the separate scenario does not carry a taxable
-        §10 currency result (a separate, open finding of the same audit), so
-        with one the two variants do not hold the same income and what is
-        between them is not rounding. The comparison must not say it is.
+
+# ---------------------------------------------------------------------------
+# V02 — the general base of the separate scenario keeps the taxable §10
+# currency result
+# ---------------------------------------------------------------------------
+
+class TestV02SeparateScenarioKeepsTheCurrencyResult:
+    """Electing the separate base takes the foreign §8 income out of the
+    general base and nothing else. The scenario built its general base from
+    securities and options only, so a taxable §10 currency result - which
+    variant A does tax - was simply missing from variant B, and variant B
+    looked cheaper by the whole tax on it.
+
+    The example, with the 23 % rate starting at 100 000:
+
+        foreign dividends, state US   80 000   withheld 12 000 (15 %)
+        §10 currency result, taxable  60 000
+
+    Variant A - everything in the general base:
+        base    80 000 + 60 000                         = 140 000
+        tax     100 000 x 15 % + 40 000 x 23 %          =  24 200
+        §38f    US limit 24 200 x 80/140 = 13 828.57    -> credit 12 000
+        tax after credit                                =  12 200
+
+    Variant B - the separate base is elected:
+        separate base   80 000 x 15 %                   =  12 000
+        §38f    US limit 12 000 x 80/80 = 12 000        -> credit 12 000
+        separate base after credit                      =       0
+        general base    60 000 (the currency result)    ->  9 000
+        total                                           =   9 000
+        saving          12 200 - 9 000                  =   3 200
+                        (8 % of the 40 000 above the threshold)
+
+    Without the currency result in it the general base was 0, variant B came
+    to 0 and the "saving" to 12 200.
+    """
+
+    def _result(self):
+        return _liability(
+            [_dividend("US", "80000", "12000")],
+            currency_gains="60000",
+            config=CzTaxConfig(elevated_rate_threshold_czk=_LOW_THRESHOLD),
+        )
+
+    def test_variant_a_is_what_the_arithmetic_says(self):
+        result = self._result()
+
+        assert result.taxable_currency_net == Decimal("60000")
+        assert result.combined_taxable_base == Decimal("140000")
+        assert result.gross_czech_tax == Decimal("24200.00")
+        assert result.final_czech_tax_after_credit == Decimal("12200")
+
+    def test_general_base_of_variant_b_holds_the_currency_result(self):
+        cmp = self._result().dividend_separate_base
+
+        assert cmp.separate_general_base == Decimal("60000")
+        assert cmp.separate_general_base_tax == Decimal("9000.00")
+        assert cmp.separate_general_base_net_tax == Decimal("9000.00")
+
+    def test_total_and_saving_count_the_tax_on_it(self):
+        result = self._result()
+        cmp = result.dividend_separate_base
+
+        assert cmp.separate_dividend_net_tax == ZERO
+        assert cmp.separate_base_total_tax == Decimal("9000")
+        assert cmp.saving == Decimal("3200")
+        assert cmp.recommended_mode == "separate"
+        assert result.recommended_final_tax == Decimal("9000")
+
+    def test_below_the_threshold_a_currency_result_changes_nothing_about_rounding(self):
+        """With the currency result in both variants they hold the same
+        income again, so below the 23 % threshold whatever is between them is
+        rounding - with or without a currency result.
+
+            foreign dividends, state US   6 030   withheld 904.50 (15 %)
+            foreign interest,  state GB   4 020   nothing withheld
+            §10 securities, net           2 000
+            §10 currency result, taxable 60 000
+
+        Variant A:
+            base    72 050 -> 72 000, tax 10 800.00
+            §38f    US limit 10 800 x 6 030 / 72 050 = 903.87 -> credit 903.87
+            tax     10 800.00 - 903.87 = 9 896.13  -> 9 897
+        Variant B:
+            separate base 10 050 -> 10 000, tax 1 500.00
+            §38f    US limit 1 500 x 6 030 / 10 050 = 900.00 -> credit 900.00
+            separate base after credit                =   600.00
+            general base 62 000 x 15 %                = 9 300.00
+            total                                     -> 9 900
         """
-        items = [_dividend(*self._ITEMS_ARGS[0]), _interest(*self._ITEMS_ARGS[1])]
-        cfg = CzTaxConfig()
-        ftc = evaluate_foreign_tax_credit(items, cfg, has_fx=True)
+        result = _liability(
+            [_dividend("US", "6030", "904.50"), _interest("GB", "4020")],
+            securities_net="2000", currency_gains="60000",
+        )
+        cmp = result.dividend_separate_base
 
-        plain = compute_tax_liability(
-            Decimal("6030"), Decimal("4020"), _netting("2000"), ftc, cfg,
-            tax_year=2025)
-        assert plain.dividend_separate_base.same_tax_before_rounding is True
-
-        with_currency = _netting("2000")
-        with_currency.currency.gains = Decimal("60000")
-        with_currency.currency_exemption_enabled = True
-        with_currency.currency_exemption_threshold = Decimal("50000")
-        with_currency.compute_combined()
-        assert with_currency.currency.net_taxable == Decimal("60000")
-        mixed = compute_tax_liability(
-            Decimal("6030"), Decimal("4020"), with_currency, ftc, cfg,
-            tax_year=2025)
-        assert mixed.dividend_separate_base.same_tax_before_rounding is False
+        assert cmp.separate_general_base == Decimal("62000")
+        assert cmp.general_base_total_tax == Decimal("9897")
+        assert cmp.separate_base_total_tax == Decimal("9900")
+        assert cmp.same_tax_before_rounding is True
+        assert cmp.saving == ZERO
+        assert cmp.recommended_mode == "general"
 
 
 # ---------------------------------------------------------------------------

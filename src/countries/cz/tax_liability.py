@@ -160,8 +160,8 @@ class CzDividendSeparateBaseComparison:
 
     ``general`` scenario = the primary ``CzTaxLiabilitySummary`` (dividends
     and interest in the general base). ``separate`` scenario = foreign
-    dividends AND interest taxed at 15 % in the separate base, the §10
-    securities/options result in the general base.
+    dividends AND interest taxed at 15 % in the separate base, the whole §10
+    result (securities, options, currency) in the general base.
 
     The ``dividend`` in the field and line-item names is older than that rule
     being applied here and is kept so stored runs and exports keep their keys;
@@ -578,9 +578,13 @@ def _compute_separate_base(
     _sep_notes: List[str] = []
 
     # --- General base without the foreign §8 income (§10 only) ---
+    # ALL of §10 that variant A taxes: securities, options and the currency
+    # result. The election takes the foreign §8 income out and nothing else.
     gen_base_raw = max(
         ZERO,
-        result.taxable_securities_net + result.taxable_options_net,
+        result.taxable_securities_net
+        + result.taxable_options_net
+        + result.taxable_currency_net,
     )
     gen_base = _round_hundreds_down(gen_base_raw)
     cmp.separate_general_base = gen_base
@@ -640,15 +644,9 @@ def _compute_separate_base(
     # two bases down to hundreds where A rounds one. Those few crowns are
     # neither what the election is for nor a reason to make it, so they are
     # not reported as a saving and not advised. Both totals stay as computed.
-    #
-    # That holds only while both variants carry the same general income. The
-    # scenario above leaves the §10 currency result out of B's general base,
-    # so with a taxable one the totals differ for that reason as well; the
-    # difference is then not rounding and is left as it is.
     cmp.same_tax_before_rounding = (
         result.base_for_elevated_rate == ZERO
         and result.base_rate == config.dividend_separate_base_rate
-        and result.taxable_currency_net == ZERO
     )
     # Prefer the general base on a tie so the default DAP layout (and existing
     # golden figures) stay unchanged unless the separate base is strictly better.
