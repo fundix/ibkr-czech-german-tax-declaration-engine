@@ -254,7 +254,8 @@ def run_main_calculations(
     merger_policy: Optional[Any] = None,
     security_price_provider: Optional[Any] = None,
     pairing_method: PairingMethod = PairingMethod.FIFO,
-) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger], List[Dict[str, Any]]]:
+    hold_unapplied_shares_as_placeholders: bool = False,
+) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Runs the main calculation logic:
     1. Separates historical and current year events.
@@ -269,6 +270,11 @@ def run_main_calculations(
     6. Returns calculated results (Realized G/L, Vorabpauschale), processed events, and EOY mismatch count.
     7. The sixth element names each EOY mismatch (symbol, description,
        calculated and reported quantity) for the blocking review note.
+    8. The seventh names each corporate action that moves shares but that no
+       processor applies (see GenericCorporateActionProcessor). The shares
+       such an action adds are held as zero-cost placeholder lots only when
+       ``hold_unapplied_shares_as_placeholders`` is set -- by a country layer
+       whose result reports these actions.
     """
     pairing_method = coerce_pairing_method(pairing_method)
     logger.info(f"Starting main calculation engine for tax year {tax_year} with {len(financial_events)} events (pairing: {pairing_method.value}).")
@@ -288,6 +294,9 @@ def run_main_calculations(
     # Merger event keys already applied in this run. Nothing upstream dedupes
     # corporate-action rows, and applying one twice would rescale the lots again.
     applied_merger_keys: set = set()
+    # Corporate actions that move shares and that no processor applies (a
+    # spin-off, a tender, ...): one entry each, for a blocking review note.
+    unapplied_corporate_actions: List[Dict[str, Any]] = []
 
     tax_year_start_date_str = f"{tax_year}-01-01"
     tax_year_end_date_str = f"{tax_year}-12-31"
@@ -296,10 +305,10 @@ def run_main_calculations(
 
     if not tax_year_start_date_obj:
         logger.error(f"Could not parse tax year start date: {tax_year_start_date_str}. Aborting calculations.")
-        return [], [], financial_events, 0, {}, []
+        return [], [], financial_events, 0, {}, [], []
     if not tax_year_end_date_obj:
         logger.error(f"Could not parse tax year end date: {tax_year_end_date_str}. Aborting calculations.")
-        return [], [], financial_events, 0, {}, []
+        return [], [], financial_events, 0, {}, [], []
 
     logger.info("Separating historical and current year events...")
     filtered_events_count = 0
@@ -482,6 +491,8 @@ def run_main_calculations(
                     # target is a loud refusal rather than a silent None.
                     'ledger_for': _make_event_ledger_accessor(event, fifo_ledgers),
                     'applied_merger_keys': applied_merger_keys,
+                    'unapplied_corporate_actions': unapplied_corporate_actions,
+                    'hold_unapplied_shares_as_placeholders': hold_unapplied_shares_as_placeholders,
                     # Past closing prices, for valuing a merger the broker
                     # reports but does not price. Injected like the FX
                     # converter above — also network-backed, also not the
@@ -638,7 +649,8 @@ def run_main_calculations(
     logger.info(f"Calculation engine produced {len(vorabpauschale_data_items)} VorabpauschaleData records (expected 0 for 2023).")
 
     return (realized_gains_losses, vorabpauschale_data_items, processed_income_events_for_output,
-            eoy_mismatch_errors, fifo_ledgers, eoy_mismatch_details)
+            eoy_mismatch_errors, fifo_ledgers, eoy_mismatch_details,
+            unapplied_corporate_actions)
 
 
 def _create_excess_dividend_event(original_event, excess_amount, asset_object):

@@ -16,6 +16,8 @@ audit:
 * V23 — a split reported as two rows (old and new ISIN, one ActionID) became
   two events: the ratio was applied twice, or the old asset was rescaled
   while the new one stayed empty.
+* X17 — a corporate action without a handler (a spin-off) was dropped: the
+  shares it credits had no lot, and selling them ended the run.
 
 Everything here is synthetic: invented symbols, ISINs, conids and amounts.
 Expected figures are worked out by hand in each test, in EUR so that no
@@ -29,13 +31,15 @@ from src.classification.asset_classifier import AssetClassifier
 from src.domain.assets import Option, Stock
 from src.domain.enums import AssetCategory, FinancialEventType, RealizationType
 from src.domain.events import (
-    CorpActionMergerStock, OptionAssignmentEvent, OptionExerciseEvent, TradeEvent,
+    CorpActionMergerStock, CorporateActionEvent, OptionAssignmentEvent,
+    OptionExerciseEvent, TradeEvent,
 )
 from src.identification.asset_resolver import AssetResolver
 from src.parsers.domain_event_factory import DomainEventFactory
 from src.parsers.raw_models import RawCorporateActionRecord
 from src.processing.option_trade_linker import OptionTradeLinker
 from tests.support.base import FifoTestCaseBase
+from tests.support.golden_fx import GoldenCnbProvider
 from tests.support.mock_providers import MockECBExchangeRateProvider
 
 ACCOUNT = "U1234567"
@@ -810,3 +814,366 @@ class TestV23SplitReportedAsTwoRows(FifoTestCaseBase):
         assert lot.quantity == Decimal("200")
         assert lot.total_cost_basis_eur == Decimal("4001.00")
         assert out.eoy_mismatch_error_count == 0
+
+
+# ---------------------------------------------------------------------------
+# X17 — a corporate action nothing applies is reported, not dropped
+# ---------------------------------------------------------------------------
+
+class _FlatCnb(GoldenCnbProvider):
+    """25 CZK for one EUR on every day."""
+
+    def _lookup(self, date_of_conversion, ccy):
+        return Decimal("1") / Decimal("25"), date_of_conversion
+
+
+class TestX17CorporateActionWithoutAHandler(FifoTestCaseBase):
+    """A spin-off (type SO) credits shares of a new company. No parser and no
+    processor knows the type: the row became a generic event that the engine
+    ignored with a warning. The shares had no lot, so selling them in the same
+    year ended the run with "Insufficient long lots".
+
+    What those shares cost is a tax question the row does not answer, so the
+    engine still does not apply the action. It keeps the run alive -- the
+    shares are held as a placeholder lot at zero cost, marked estimated -- and
+    names the action for manual review.
+    """
+
+    PARENT = dict(asset_class="STK", sub_category="COMMON", symbol="SYNP",
+                  description="SYNTHETIC PARENT INC", isin="US0000000601",
+                  conid="900000601")
+    SPUN_OFF = dict(asset_class="STK", sub_category="COMMON", symbol="SYNS",
+                    description="SYNTHETIC SPIN INC", isin="US0000000602",
+                    conid="900000602")
+    SPIN_OFF_ROW = _ca_row(
+        symbol="SYNS", isin="US0000000602", conid="900000602",
+        description=("SYNP(US0000000601) SPINOFF  1 FOR 4 "
+                     "(SYNS, SYNTHETIC SPIN INC, US0000000602)"),
+        report_date="2025-05-12", ca_type="SO", action_id="9001",
+        quantity="25", value="250")
+
+    def _run(self, *, sell_the_spun_off_shares, sale_price="12"):
+        trades = [
+            # 100 parent shares at 30 + 1 commission = 3001.
+            _trade_row(**self.PARENT, trade_date="2025-01-20", quantity="100",
+                       price="30", buy_sell="BUY", open_close="O", tx_id="5001"),
+        ]
+        held = [_position_row(self.PARENT, "100", mark_price="30")]
+        if sell_the_spun_off_shares:
+            # The 25 spun-off shares sold; at 12 that is 300 - 1 commission.
+            trades.append(_trade_row(
+                **self.SPUN_OFF, trade_date="2025-08-20", quantity="-25",
+                price=sale_price, buy_sell="SELL", open_close="C", tx_id="5002"))
+        else:
+            held.append(_position_row(self.SPUN_OFF, "25", mark_price="12"))
+        return self._run_pipeline(
+            trades_data=trades, corporate_actions_data=[self.SPIN_OFF_ROW],
+            positions_end_data=held, tax_year=TAX_YEAR,
+            custom_rate_provider=_one_to_one(), country_code="cz")
+
+    def test_selling_the_spun_off_shares_does_not_end_the_run(self):
+        out = self._run(sell_the_spun_off_shares=True)
+
+        (action,) = out.unapplied_corporate_actions
+        assert action["symbol"] == "SYNS"
+        assert action["ca_type"] == "SO"
+        assert action["action_id"] == "9001"
+        assert action["event_date"] == "2025-05-12"
+        assert action["quantity_change"] == Decimal("25")
+        assert action["placeholder_lot"] is True
+        assert "SPINOFF" in action["ca_description"]
+
+        # The sale is in the results, at a cost the engine does not know:
+        # zero, with both dates marked as not established.
+        (rgl,) = out.realized_gains_losses
+        assert rgl.quantity_realized == Decimal("25")
+        assert rgl.total_realization_value_eur == Decimal("299.00")
+        assert rgl.total_cost_basis_eur == Decimal("0")
+        assert rgl.is_acquisition_estimated is True
+        assert rgl.holding_period_start_estimated is True
+
+        # The parent's lot is not touched: no basis is split off it.
+        parent = out.asset_resolver.get_asset_by_alias("ISIN:US0000000601")
+        (lot,) = out.fifo_ledgers_by_asset_id[parent.internal_asset_id].lots
+        assert lot.quantity == Decimal("100")
+        assert lot.total_cost_basis_eur == Decimal("3001.00")
+        assert out.eoy_mismatch_error_count == 0
+
+    def test_spun_off_shares_still_held_are_a_flagged_placeholder(self):
+        out = self._run(sell_the_spun_off_shares=False)
+
+        assert [a["quantity_change"] for a in out.unapplied_corporate_actions] == [Decimal("25")]
+        spun_off = out.asset_resolver.get_asset_by_alias("ISIN:US0000000602")
+        (lot,) = out.fifo_ledgers_by_asset_id[spun_off.internal_asset_id].lots
+        assert lot.quantity == Decimal("25")
+        assert lot.total_cost_basis_eur == Decimal("0")
+        assert lot.acquisition_date == "2025-05-12"
+        assert lot.acquisition_date_estimated is True
+        assert lot.holding_period_start_estimated is True
+        assert out.realized_gains_losses == []
+        assert out.eoy_mismatch_error_count == 0
+
+    def test_the_czech_result_blocks_filing_and_marks_the_sale_for_review(self):
+        from src.countries.cz.aggregation_service import run_cz_aggregation
+
+        # Sold at 200: 5000 - 1 commission = 4999 EUR, i.e. 124 975 CZK at 25.
+        # Above the 100 000 CZK a year that are exempt whatever the cost was,
+        # so the unknown cost matters and the item must not pass as settled.
+        out = self._run(sell_the_spun_off_shares=True, sale_price="200")
+        result = run_cz_aggregation(out, TAX_YEAR, "daily", fx_provider=_FlatCnb())
+
+        (note,) = result.sections["unapplied_corporate_actions"].notes
+        assert "REVIEW REQUIRED" in note and "DO NOT FILE" in note
+        assert "SYNS" in note and "SO" in note and "+25" in note and "9001" in note
+
+        (sale,) = [it for it in result.country_result["items"]
+                   if it.asset_symbol == "SYNS"]
+        assert sale.tax_review_status.name == "PENDING_MANUAL_REVIEW"
+        assert sale.is_exempt is False
+        assert sale.cost_basis_czk == Decimal("0")
+        assert sale.proceeds_czk == Decimal("124975.00")
+
+    def test_shares_removed_by_an_unknown_action_are_reported_and_left_in_place(self):
+        """A tender (type TO) takes the shares away. What it paid is on the
+        row, but how to tax it is not the engine's to guess: the lots stay,
+        the action is named, and the year-end check sees the difference."""
+        trades = [
+            _trade_row(**self.PARENT, trade_date="2025-01-20", quantity="100",
+                       price="30", buy_sell="BUY", open_close="O", tx_id="5101"),
+        ]
+        tender = _ca_row(
+            symbol="SYNP", isin="US0000000601", conid="900000601",
+            description=("SYNP(US0000000601) TENDERED TO US0000000699 1 FOR 1 "
+                         "(SYNP, SYNTHETIC PARENT INC, US0000000601)"),
+            report_date="2025-07-01", ca_type="TO", action_id="9002",
+            quantity="-100")
+
+        out = self._run_pipeline(
+            trades_data=trades, corporate_actions_data=[tender],
+            tax_year=TAX_YEAR, custom_rate_provider=_one_to_one(),
+            country_code="cz")
+
+        (action,) = out.unapplied_corporate_actions
+        assert action["symbol"] == "SYNP"
+        assert action["ca_type"] == "TO"
+        assert action["quantity_change"] == Decimal("-100")
+        assert action["placeholder_lot"] is False
+        assert out.realized_gains_losses == []
+        parent = out.asset_resolver.get_asset_by_alias("ISIN:US0000000601")
+        (lot,) = out.fifo_ledgers_by_asset_id[parent.internal_asset_id].lots
+        assert lot.quantity == Decimal("100")
+        assert out.eoy_mismatch_error_count == 1
+
+    def test_an_isin_change_moves_nothing_and_is_not_reported(self):
+        """Two rows of one action, -100 and +100, that resolve to one asset
+        (the ticker is the same): the position is what it was."""
+        renamed = dict(self.PARENT, isin="US0000000603", conid="900000603")
+        change = ("SYNP(US0000000601) CUSIP/ISIN CHANGE TO (US0000000603) "
+                  "({symbol}, SYNTHETIC PARENT INC, {isin})")
+        rows = [
+            _ca_row(symbol="SYNP.OLD", isin="US0000000601", conid="900000601",
+                    description=change.format(symbol="SYNP.OLD", isin="US0000000601"),
+                    report_date="2025-03-03", ca_type="IC", action_id="9003",
+                    quantity="-100"),
+            _ca_row(symbol="SYNP", isin="US0000000603", conid="900000603",
+                    description=change.format(symbol="SYNP", isin="US0000000603"),
+                    report_date="2025-03-03", ca_type="IC", action_id="9003",
+                    quantity="100"),
+        ]
+        trades = [
+            _trade_row(**self.PARENT, trade_date="2025-01-20", quantity="100",
+                       price="30", buy_sell="BUY", open_close="O", tx_id="5201"),
+            _trade_row(**renamed, trade_date="2025-06-10", quantity="-100",
+                       price="33", buy_sell="SELL", open_close="C", tx_id="5202"),
+        ]
+
+        out = self._run_pipeline(
+            trades_data=trades, corporate_actions_data=rows, tax_year=TAX_YEAR,
+            custom_rate_provider=_one_to_one(), country_code="cz")
+
+        assert out.unapplied_corporate_actions == []
+        (rgl,) = out.realized_gains_losses
+        # 100 x 33 - 1 commission, against 100 x 30 + 1 commission
+        assert rgl.gross_gain_loss_eur == Decimal("298.00")
+        assert rgl.is_acquisition_estimated is False
+
+
+class TestX17PlaceholderIsOnlyForSharesAdded:
+    def test_a_short_holding_is_not_given_a_long_placeholder(self):
+        """A positive quantity on a holding that is short takes the short
+        off; it adds no shares. A long lot beside the short one would be a
+        position nobody holds."""
+        from src.engine.event_processors.corporate_action_processor import (
+            GenericCorporateActionProcessor,
+        )
+        from src.engine.fifo_manager import ShortFifoLot
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        ledger.short_lots.append(ShortFifoLot(
+            opening_date="2025-02-03", quantity_shorted=Decimal("100"),
+            unit_sale_proceeds_eur=Decimal("2"), total_sale_proceeds_eur=Decimal("200"),
+            source_transaction_id="6001"))
+        event = CorporateActionEvent(
+            asset_internal_id=ledger.asset_internal_id, event_date="2025-06-02",
+            event_type=FinancialEventType.CORP_STOCK_DIVIDEND,
+            ca_action_id_ibkr="9004", ca_type_ibkr="TO",
+            unapplied_quantity_change=Decimal("100"))
+        reported = []
+
+        GenericCorporateActionProcessor().process(
+            event, ledger, {"unapplied_corporate_actions": reported,
+                            "hold_unapplied_shares_as_placeholders": True})
+
+        assert ledger.lots == []
+        assert [lot.quantity_shorted for lot in ledger.short_lots] == [Decimal("100")]
+        assert [(a["quantity_change"], a["placeholder_lot"]) for a in reported] == [
+            (Decimal("100"), False)]
+
+
+class TestX17PlaceholderNeedsAResultThatReportsIt(FifoTestCaseBase):
+    """A placeholder lot yields a figure -- the full proceeds as gain -- that
+    is only safe next to a note saying so. The Czech result has that note; the
+    German reports have nowhere to show it. So the engine holds unapplied
+    shares only when the country layer says it reports them, and a German run
+    stops at the sale as it always did, now with the action named in the log.
+    """
+
+    def test_the_engine_holds_nothing_unless_asked_to(self):
+        from src.engine.event_processors.corporate_action_processor import (
+            GenericCorporateActionProcessor,
+        )
+        from tests.test_audit_fixes import _make_ledger
+
+        ledger = _make_ledger()
+        event = CorporateActionEvent(
+            asset_internal_id=ledger.asset_internal_id, event_date="2025-05-12",
+            event_type=FinancialEventType.CORP_STOCK_DIVIDEND,
+            ca_action_id_ibkr="9001", ca_type_ibkr="SO",
+            unapplied_quantity_change=Decimal("25"))
+        reported = []
+
+        GenericCorporateActionProcessor().process(
+            event, ledger, {"unapplied_corporate_actions": reported})
+
+        assert ledger.lots == []
+        assert [(a["quantity_change"], a["placeholder_lot"]) for a in reported] == [
+            (Decimal("25"), False)]
+
+    def test_the_german_run_gets_no_zero_cost_gain(self):
+        scenario = TestX17CorporateActionWithoutAHandler
+        trades = [
+            _trade_row(**scenario.PARENT, trade_date="2025-01-20", quantity="100",
+                       price="30", buy_sell="BUY", open_close="O", tx_id="5401"),
+            _trade_row(**scenario.SPUN_OFF, trade_date="2025-08-20", quantity="-25",
+                       price="12", buy_sell="SELL", open_close="C", tx_id="5402"),
+        ]
+
+        with pytest.raises(pytest.fail.Exception, match="Insufficient long lots"):
+            self._run_pipeline(
+                trades_data=trades,
+                corporate_actions_data=[scenario.SPIN_OFF_ROW],
+                tax_year=TAX_YEAR, custom_rate_provider=_one_to_one(),
+                country_code="de")
+
+
+class TestX17OnlyRowsNothingElseAccountsForAreReported:
+    def test_receiving_row_of_a_merger_is_not_an_unapplied_action(self, tmp_path):
+        """The acquirer's row of a stock-for-stock merger maps to no event of
+        its own -- the disposing row's event credits the shares."""
+        merger = ("OLDC(US0000000401) MERGED(Acquisition) WITH US0000000402 1 FOR 2 "
+                  "({symbol}, {name}, {isin})")
+        rows = [
+            _corporate_action(
+                Symbol="OLDC", ISIN="US0000000401", Conid="900000401",
+                Description=merger.format(symbol="OLDC", name="OLDCO INC",
+                                          isin="US0000000401"),
+                Type="TC", ActionID="7001", Quantity="-100",
+                **{"Report Date": "2025-06-10"}),
+            _corporate_action(
+                Symbol="NEWC", ISIN="US0000000402", Conid="900000402",
+                Description=merger.format(symbol="NEWC", name="NEWCO CORP",
+                                          isin="US0000000402"),
+                Type="TC", ActionID="7001", Quantity="50",
+                **{"Report Date": "2025-06-10"}),
+        ]
+
+        events = DomainEventFactory(_resolver(tmp_path)) \
+            .create_events_from_corporate_actions(rows)
+
+        generic = [e for e in events if type(e) is CorporateActionEvent]
+        assert [e.unapplied_quantity_change for e in generic] == [None]
+
+
+class TestX17ReachesAStoredWebRun:
+    """The web app computes through the same pipeline and aggregation; the
+    review page, the MCP checklist and the exports read what a run stored."""
+
+    @pytest.fixture
+    def service(self, tmp_path, monkeypatch):
+        import src.config as config
+        from src.webapp.services import RunService
+
+        monkeypatch.setattr(config, "CLASSIFICATION_CACHE_FILE_PATH",
+                            str(tmp_path / "classifications.json"))
+        svc = RunService(data_dir=tmp_path / "data", runs_dir=tmp_path / "runs")
+        yield svc
+        svc.runner.shutdown(wait=False)
+
+    @staticmethod
+    def _run_a_year_with_a_spin_off(service):
+        from tests.support.csv_creators import (
+            create_cash_transactions_csv_string, create_corporate_actions_csv_string,
+            create_positions_csv_string, create_trades_csv_string,
+        )
+        from tests.support.golden_fx import GoldenEcbProvider
+
+        parent = TestX17CorporateActionWithoutAHandler.PARENT
+        spun_off = TestX17CorporateActionWithoutAHandler.SPUN_OFF
+        files = {
+            "trades.csv": create_trades_csv_string([
+                _trade_row(**parent, trade_date="2024-02-12", quantity="100",
+                           price="30", buy_sell="BUY", open_close="O", tx_id="5301"),
+                _trade_row(**spun_off, trade_date="2024-09-10", quantity="-25",
+                           price="12", buy_sell="SELL", open_close="C", tx_id="5302"),
+            ]),
+            "corporate_actions.csv": create_corporate_actions_csv_string([_ca_row(
+                symbol="SYNS", isin="US0000000602", conid="900000602",
+                description=("SYNP(US0000000601) SPINOFF  1 FOR 4 "
+                             "(SYNS, SYNTHETIC SPIN INC, US0000000602)"),
+                report_date="2024-05-20", ca_type="SO", action_id="9005",
+                quantity="25")]),
+            "positions_start.csv": create_positions_csv_string([]),
+            "positions_end.csv": create_positions_csv_string(
+                [_position_row(parent, "100", mark_price="30")]),
+            "cash_transactions.csv": create_cash_transactions_csv_string([]),
+        }
+        year_dir = service.data_dir / "2024"
+        year_dir.mkdir(parents=True)
+        for name, content in files.items():
+            (year_dir / name).write_text(content, encoding="utf-8")
+
+        service._execute_run("2024-spin-off", 2024, "daily",
+                             ecb_provider=GoldenEcbProvider(),
+                             cz_fx_provider=GoldenCnbProvider())
+
+    def test_the_review_section_is_stored_with_the_run(self, service):
+        self._run_a_year_with_a_spin_off(service)
+
+        result = service.load_result("2024-spin-off", "daily")
+        (note,) = result["sections"]["unapplied_corporate_actions"]["notes"]
+        assert "REVIEW REQUIRED" in note
+        assert "SYNS" in note and "+25" in note and "9005" in note
+
+    def test_the_review_page_shows_it(self, service):
+        pytest.importorskip("fastapi")
+        from fastapi.testclient import TestClient
+        from src.webapp.app import create_app
+
+        self._run_a_year_with_a_spin_off(service)
+        with TestClient(create_app(services=service)) as client:
+            page = client.get("/results/2024-spin-off/review")
+
+        assert page.status_code == 200
+        assert "Neuplatněné korporátní akce" in page.text
+        assert "REVIEW REQUIRED" in page.text and "SYNS" in page.text

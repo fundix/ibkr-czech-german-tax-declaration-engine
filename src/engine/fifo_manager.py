@@ -1188,6 +1188,35 @@ class FifoLedger:
         self.lots.sort(key=_long_lot_sort_key)
         return sum((q for q in quantities if q > Decimal(0)), Decimal(0))
 
+    def add_placeholder_lot(
+        self,
+        *,
+        quantity: Decimal,
+        acquisition_date: str,
+        source_transaction_id: str,
+    ) -> None:
+        """Hold shares whose cost the inputs do not give, at zero cost.
+
+        For shares credited by a corporate action the engine cannot apply (a
+        spin-off): that they are held is a fact, what they cost is not on the
+        row. Zero is not a valuation -- it is the one figure that cannot
+        understate a later gain -- and both dates are marked estimated, so a
+        disposal from this lot is never exempted on its holding period and
+        reaches the country layer flagged for review. Without the lot a sale
+        of the shares would find nothing to consume and end the run.
+        """
+        zero = self.ctx.create_decimal(0)
+        self.lots.append(FifoLot(
+            acquisition_date=acquisition_date,
+            quantity=quantity.quantize(global_config.PRECISION_QUANTITY, context=self.ctx),
+            unit_cost_basis_eur=zero,
+            total_cost_basis_eur=zero,
+            source_transaction_id=source_transaction_id,
+            acquisition_date_estimated=True,
+            holding_period_start_estimated=True,
+        ))
+        self.lots.sort(key=_long_lot_sort_key)
+
     def add_long_lot(self, trade_event: TradeEvent):
         if trade_event.event_type != FinancialEventType.TRADE_BUY_LONG: return
         if trade_event.quantity is None or trade_event.quantity <= Decimal(0): return

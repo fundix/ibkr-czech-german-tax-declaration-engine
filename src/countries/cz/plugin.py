@@ -618,6 +618,13 @@ class CzechTaxPlugin:
         """Czech §23b/§23c regimes, as recorded per merger event."""
         return CzMergerPolicy()
 
+    # The Czech result names every corporate action the engine could not apply
+    # (aggregation_service.unapplied_corporate_actions_section) and marks a
+    # sale from a placeholder lot for review. That is what allows the engine to
+    # keep such a run alive with zero-cost placeholder lots instead of stopping
+    # at the first sale of shares it has no lot for.
+    reports_unapplied_corporate_actions = True
+
     def get_tax_aggregator(self) -> CzechTaxAggregator:
         fx_converter: Optional[CzCurrencyConverter] = None
         if self._fx_provider is not None:

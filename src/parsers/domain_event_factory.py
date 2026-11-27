@@ -628,6 +628,9 @@ class DomainEventFactory:
         # Every split event with the signed Quantity of its row: a split
         # reported as two rows is put back together after the loop.
         split_legs: List[Tuple[CorpActionSplitForward, Optional[Decimal]]] = []
+        # Every row that maps to no event of its own, with its signed Quantity:
+        # after the loop those that move shares are marked for manual review.
+        unmapped_rows: List[Tuple[CorporateActionEvent, Optional[Decimal]]] = []
 
         for idx, rca in enumerate(raw_corporate_actions):
             logger.debug(f"CA Record {idx+1}/{len(raw_corporate_actions)}: Data: Symbol='{rca.symbol}', Desc='{rca.description}', Type='{rca.type_ca}', ActionID='{rca.action_id_ibkr}'")
@@ -675,6 +678,9 @@ class DomainEventFactory:
             logger.debug(f"CA Record {idx+1}: Parsed CA Type from file: '{ca_type_from_file}', Code: '{ca_code_from_file}', Parsed CA Desc from file (upper): '{ca_desc_from_file[:100]}...'")
 
             domain_ca_event_instance: Optional[CorporateActionEvent] = None
+            # True for a row that deliberately gets no event because another
+            # row's event accounts for it (the acquirer's leg of a merger).
+            row_is_covered_by_another_event = False
             quantity_ca = safe_decimal(rca.quantity)
             logger.debug(f"CA Record {idx+1}: Raw Quantity: {rca.quantity}, Parsed Decimal Quantity: {quantity_ca}")
 
@@ -696,6 +702,7 @@ class DomainEventFactory:
 
             common_ca_params_kw_base = {
                 "ca_action_id_ibkr": rca.action_id_ibkr,
+                "ca_type_ibkr": ca_type_from_file or None,
                 "ibkr_transaction_id": rca.transaction_id,
                 "ibkr_activity_description": rca.action_description or rca.description,
                 "local_currency": rca.currency_primary or affected_asset.currency,
@@ -852,6 +859,7 @@ class DomainEventFactory:
                             # Only the disposing leg has lots to carry, so drop this
                             # one here rather than let it reach the processor and be
                             # written into the treatment store as a NEW->NEW key.
+                            row_is_covered_by_another_event = True
                             logger.info(
                                 f"CA Record {idx+1} (TC-Stock): skipping the receiving leg of "
                                 f"CA {rca.action_id_ibkr} — old and new asset are the same "
@@ -920,8 +928,42 @@ class DomainEventFactory:
                      **common_ca_params_kw
                  )
                  domain_ca_events.append(generic_event)
+                 if not row_is_covered_by_another_event:
+                     unmapped_rows.append((generic_event, quantity_ca))
                  logger.info(f"CA Record {idx+1}: Created generic CorporateActionEvent for fallback. Type assigned: {fallback_event_type.name}, Gross: {gross_amount_ca}")
+        self._mark_unapplied_quantity_changes(unmapped_rows)
         return self._one_event_per_split(domain_ca_events, split_legs)
+
+    @staticmethod
+    def _mark_unapplied_quantity_changes(
+        unmapped_rows: List[Tuple[CorporateActionEvent, Optional[Decimal]]],
+    ) -> None:
+        """Mark the corporate actions that move shares but that nothing applies.
+
+        A row that maps to no specific event (a spin-off, a tender, a
+        delisting, ...) passes through as a generic event the engine does not
+        act on, so the shares it adds or removes used to go missing without a
+        word. What such shares cost or yield is not on the row, so the engine
+        still cannot apply the action -- but it can say so, and it does for
+        every generic event that carries ``unapplied_quantity_change``.
+
+        Quantities are netted per ActionID and asset first: a change of ISIN is
+        two rows, -n and +n, that resolve to one asset and move nothing.
+        """
+        net_change: Dict[Tuple[str, uuid.UUID], Decimal] = {}
+        first_event: Dict[Tuple[str, uuid.UUID], CorporateActionEvent] = {}
+        for event, quantity in unmapped_rows:
+            if not quantity:
+                continue
+            # Rows without an ActionID cannot be told to belong together.
+            action = event.ca_action_id_ibkr or f"row:{event.event_id}"
+            key = (action, event.asset_internal_id)
+            net_change[key] = net_change.get(key, Decimal(0)) + quantity
+            first_event.setdefault(key, event)
+
+        for key, change in net_change.items():
+            if change != Decimal(0):
+                first_event[key].unapplied_quantity_change = change
 
     def _one_event_per_split(
         self,

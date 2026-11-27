@@ -70,7 +70,56 @@ def run_cz_aggregation(
         getattr(processing_results, "eoy_mismatch_details", None) or [])
     if eoy is not None:
         result.sections[eoy.section_key] = eoy
+    unapplied = unapplied_corporate_actions_section(
+        getattr(processing_results, "unapplied_corporate_actions", None) or [])
+    if unapplied is not None:
+        result.sections[unapplied.section_key] = unapplied
     return result
+
+
+def unapplied_corporate_actions_section(
+    actions: List[Dict[str, Any]],
+) -> Optional[TaxResultSection]:
+    """A blocking review section for corporate actions the engine did not
+    apply, or None when there are none.
+
+    A spin-off, a tender or a delisting moves shares, but what the new shares
+    cost -- or what the old ones yielded, and how that is taxed -- is not on
+    the statement row, and the engine has no rule for it. Such an action used
+    to vanish; now the run completes and this note says what is missing.
+    Shares it added are held at ZERO cost as a placeholder: the acquisition
+    cost of spun-off shares (a share of the parent's cost, or their value as
+    income in kind) and whether the parent's holding period carries over is a
+    question for the tax advisor, not something to guess here.
+    """
+    if not actions:
+        return None
+    listed = "; ".join(
+        f"{a.get('symbol')}"
+        + (f" ({a['description']})" if a.get("description") else "")
+        + f": {a.get('quantity_change'):+} on {a.get('event_date')}"
+        + f", type {a.get('ca_type') or '?'}, action {a.get('action_id') or '?'}"
+        + (f" [{a['ca_description']}]" if a.get("ca_description") else "")
+        + (" — held at zero cost" if a.get("placeholder_lot") else " — ledger left as it was")
+        for a in actions
+    )
+    note = (
+        f"REVIEW REQUIRED — DO NOT FILE: {len(actions)} corporate action(s) changed a "
+        f"position in a way the engine has no rule for and did not apply — {listed}. "
+        "Shares ADDED by such an action are held as a placeholder lot at ZERO cost "
+        "with an unestablished acquisition date: a sale of them is computed against "
+        "that zero cost and cannot pass the time test, and the cost of a related "
+        "holding (the parent of a spin-off) is NOT reduced. Their real acquisition "
+        "cost and holding period have to be determined by hand. Where the ledger was "
+        "left as it was, shares the action took away are still in it and whatever "
+        "was received for them is not in the results at all."
+    )
+    return TaxResultSection(
+        section_key="unapplied_corporate_actions",
+        label="Neuplatněné korporátní akce",
+        line_items={"action_count": Decimal(len(actions))},
+        notes=[note],
+    )
 
 
 def eoy_reconciliation_section(

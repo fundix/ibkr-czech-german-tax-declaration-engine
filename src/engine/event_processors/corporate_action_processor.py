@@ -429,6 +429,68 @@ class GenericCorporateActionProcessor(EventProcessor):
         asset_resolver = context.get('asset_resolver')
         asset_obj = asset_resolver.get_asset_by_id(event.asset_internal_id) if asset_resolver else None
         
+        if event.unapplied_quantity_change:
+            return self._report_unapplied(event, ledger, context, asset_obj)
+
         ledger_id_str = f"ledger for asset {ledger.asset_internal_id}" if ledger else "no ledger provided"
         logger.warning(f"No specific processor found for Corporate Action type {event.event_type.name} for asset {_format_asset_info(asset_obj)} (IBKR Action ID: {getattr(event, 'ca_action_id_ibkr', 'N/A')}, Event ID: {event.event_id}) with {ledger_id_str}. No ledger modifications performed.")
+        return []
+
+     def _report_unapplied(self, event: CorporateActionEvent, ledger: FifoLedger,
+                           context: Dict[str, Any], asset_obj) -> List[RealizedGainLoss]:
+        """Record an action that moves shares and that nothing here applies.
+
+        What the shares of a spin-off cost, or what a tender yields and how it
+        is taxed, is a question of tax law the row does not answer, so the
+        action is not applied. It is named for manual review instead of being
+        dropped, and -- where the run asks for it, because its result reports
+        these actions (``hold_unapplied_shares_as_placeholders``) -- the run is
+        kept alive:
+
+        * shares added are held as a placeholder lot at zero cost with both
+          dates marked estimated (see ``FifoLedger.add_placeholder_lot``), so
+          a later sale of them is matched and flagged rather than fatal;
+        * shares removed are left in the ledger -- taking them out would be a
+          disposal at proceeds nobody stated. The year-end reconciliation
+          reports the difference. The same goes for a positive quantity on a
+          holding that is short: it takes the short off rather than adding
+          shares, and covering it has a cost the row does not state either.
+        """
+        change = event.unapplied_quantity_change
+        action = event.ca_action_id_ibkr or event.ibkr_transaction_id or f"CORPACT_{event.event_id}"
+
+        placeholder_lot = False
+        if (context.get('hold_unapplied_shares_as_placeholders')
+                and change > Decimal(0) and ledger is not None and not ledger.short_lots):
+            ledger.add_placeholder_lot(
+                quantity=change,
+                acquisition_date=event.event_date,
+                source_transaction_id=str(action),
+            )
+            placeholder_lot = True
+
+        unapplied = context.get('unapplied_corporate_actions')
+        if unapplied is not None:
+            unapplied.append({
+                "symbol": getattr(asset_obj, 'ibkr_symbol', None)
+                          or (asset_obj.get_classification_key() if asset_obj else "?"),
+                "description": getattr(asset_obj, 'description', None) or "",
+                "event_date": event.event_date,
+                "action_id": event.ca_action_id_ibkr,
+                "ca_type": event.ca_type_ibkr,
+                "ca_description": event.ibkr_activity_description or "",
+                "quantity_change": change,
+                "placeholder_lot": placeholder_lot,
+            })
+
+        logger.error(
+            f"Corporate action {action} (type {event.ca_type_ibkr or '?'}) on "
+            f"{_format_asset_info(asset_obj)}, {event.event_date}, changes the position by "
+            f"{change:+} and is NOT applied: the engine has no rule for it. "
+            + ("The shares are held as a placeholder lot at zero cost, marked estimated. "
+               if placeholder_lot
+               else "The ledger is left as it was: shares the action adds are not in it "
+                    "(a sale of them will find no lot), shares it removes still are. ")
+            + "Review it manually."
+        )
         return []
