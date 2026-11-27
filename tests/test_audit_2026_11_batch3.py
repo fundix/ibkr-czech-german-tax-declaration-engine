@@ -13,6 +13,9 @@ audit:
   was dropped.
 * X15 — a stock-for-stock merger that names the acquirer by its ISIN created
   a phantom asset instead of finding the acquirer.
+* V23 — a split reported as two rows (old and new ISIN, one ActionID) became
+  two events: the ratio was applied twice, or the old asset was rescaled
+  while the new one stayed empty.
 
 Everything here is synthetic: invented symbols, ISINs, conids and amounts.
 Expected figures are worked out by hand in each test, in EUR so that no
@@ -77,6 +80,25 @@ def _option_on(underlying, *, put_call, strike, expiry, conid):
         underlying_symbol=underlying["symbol"],
         underlying_conid=underlying["conid"], multiplier="100",
     )
+
+
+def _ca_row(*, symbol, description, isin, conid, report_date, ca_type,
+            action_id, quantity, proceeds="0", value="0", currency="EUR"):
+    """One Corporate Actions row, in the order of ``CORPORATE_ACTIONS_HEADERS``."""
+    return [
+        ACCOUNT, symbol, description, isin, report_date, None, ca_type, action_id,
+        conid, None, None, currency, "0", proceeds, value, quantity,
+    ]
+
+
+def _position_row(security, quantity, mark_price="1", currency="EUR"):
+    """One Positions row, in the order of ``POSITIONS_FILE_HEADERS``."""
+    return [
+        ACCOUNT, currency, security["asset_class"], security["sub_category"],
+        security["symbol"], security["description"], security["isin"], quantity,
+        str(Decimal(quantity) * Decimal(mark_price)), mark_price, "0", None,
+        security["conid"], None, "1",
+    ]
 
 
 def _one_to_one():
@@ -443,3 +465,348 @@ class TestX15MergerNamesTheAcquirerByIsin:
         assert new_asset.ibkr_isin == "US0000000402"
         # A later row that carries the ISIN finds this asset, not a second one.
         assert resolver.get_asset_by_alias("ISIN:US0000000402") is new_asset
+
+
+# ---------------------------------------------------------------------------
+# V23 — a split reported as two rows is one event
+# ---------------------------------------------------------------------------
+
+class TestV23SplitReportedAsTwoRows(FifoTestCaseBase):
+    """A split that comes with a new ISIN is reported as two rows under one
+    ActionID: the old security with a negative quantity, the new one with a
+    positive quantity. Each row became a split event of its own.
+    """
+
+    SPLIT = "SYNR(US0000000501) SPLIT 1 FOR 5 ({symbol}, SYNTHETIC RHO INC, {isin})"
+    OLD = dict(asset_class="STK", sub_category="COMMON", symbol="SYNR",
+               description="SYNTHETIC RHO INC", isin="US0000000501",
+               conid="900000501")
+
+    def _split_rows(self, *, old_symbol, new):
+        return [
+            _ca_row(symbol=old_symbol, isin="US0000000501", conid="900000501",
+                    description=self.SPLIT.format(symbol=old_symbol,
+                                                  isin="US0000000501"),
+                    report_date="2025-06-02", ca_type="RS", action_id="8001",
+                    quantity="-100"),
+            _ca_row(symbol=new["symbol"], isin=new["isin"], conid=new["conid"],
+                    description=self.SPLIT.format(symbol=new["symbol"],
+                                                  isin=new["isin"]),
+                    report_date="2025-06-02", ca_type="RS", action_id="8001",
+                    quantity="20"),
+        ]
+
+    def test_ratio_is_applied_once_when_both_rows_are_the_same_asset(self):
+        """IBKR's usual shape: the old row is renamed "SYNR.OLD", the new
+        security keeps the ticker, so both rows resolve to one asset -- and
+        the 1-for-5 ratio was applied twice, leaving 4 shares instead of 20.
+        """
+        new = dict(self.OLD, isin="US0000000502", conid="900000502")
+        trades = [
+            # 100 bought at 2.00 + 1 commission = 201.
+            _trade_row(**self.OLD, trade_date="2025-01-15", quantity="100",
+                       price="2.00", buy_sell="BUY", open_close="O", tx_id="4001"),
+            # The 20 shares left after the split, sold at 12.00 - 1 commission.
+            _trade_row(**new, trade_date="2025-09-10", quantity="-20",
+                       price="12.00", buy_sell="SELL", open_close="C", tx_id="4002"),
+        ]
+
+        out = self._run_pipeline(
+            trades_data=trades,
+            corporate_actions_data=self._split_rows(old_symbol="SYNR.OLD", new=new),
+            tax_year=TAX_YEAR, custom_rate_provider=_one_to_one(), country_code="cz")
+
+        (rgl,) = out.realized_gains_losses
+        assert rgl.quantity_realized == Decimal("20")
+        assert rgl.acquisition_date == "2025-01-15"
+        assert rgl.total_cost_basis_eur == Decimal("201.00")
+        assert rgl.total_realization_value_eur == Decimal("239.00")
+        assert rgl.gross_gain_loss_eur == Decimal("38.00")
+        assert out.eoy_mismatch_error_count == 0
+
+    def test_lots_move_to_the_new_asset_when_the_rows_are_two_assets(self):
+        """The new security has its own ticker, so the rows are two assets.
+        The old one was rescaled and kept its shares; the new one had none,
+        and selling them ended the run."""
+        new = dict(asset_class="STK", sub_category="COMMON", symbol="SYNN",
+                   description="SYNTHETIC RHO NEW INC", isin="US0000000502",
+                   conid="900000502")
+        trades = [
+            # 100 bought at 2.00 + 1 commission = 201.
+            _trade_row(**self.OLD, trade_date="2025-01-15", quantity="100",
+                       price="2.00", buy_sell="BUY", open_close="O", tx_id="4101"),
+            # 5 of the 20 new shares sold at 12.00 - 1 commission = 59.
+            _trade_row(**new, trade_date="2025-09-10", quantity="-5",
+                       price="12.00", buy_sell="SELL", open_close="C", tx_id="4102"),
+        ]
+
+        out = self._run_pipeline(
+            trades_data=trades,
+            corporate_actions_data=self._split_rows(old_symbol="SYNR", new=new),
+            positions_end_data=[_position_row(new, "15", mark_price="12")],
+            tax_year=TAX_YEAR, custom_rate_provider=_one_to_one(), country_code="cz")
+
+        resolver = out.asset_resolver
+        old_asset = resolver.get_asset_by_alias("ISIN:US0000000501")
+        new_asset = resolver.get_asset_by_alias("ISIN:US0000000502")
+        assert old_asset is not new_asset
+
+        (rgl,) = out.realized_gains_losses
+        assert rgl.asset_internal_id == new_asset.internal_asset_id
+        assert rgl.quantity_realized == Decimal("5")
+        # The purchase date and the cost travel with the shares.
+        assert rgl.acquisition_date == "2025-01-15"
+        # 201 for 20 shares -> 50.25 for 5
+        assert rgl.total_cost_basis_eur == Decimal("50.25")
+        assert rgl.total_realization_value_eur == Decimal("59.00")
+        assert rgl.gross_gain_loss_eur == Decimal("8.75")
+
+        ledgers = out.fifo_ledgers_by_asset_id
+        assert ledgers[old_asset.internal_asset_id].lots == []
+        (lot,) = ledgers[new_asset.internal_asset_id].lots
+        assert lot.quantity == Decimal("15")
+        assert lot.total_cost_basis_eur == Decimal("150.75")
+        assert lot.acquisition_date == "2025-01-15"
+        assert out.eoy_mismatch_error_count == 0
+
+    def test_a_ratio_without_a_finite_decimal_still_pairs_the_rows(self):
+        """1 for 3: the ratio is 0.333..., and 300 times that is not exactly
+        100 -- the pair must still be recognised."""
+        split = "SYNR(US0000000501) SPLIT 1 FOR 3 ({symbol}, {name}, {isin})"
+        new = dict(asset_class="STK", sub_category="COMMON", symbol="SYNN",
+                   description="SYNTHETIC RHO NEW INC", isin="US0000000502",
+                   conid="900000502")
+        trades = [
+            # 300 bought at 2.00 + 1 commission = 601.
+            _trade_row(**self.OLD, trade_date="2025-01-15", quantity="300",
+                       price="2.00", buy_sell="BUY", open_close="O", tx_id="4501"),
+            # The 100 shares after the split sold at 7.00 - 1 commission = 699.
+            _trade_row(**new, trade_date="2025-09-10", quantity="-100",
+                       price="7.00", buy_sell="SELL", open_close="C", tx_id="4502"),
+        ]
+        rows = [
+            _ca_row(symbol="SYNR", isin="US0000000501", conid="900000501",
+                    description=split.format(symbol="SYNR", name="SYNTHETIC RHO INC",
+                                             isin="US0000000501"),
+                    report_date="2025-06-02", ca_type="RS", action_id="8004",
+                    quantity="-300"),
+            _ca_row(symbol="SYNN", isin="US0000000502", conid="900000502",
+                    description=split.format(symbol="SYNN",
+                                             name="SYNTHETIC RHO NEW INC",
+                                             isin="US0000000502"),
+                    report_date="2025-06-02", ca_type="RS", action_id="8004",
+                    quantity="100"),
+        ]
+
+        out = self._run_pipeline(
+            trades_data=trades, corporate_actions_data=rows, tax_year=TAX_YEAR,
+            custom_rate_provider=_one_to_one(), country_code="cz")
+
+        (rgl,) = out.realized_gains_losses
+        assert rgl.quantity_realized == Decimal("100")
+        assert rgl.acquisition_date == "2025-01-15"
+        assert rgl.total_cost_basis_eur == Decimal("601.00")
+        assert rgl.gross_gain_loss_eur == Decimal("98.00")
+        assert out.eoy_mismatch_error_count == 0
+
+    @pytest.mark.parametrize("holding", ["long", "short"])
+    def test_a_one_for_one_exchange_moves_the_holding_once(self, holding):
+        """With a ratio of 1 the two rows carry the same number and only the
+        sign tells them apart -- and the signs are the other way round for a
+        short holding. Either row could be read as the old one; taking both
+        readings cancelled the event altogether."""
+        split = "SYNR(US0000000501) SPLIT 1 FOR 1 ({symbol}, {name}, {isin})"
+        new = dict(asset_class="STK", sub_category="COMMON", symbol="SYNN",
+                   description="SYNTHETIC RHO NEW INC", isin="US0000000502",
+                   conid="900000502")
+        long = holding == "long"
+        trades = [
+            # 100 at 2.00: bought for 201, or sold short for 199.
+            _trade_row(**self.OLD, trade_date="2025-01-15",
+                       quantity="100" if long else "-100", price="2.00",
+                       buy_sell="BUY" if long else "SELL", open_close="O",
+                       tx_id="4601"),
+            # Closed at 3.00 under the new security: 299 received, or 301 paid.
+            _trade_row(**new, trade_date="2025-09-10",
+                       quantity="-100" if long else "100", price="3.00",
+                       buy_sell="SELL" if long else "BUY", open_close="C",
+                       tx_id="4602"),
+        ]
+        rows = [
+            _ca_row(symbol="SYNR", isin="US0000000501", conid="900000501",
+                    description=split.format(symbol="SYNR", name="SYNTHETIC RHO INC",
+                                             isin="US0000000501"),
+                    report_date="2025-06-02", ca_type="FS", action_id="8005",
+                    quantity="-100" if long else "100"),
+            _ca_row(symbol="SYNN", isin="US0000000502", conid="900000502",
+                    description=split.format(symbol="SYNN",
+                                             name="SYNTHETIC RHO NEW INC",
+                                             isin="US0000000502"),
+                    report_date="2025-06-02", ca_type="FS", action_id="8005",
+                    quantity="100" if long else "-100"),
+        ]
+
+        out = self._run_pipeline(
+            trades_data=trades, corporate_actions_data=rows, tax_year=TAX_YEAR,
+            custom_rate_provider=_one_to_one(), country_code="cz")
+
+        (rgl,) = out.realized_gains_losses
+        assert rgl.quantity_realized == Decimal("100")
+        assert rgl.acquisition_date == "2025-01-15"
+        # long: 299 - 201; short: 199 - 301
+        assert rgl.gross_gain_loss_eur == (Decimal("98.00") if long else Decimal("-102.00"))
+        assert out.eoy_mismatch_error_count == 0
+
+    def test_short_position_follows_the_split_to_the_new_asset(self):
+        """For a short holding the rows' signs are the other way round: the
+        old security comes with a positive quantity (the short is taken off
+        it) and the new one with a negative quantity."""
+        new = dict(asset_class="STK", sub_category="COMMON", symbol="SYNN",
+                   description="SYNTHETIC RHO NEW INC", isin="US0000000502",
+                   conid="900000502")
+        trades = [
+            # 100 sold short at 2.00 - 1 commission = 199 received.
+            _trade_row(**self.OLD, trade_date="2025-01-15", quantity="-100",
+                       price="2.00", buy_sell="SELL", open_close="O", tx_id="4201"),
+            # The 20 shares owed after the split bought back at 9.00 + 1 = 181.
+            _trade_row(**new, trade_date="2025-09-10", quantity="20",
+                       price="9.00", buy_sell="BUY", open_close="C", tx_id="4202"),
+        ]
+        rows = [
+            _ca_row(symbol="SYNR", isin="US0000000501", conid="900000501",
+                    description=self.SPLIT.format(symbol="SYNR", isin="US0000000501"),
+                    report_date="2025-06-02", ca_type="RS", action_id="8001",
+                    quantity="100"),
+            _ca_row(symbol="SYNN", isin="US0000000502", conid="900000502",
+                    description=self.SPLIT.format(symbol="SYNN", isin="US0000000502"),
+                    report_date="2025-06-02", ca_type="RS", action_id="8001",
+                    quantity="-20"),
+        ]
+
+        out = self._run_pipeline(
+            trades_data=trades, corporate_actions_data=rows, tax_year=TAX_YEAR,
+            custom_rate_provider=_one_to_one(), country_code="cz")
+
+        (rgl,) = out.realized_gains_losses
+        assert rgl.realization_type is RealizationType.SHORT_POSITION_COVER
+        assert rgl.quantity_realized == Decimal("20")
+        assert rgl.total_realization_value_eur == Decimal("199.00")
+        assert rgl.total_cost_basis_eur == Decimal("181.00")
+        assert rgl.gross_gain_loss_eur == Decimal("18.00")
+        assert out.eoy_mismatch_error_count == 0
+
+    def test_option_rows_of_the_same_action_do_not_break_up_the_stock_split(self):
+        """The action's ActionID is also on the rows that adjust the option
+        contracts on the stock. They are other securities and must not turn
+        the stock's two rows back into two events."""
+        forward = "SYNR(US0000000501) SPLIT 2 FOR 1 ({symbol}, {name}, {isin})"
+        new = dict(self.OLD, isin="US0000000502", conid="900000502")
+        old_call = _option_on(self.OLD, put_call="C", strike="12",
+                              expiry="2025-12-19", conid="900000511")
+        new_call = _option_on(self.OLD, put_call="C", strike="6",
+                              expiry="2025-12-19", conid="900000512")
+        trades = [
+            # 100 bought at 10 + 1 commission = 1001.
+            _trade_row(**self.OLD, trade_date="2025-01-15", quantity="100",
+                       price="10", buy_sell="BUY", open_close="O", tx_id="4301"),
+            _trade_row(**old_call, trade_date="2025-02-03", quantity="1",
+                       price="1.00", buy_sell="BUY", open_close="O", tx_id="4302"),
+            # All 200 shares held after the split sold at 6 - 1 commission.
+            _trade_row(**new, trade_date="2025-09-10", quantity="-200",
+                       price="6", buy_sell="SELL", open_close="C", tx_id="4303"),
+        ]
+        rows = [
+            _ca_row(symbol="SYNR.OLD", isin="US0000000501", conid="900000501",
+                    description=forward.format(symbol="SYNR.OLD",
+                                               name="SYNTHETIC RHO INC",
+                                               isin="US0000000501"),
+                    report_date="2025-06-02", ca_type="FS", action_id="8002",
+                    quantity="-100"),
+            _ca_row(symbol="SYNR", isin="US0000000502", conid="900000502",
+                    description=forward.format(symbol="SYNR",
+                                               name="SYNTHETIC RHO INC",
+                                               isin="US0000000502"),
+                    report_date="2025-06-02", ca_type="FS", action_id="8002",
+                    quantity="200"),
+            _ca_row(symbol=old_call["symbol"], isin="", conid="900000511",
+                    description=forward.format(symbol=old_call["symbol"],
+                                               name=old_call["description"], isin=""),
+                    report_date="2025-06-02", ca_type="FS", action_id="8002",
+                    quantity="-1"),
+            _ca_row(symbol=new_call["symbol"], isin="", conid="900000512",
+                    description=forward.format(symbol=new_call["symbol"],
+                                               name=new_call["description"], isin=""),
+                    report_date="2025-06-02", ca_type="FS", action_id="8002",
+                    quantity="2"),
+        ]
+
+        out = self._run_pipeline(
+            trades_data=trades, corporate_actions_data=rows, tax_year=TAX_YEAR,
+            custom_rate_provider=_one_to_one(), country_code="cz")
+
+        stock = out.asset_resolver.get_asset_by_alias("ISIN:US0000000501")
+        (rgl,) = [r for r in out.realized_gains_losses
+                  if r.asset_internal_id == stock.internal_asset_id]
+        assert rgl.quantity_realized == Decimal("200")
+        assert rgl.total_cost_basis_eur == Decimal("1001.00")
+        assert rgl.total_realization_value_eur == Decimal("1199.00")
+        assert out.fifo_ledgers_by_asset_id[stock.internal_asset_id].lots == []
+
+    def test_written_option_follows_its_adjusted_contract(self):
+        """A 2-for-1 split turns one written put into two at half the strike,
+        under a new contract: +1 on the old contract (the short is taken off
+        it), -2 on the new one. They are a pair of rows of their own, next to
+        the single row of the ETF itself."""
+        forward = "SYNE(US0000000101) SPLIT 2 FOR 1 ({symbol}, {name}, {isin})"
+        old_put = _option_on(ETF, put_call="P", strike="50", expiry="2025-12-19",
+                             conid="900000121")
+        new_put = _option_on(ETF, put_call="P", strike="25", expiry="2025-12-19",
+                             conid="900000122")
+        trades = [
+            # 100 ETF shares at 40 + 1 commission = 4001.
+            _trade_row(**ETF, trade_date="2025-01-15", quantity="100", price="40",
+                       buy_sell="BUY", open_close="O", tx_id="4401"),
+            # One put written for 3.00: 300 - 1 commission = 299 received.
+            _trade_row(**old_put, trade_date="2025-02-03", quantity="-1",
+                       price="3.00", buy_sell="SELL", open_close="O", tx_id="4402"),
+            # The two adjusted puts bought back at 1.00: 200 + 1 commission.
+            _trade_row(**new_put, trade_date="2025-09-10", quantity="2",
+                       price="1.00", buy_sell="BUY", open_close="C", tx_id="4403"),
+        ]
+        rows = [
+            _ca_row(symbol="SYNE", isin="US0000000101", conid="900000101",
+                    description=forward.format(symbol="SYNE",
+                                               name="SYNTHETIC INDEX ETF",
+                                               isin="US0000000101"),
+                    report_date="2025-06-02", ca_type="FS", action_id="8003",
+                    quantity="100"),
+            _ca_row(symbol=old_put["symbol"], isin="", conid="900000121",
+                    description=forward.format(symbol=old_put["symbol"],
+                                               name=old_put["description"], isin=""),
+                    report_date="2025-06-02", ca_type="FS", action_id="8003",
+                    quantity="1"),
+            _ca_row(symbol=new_put["symbol"], isin="", conid="900000122",
+                    description=forward.format(symbol=new_put["symbol"],
+                                               name=new_put["description"], isin=""),
+                    report_date="2025-06-02", ca_type="FS", action_id="8003",
+                    quantity="-2"),
+        ]
+
+        out = self._run_pipeline(
+            trades_data=trades, corporate_actions_data=rows,
+            positions_end_data=[_position_row(ETF, "200", mark_price="20")],
+            tax_year=TAX_YEAR, custom_rate_provider=_one_to_one(), country_code="cz")
+
+        (rgl,) = out.realized_gains_losses
+        assert rgl.realization_type is RealizationType.OPTION_TRADE_CLOSE_SHORT
+        assert rgl.quantity_realized == Decimal("2")
+        assert rgl.acquisition_date == "2025-02-03"
+        assert rgl.total_realization_value_eur == Decimal("299.00")
+        assert rgl.total_cost_basis_eur == Decimal("201.00")
+        assert rgl.gross_gain_loss_eur == Decimal("98.00")
+
+        etf = out.asset_resolver.get_asset_by_alias("ISIN:US0000000101")
+        (lot,) = out.fifo_ledgers_by_asset_id[etf.internal_asset_id].lots
+        assert lot.quantity == Decimal("200")
+        assert lot.total_cost_basis_eur == Decimal("4001.00")
+        assert out.eoy_mismatch_error_count == 0

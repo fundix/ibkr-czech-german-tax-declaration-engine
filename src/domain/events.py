@@ -195,14 +195,21 @@ class CorporateActionEvent(FinancialEvent):
 class CorpActionSplitForward(CorporateActionEvent):
     _: KW_ONLY
     new_shares_per_old_share: Decimal # e.g., 2 for a 2-for-1 split
+    # The asset the holding continues under when the split comes with a new
+    # ISIN or conid and the broker books the new shares as another asset. None
+    # for the ordinary split, which stays where it is. The lots are rescaled
+    # and then moved as they are: same cost, same acquisition date.
+    new_asset_internal_id: Optional[uuid.UUID] = None
 
     def __init__(self, asset_internal_id: uuid.UUID, event_date: str, *,
                  new_shares_per_old_share: Decimal,
+                 new_asset_internal_id: Optional[uuid.UUID] = None,
                  **kwargs_for_parent_kw_only):
         super().__init__(asset_internal_id, event_date,
                          event_type=FinancialEventType.CORP_SPLIT_FORWARD, # Renamed
                          **kwargs_for_parent_kw_only)
         self.new_shares_per_old_share = new_shares_per_old_share
+        self.new_asset_internal_id = new_asset_internal_id
 
     def __post_init__(self):
         super().__post_init__()

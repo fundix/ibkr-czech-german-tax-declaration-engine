@@ -2,8 +2,8 @@
 import logging
 import re
 import uuid
-from decimal import Decimal
-from typing import List, Optional, Set, Union, Tuple # Ensure Tuple is here
+from decimal import Decimal, ROUND_FLOOR
+from typing import Dict, List, Optional, Set, Union, Tuple # Ensure Tuple is here
 from datetime import date, datetime
 
 from src.domain.assets import (
@@ -23,6 +23,7 @@ from src.parsers.raw_models import (
     RawTradeRecord, RawCashTransactionRecord, RawCorporateActionRecord
 )
 from src.utils.type_utils import parse_ibkr_date, parse_ibkr_datetime, safe_decimal
+import src.config as global_config
 
 logger = logging.getLogger(__name__)
 
@@ -624,6 +625,9 @@ class DomainEventFactory:
     def create_events_from_corporate_actions(self, raw_corporate_actions: List[RawCorporateActionRecord]) -> List[CorporateActionEvent]:
         logger.info(f"Processing {len(raw_corporate_actions)} raw corporate action records into domain events...")
         domain_ca_events: List[CorporateActionEvent] = []
+        # Every split event with the signed Quantity of its row: a split
+        # reported as two rows is put back together after the loop.
+        split_legs: List[Tuple[CorpActionSplitForward, Optional[Decimal]]] = []
 
         for idx, rca in enumerate(raw_corporate_actions):
             logger.debug(f"CA Record {idx+1}/{len(raw_corporate_actions)}: Data: Symbol='{rca.symbol}', Desc='{rca.description}', Type='{rca.type_ca}', ActionID='{rca.action_id_ibkr}'")
@@ -772,6 +776,7 @@ class DomainEventFactory:
                         asset_internal_id=affected_asset.internal_asset_id, event_date=event_date_str,
                         new_shares_per_old_share=new_per_old_ratio, **common_ca_params_kw
                     )
+                     split_legs.append((domain_ca_event_instance, quantity_ca))
 
             elif ca_type_from_file == "TC": # Merger/Acquisition (can be cash, stock, or mixed)
                 logger.debug(f"CA Record {idx+1}: Identified as potential Merger/Acquisition (TC).")
@@ -916,4 +921,110 @@ class DomainEventFactory:
                  )
                  domain_ca_events.append(generic_event)
                  logger.info(f"CA Record {idx+1}: Created generic CorporateActionEvent for fallback. Type assigned: {fallback_event_type.name}, Gross: {gross_amount_ca}")
-        return domain_ca_events
+        return self._one_event_per_split(domain_ca_events, split_legs)
+
+    def _one_event_per_split(
+        self,
+        events: List[CorporateActionEvent],
+        split_legs: List[Tuple[CorpActionSplitForward, Optional[Decimal]]],
+    ) -> List[CorporateActionEvent]:
+        """Put a split that the broker reports as several rows back into one event.
+
+        A split that comes with a new ISIN is two rows under one ActionID: the
+        old security with a negative quantity, the new one with a positive
+        quantity. Read row by row that was two events -- the ratio applied
+        twice when both rows resolve to one asset, or the old asset rescaled
+        and the new one left empty when they are two.
+
+        Per ActionID, the rows of one asset are one split of it and are applied
+        once; and a row on the old security is joined with the row on the new
+        one (see ``_old_and_new_security``) into a single event that stays on
+        the old asset and names the new one as where the holding continues. A
+        split reported as a single row is left exactly as it was.
+        """
+        legs_by_action: Dict[str, List[Tuple[CorpActionSplitForward, Optional[Decimal]]]] = {}
+        for leg in split_legs:
+            if leg[0].ca_action_id_ibkr:
+                legs_by_action.setdefault(leg[0].ca_action_id_ibkr, []).append(leg)
+
+        superseded: Set[uuid.UUID] = set()
+        for legs in legs_by_action.values():
+            if len(legs) < 2:
+                continue
+            legs_by_asset: Dict[uuid.UUID, List[Tuple[CorpActionSplitForward, Optional[Decimal]]]] = {}
+            for leg in legs:
+                legs_by_asset.setdefault(leg[0].asset_internal_id, []).append(leg)
+
+            # The action's id is also on rows of other assets -- the option
+            # contracts on the stock are adjusted under it too -- so the rows
+            # are sorted out per asset, never all thrown together.
+            lone_legs = []
+            for asset_legs in legs_by_asset.values():
+                superseded.update(event.event_id for event, _ in asset_legs[1:])
+                if len(asset_legs) == 1:
+                    lone_legs.append(asset_legs[0])
+
+            for old_event, new_event in self._old_and_new_security(lone_legs):
+                old_event.new_asset_internal_id = new_event.asset_internal_id
+                superseded.add(new_event.event_id)
+                logger.info(
+                    f"Split {old_event.ca_action_id_ibkr}: the holding of asset "
+                    f"{old_event.asset_internal_id} continues under asset {new_event.asset_internal_id}."
+                )
+
+        return [event for event in events if event.event_id not in superseded]
+
+    def _old_and_new_security(
+        self,
+        legs: List[Tuple[CorpActionSplitForward, Optional[Decimal]]],
+    ) -> List[Tuple[CorpActionSplitForward, CorpActionSplitForward]]:
+        """Among split rows that each stand alone on their asset, find the
+        pairs that are the old and the new security of one holding.
+
+        The new row carries the old row's quantity times the split ratio, with
+        the opposite sign: -100 and +20 for a 1-for-5 split of a long holding,
+        +100 and -20 for a short one. A fraction of a share is paid out in
+        cash, so the new row may be that figure rounded down. A security is
+        paired with a security and an option contract with an option contract.
+        A row with no partner, or with more than one candidate, stays alone.
+        """
+        def is_derivative(event: CorpActionSplitForward) -> bool:
+            return isinstance(self.asset_resolver.get_asset_by_id(event.asset_internal_id), Derivative)
+
+        def continues_as(old_qty: Optional[Decimal], new_qty: Optional[Decimal], ratio: Decimal) -> bool:
+            if not old_qty or not new_qty or (old_qty > 0) == (new_qty > 0):
+                return False
+            # On the quantity grid: 300 shares at 1 for 3 are 99.999... before it.
+            exact = (old_qty.copy_abs() * ratio).quantize(global_config.PRECISION_QUANTITY)
+            return new_qty.copy_abs() in (exact, exact.to_integral_value(rounding=ROUND_FLOOR))
+
+        candidates = [
+            (old_event, new_event)
+            for old_event, old_qty in legs
+            for new_event, new_qty in legs
+            if new_event is not old_event
+            and is_derivative(old_event) == is_derivative(new_event)
+            and continues_as(old_qty, new_qty, old_event.new_shares_per_old_share)
+        ]
+        # At a ratio of 1 both rows carry the same number, so each could be the
+        # old one. It is read as a long holding -- shares leave the old security
+        # -- and the split processor turns it round if the lots prove to sit on
+        # the other asset (a short holding).
+        quantity_of = {event.event_id: quantity for event, quantity in legs}
+        both_ways = {(id(old_event), id(new_event)) for old_event, new_event in candidates}
+        candidates = [
+            (old_event, new_event) for old_event, new_event in candidates
+            if (id(new_event), id(old_event)) not in both_ways
+            or quantity_of[old_event.event_id] < 0
+        ]
+        pairs = [
+            (old_event, new_event) for old_event, new_event in candidates
+            if sum(1 for other_old, _ in candidates if other_old is old_event) == 1
+            and sum(1 for _, other_new in candidates if other_new is new_event) == 1
+        ]
+        if len(pairs) != len(candidates):
+            logger.warning(
+                f"Split {legs[0][0].ca_action_id_ibkr}: more than one row could be the new security "
+                "of the same holding. Those rows are applied on their own; verify the positions."
+            )
+        return pairs

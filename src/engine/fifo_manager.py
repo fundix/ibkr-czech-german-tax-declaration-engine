@@ -949,6 +949,31 @@ class FifoLedger:
         self.lots[:] = long_lots
         self.short_lots[:] = short_lots
 
+    def take_over_lots(
+        self,
+        long_lots: List[FifoLot],
+        short_lots: List[ShortFifoLot],
+        carried_from_prefix: str,
+    ) -> None:
+        """Book lots that continue under this asset after an identifier change.
+
+        A split that comes with a new ISIN or conid leaves the holding what it
+        was -- the same purchases, at the same cost, on the same dates -- under
+        another asset. The lots are taken as they are (the split has already
+        rescaled them): nothing is re-derived, so the cost basis and the
+        holding period run on unbroken. Only their origin is noted.
+        """
+        for lot in [*long_lots, *short_lots]:
+            if not lot.carried_from:
+                lot.carried_from = f"{carried_from_prefix}:{lot.source_transaction_id}"
+        self.lots.extend(long_lots)
+        self.lots.sort(key=_long_lot_sort_key)
+        self.short_lots.extend(short_lots)
+        self.short_lots.sort(key=lambda lot: (
+            parse_ibkr_date(lot.opening_date) or datetime.min.date(),
+            numeric_tx_sort_key(lot.source_transaction_id),
+        ))
+
     def receive_carried_lots_from_merger(
         self,
         *,

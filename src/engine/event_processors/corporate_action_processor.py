@@ -36,9 +36,42 @@ class SplitProcessor(EventProcessor):
         if event.event_type != FinancialEventType.CORP_SPLIT_FORWARD:
             logger.error(f"SplitProcessor received event with type {event.event_type} but expected CORP_SPLIT_FORWARD. ID: {event.event_id}")
             return []
+        # A split that comes with a new ISIN or conid continues under another
+        # asset. Its ledger is fetched before anything is rescaled, so a missing
+        # one refuses the event while both ledgers are still untouched.
+        target_ledger = None
+        if event.new_asset_internal_id is not None and event.new_asset_internal_id != event.asset_internal_id:
+            ledger_for = context.get('ledger_for')
+            if ledger_for is None:
+                raise ValueError(
+                    f"Split {event.ca_action_id_ibkr or event.event_id} continues under another asset, "
+                    "but the run did not provide a ledger accessor. This is an engine wiring error, "
+                    "not a data problem."
+                )
+            target_ledger = ledger_for(event.new_asset_internal_id)
+            # The factory tells the old security from the new by the quantities
+            # of the two rows; at a ratio of 1 it can only assume a long
+            # holding. The lots settle it: they are on the old security, and
+            # the new one cannot hold any before the split that creates it.
+            if not (ledger.lots or ledger.short_lots) and (target_ledger.lots or target_ledger.short_lots):
+                ledger, target_ledger = target_ledger, ledger
         try:
             logger.info(f"Processing {event.event_type.name} for asset {ledger.asset_internal_id} on {event.event_date} (ID: {event.event_id}). Ratio: {event.new_shares_per_old_share}")
             ledger.adjust_lots_for_split(event)
+            if target_ledger is not None:
+                asset_resolver = context.get('asset_resolver')
+                old_asset = asset_resolver.get_asset_by_id(ledger.asset_internal_id) if asset_resolver else None
+                long_lots = ledger.drain_all_long_lots()
+                short_lots = ledger.drain_all_short_lots()
+                target_ledger.take_over_lots(
+                    long_lots, short_lots,
+                    carried_from_prefix=getattr(old_asset, 'ibkr_symbol', None) or "?",
+                )
+                logger.info(
+                    f"Split {event.ca_action_id_ibkr or event.event_id}: {len(long_lots)} long + "
+                    f"{len(short_lots)} short lot(s) continue under asset {target_ledger.asset_internal_id}, "
+                    "with their cost and acquisition dates."
+                )
         except Exception as e:
             logger.error(f"Error processing Split event {event.event_id} in ledger for asset {ledger.asset_internal_id}: {e}", exc_info=True)
         return []
