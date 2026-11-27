@@ -440,7 +440,15 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 #     final credit per state (ftc_<cc>_credited), and the per-state credits
 #     are whole hellers that add up to the total, with a zero for a state
 #     credited nothing. Same statements, different figures and rows.
-_FINGERPRINT_VERSION = "v10"
+# v11: earlier years are replayed with the pairing method they were filed
+#     with (filed_years.json; unmarked = FIFO) instead of the run's own, so a
+#     LIFO / weighted-average / optimal run gets different opening lots. The
+#     weighted average converts its cost per payment date and no longer
+#     averages short positions; optimal minimises the CZK base, respects the
+#     order of trades within a day and leaves its own lots in portfolio.json.
+#     A FIFO run's figures do not move, but its meta gained the earlier
+#     years' pairing, which the stale-run check reads.
+_FINGERPRINT_VERSION = "v11"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —

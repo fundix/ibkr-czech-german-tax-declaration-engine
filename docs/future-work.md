@@ -187,8 +187,17 @@ are IBKR-only by design. What remains, ordered by value-for-effort:
       `optimal` solver covers long securities only (options/shorts/assets
       with mid-year corp actions or capital repayments stay FIFO); it is
       exact for base+rates, near-optimal at the 100k cliff (mitigated by
-      scoring every method with the real aggregator — never worse than
-      FIFO).
+      scoring every method with the real aggregator). Audit 2026-11 V04,
+      W05–W08 (DONE 2026-11): earlier years replay with the method they were
+      filed with (`filed_years.json`, „Podáno"; optimal through its stored
+      assignment); optimal minimises the CZK base of one FX mode, respects
+      the trade order within a day and leaves the right lots in the ledger;
+      the weighted average keeps its cost per payment date and shorts are
+      no longer averaged. Still open: positions older than the first
+      uploaded year under a non-FIFO history (review only), CLI input of
+      earlier years' methods, one mark per year (multi-account), the 100k
+      cliff in the solver's objective, X23 (estimated-date lots in the
+      solver).
 - [x] **Dividend separate tax base (samostatný základ daně §16a).** DONE
       (2026-07-05): `compute_tax_liability` now computes BOTH the general
       base (dividends inside §16) and the §16a separate 15 % base (foreign

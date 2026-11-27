@@ -81,16 +81,67 @@ and the time-test result. `--cz-pairing-method` (web GUI selector; MCP
 - **`weighted_average`** — every disposed unit is costed at the blended pool
   average (vážený aritmetický průměr); the deemed-sold lot identity (dates →
   time test) stays FIFO, and surviving lots are re-priced to the average so the
-  moving average stays consistent.
+  moving average stays consistent. The average is kept per payment date
+  (`FifoLot.cost_components` → `RealizedGainLoss.cost_basis_components_eur`):
+  each part of the cost converts at the ČNB rate of the day it was paid, so the
+  CZK cost is the average in CZK, not the EUR average at one lot's rate.
+  Short positions are not averaged — they are covered FIFO at their own
+  proceeds.
 - **`optimal`** — a global tax-minimising min-cost-flow solver
   (`src/engine/pairing_solver.py`, per asset) that routes gains onto time-test-
-  exempt lots and losses onto taxable lots to minimise the §10 taxable base.
+  exempt lots and losses onto taxable lots to minimise the §10 taxable base
+  **in CZK** — proceeds at the sale day's rate minus the cost at the rate of
+  the day it was paid, through the same helper the filed items use
+  (`item_builder.cost_leg_czk`). It therefore needs a concrete FX mode
+  (`daily` or `uniform`; the web GUI and MCP refuse `optimal` with `compare`).
+  A lot may fill only a sale booked after it (the ledger's operation order,
+  not just the date), and after solving the ledger's open lots are rebuilt
+  from the assignment, so the portfolio, time-test countdown and simulator
+  show the lots the filed return leaves. Long stocks/funds without a tax-year
+  corporate action only; everything else stays FIFO.
 - **`compare`** (CLI only) — scores the full FX-mode × method matrix by *final*
   tax (after time test + 100k limit + netting + rates) and reports the cheapest.
+  `optimal` is run once per FX mode, with that mode's rates.
 
 The method must be applied consistently for the whole year; the tool only
-*recommends* the cheapest — the filer/advisor chooses. Every method is scored by
-the real aggregator, so `optimal` is never worse than FIFO.
+*recommends* the cheapest — the filer/advisor chooses. The solver minimises the
+base; it does not see the 100 000 CZK exemption cliff, so compare its final tax
+with FIFO before filing.
+
+#### Earlier years: the method a year was filed with
+
+The opening lots of a year are rebuilt by replaying every earlier year, and
+each earlier year is replayed with the method **it was filed with** — not with
+the method of the current run. The web GUI records it: the **„Podáno"** button
+on a closed year's run writes `data/webapp/filed_years.json`
+(`{"version": 1, "years": {"2025": {"pairing_method", "fx_mode", "run_id",
+"marked_at", "pairing_plan"?}}}`). An unmarked year is taken as filed FIFO, so
+nothing needs marking while every year is FIFO.
+
+- `optimal` cannot be replayed as a method (the solver's answer depends on the
+  rates and on later fixes), so an optimal run stores its assignment —
+  `pairing_plan.<mode>.json`, sale TransactionID → lots and quantities — and
+  marking the run copies it into the registry. Later years consume exactly
+  those lots; a sale without an entry stayed FIFO.
+- A run warns about unmarked years only when something other than FIFO is in
+  play (its own method, a year marked otherwise, or a stored non-FIFO run of an
+  unmarked year). It names the non-FIFO years its opening lots rest on, and a
+  run whose earlier years have since been marked differently is flagged
+  „přepočítejte" on read.
+- When an earlier year was filed non-FIFO and the opening lots still come from
+  a fallback (the broker's lot snapshot, one estimated lot, or a replay trimmed
+  to the broker's quantity) — or a stored plan does not fit the replay — the
+  lots follow the broker's FIFO, not the filing: their dates are marked
+  estimated (the time test goes to review) and the symbols are listed in the
+  run's notes (`ProcessingOutput.soy_unverified_symbols`).
+
+Not supported: positions bought before the first uploaded year cannot be
+re-derived under a non-FIFO history (review, as above); the CLI has no way to
+enter earlier years' methods (it assumes FIFO); one mark per year (no
+multi-account split); a plan naming a start-of-year fallback lot cannot be
+replayed (its id is per run); changing a mark does not recompute later years,
+it flags them. The sale simulator still sells FIFO, now from the right lots;
+a cash merger consumes FIFO whatever the method.
 
 ### Foreign Tax Credit (§38f ZDP)
 
@@ -140,7 +191,7 @@ DAP-oriented output with stable internal line codes (e.g. `CZ_DAP_8_DIVIDENDS`, 
 |------|--------|--------|
 | Treaty verification | Verified (2026-07, extended 2026-08 and 2026-11) | `country_credit_caps` ship 17 verified portfolio-dividend caps with Sb. citations (NL/FR/AT/LU are 10 %, not 15 %; SE/CN/KZ 10 %, HK and KR 5 %). A country **absent** from the dict falls back to the 15 % default, which credits too much wherever the real treaty cap is lower — the FTC record carries `cap_rate_defaulted` and the dividends page marks those rows. One cap per country applies to all WHT — interest caps differ (often 0 %); review interest WHT rows manually |
 | Jednotný kurz (uniform rate) | Implemented (2026-07) | `--cz-fx-mode uniform` uses the GFŘ uniform rates (`uniform_rates.py`, pokyny D-49/D-66/D-75 transcribed); `--cz-fx-mode compare` computes both modes and reports the cheaper one. §10 disposal legs convert via the EUR-enriched amounts (approximation until per-leg original-currency data exists — M17/M18) |
-| Pairing method (§10) | Implemented (2026-07) | `--cz-pairing-method fifo/lifo/weighted_average/optimal/compare` (`pairing.py`, `pairing_solver.py`). `optimal` solver covers long securities only — options, shorts, and assets with a mid-year corp action / capital repayment stay FIFO; exact for base+rates, near-optimal at the 100k all-or-nothing cliff (every method is scored by the real aggregator, so never worse than FIFO). Web GUI offers single methods; the full FX×method matrix is CLI-only |
+| Pairing method (§10) | Implemented (2026-07) | `--cz-pairing-method fifo/lifo/weighted_average/optimal/compare` (`pairing.py`, `pairing_solver.py`). `optimal` solver covers long securities only — options, shorts, and assets with a mid-year corp action / capital repayment stay FIFO; objective in CZK of one FX mode (not with `compare`), trade order within a day respected, open lots rebuilt from the assignment; blind to the 100k all-or-nothing cliff (every method is scored by the real aggregator — compare before filing). Earlier years replay with their filed method (`filed_years.json`, „Podáno"; optimal via its stored plan). Web GUI offers single methods; the full FX×method matrix is CLI-only |
 | Pre-2014 acquisition rule | Implemented (2026-07) | Securities acquired before 2014-01-01 use the 6-month test (čl. II bod 5, 344/2013 Sb.); assumes direct issuer share ≤ 5 % (noted on items) |
 | Expense deduction (§10/4) | Documented | Acquisition costs and commissions are already in cost basis / net proceeds; external sale-related expenses must be added manually (see §10 section note) |
 | Loss carryforward | Not implemented | Negative §10 net floored at zero |
