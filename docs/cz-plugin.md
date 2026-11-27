@@ -138,7 +138,7 @@ DAP-oriented output with stable internal line codes (e.g. `CZ_DAP_8_DIVIDENDS`, 
 
 | Area | Status | Detail |
 |------|--------|--------|
-| Treaty verification | Verified (2026-07, extended 2026-08) | `country_credit_caps` ship 16 verified portfolio-dividend caps with Sb. citations (NL/FR/AT/LU are 10 %, not 15 %; SE/CN/KZ 10 %, HK 5 %). A country **absent** from the dict falls back to the 15 % default, which credits too much wherever the real treaty cap is lower — the FTC record carries `cap_rate_defaulted` and the dividends page marks those rows. One cap per country applies to all WHT — interest caps differ (often 0 %); review interest WHT rows manually |
+| Treaty verification | Verified (2026-07, extended 2026-08 and 2026-11) | `country_credit_caps` ship 17 verified portfolio-dividend caps with Sb. citations (NL/FR/AT/LU are 10 %, not 15 %; SE/CN/KZ 10 %, HK and KR 5 %). A country **absent** from the dict falls back to the 15 % default, which credits too much wherever the real treaty cap is lower — the FTC record carries `cap_rate_defaulted` and the dividends page marks those rows. One cap per country applies to all WHT — interest caps differ (often 0 %); review interest WHT rows manually |
 | Jednotný kurz (uniform rate) | Implemented (2026-07) | `--cz-fx-mode uniform` uses the GFŘ uniform rates (`uniform_rates.py`, pokyny D-49/D-66/D-75 transcribed); `--cz-fx-mode compare` computes both modes and reports the cheaper one. §10 disposal legs convert via the EUR-enriched amounts (approximation until per-leg original-currency data exists — M17/M18) |
 | Pairing method (§10) | Implemented (2026-07) | `--cz-pairing-method fifo/lifo/weighted_average/optimal/compare` (`pairing.py`, `pairing_solver.py`). `optimal` solver covers long securities only — options, shorts, and assets with a mid-year corp action / capital repayment stay FIFO; exact for base+rates, near-optimal at the 100k all-or-nothing cliff (every method is scored by the real aggregator, so never worse than FIFO). Web GUI offers single methods; the full FX×method matrix is CLI-only |
 | Pre-2014 acquisition rule | Implemented (2026-07) | Securities acquired before 2014-01-01 use the 6-month test (čl. II bod 5, 344/2013 Sb.); assumes direct issuer share ≤ 5 % (noted on items) |
@@ -207,7 +207,7 @@ These are explicitly documented in the code and output:
 
 1. **Elevated rate threshold** applies to total taxpayer income. This tool only sees IBKR income.
 2. **FTC proportional method** (§38f/1): `czech_tax × (foreign_income / total_base)`.
-3. **Treaty caps** are configurable. The 16 countries in `country_credit_caps` were
+3. **Treaty caps** are configurable. The 17 countries in `country_credit_caps` were
    verified against the SZDZ texts with Sb. citations; anything outside that dict
    falls back to the 15 % default and is flagged `cap_rate_defaulted`.
 4. **Annual limit** uses `proceeds_czk` (gross disposal proceeds), matching the legislative term "příjem".

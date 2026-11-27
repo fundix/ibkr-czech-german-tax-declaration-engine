@@ -402,8 +402,9 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 #     converted on such a day now gets a different CZK figure from the same
 #     statements — and the fingerprint does not cover the rate cache, so only
 #     a bump retires the runs computed from the wrong rates.
-# v9: options and corporate actions (v8 is the §16a / treaty-cap batch,
-#     developed in parallel). An option on an ETF carries its premium into the
+# v9: options and corporate actions (v8 was set aside for the §16a /
+#     treaty-cap batch, developed in parallel; that one landed later, as
+#     v10). An option on an ETF carries its premium into the
 #     delivered shares; a delivery is matched to its exercise/assignment on the
 #     side as well; an exercise or assignment that delivers nothing is closed
 #     on the option at the amount on its row; a merger finds its acquirer by
@@ -411,7 +412,23 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 #     ISIN; a corporate action with no handler is reported and its shares held
 #     as a zero-cost placeholder. Statements with any of these events give
 #     different figures — or a result where the run used to stop.
-_FINGERPRINT_VERSION = "v9"
+# v10: six corrections to the tax and credit figures (audit 2026-11, batch
+#     2). Not v8, which was never released: v9 reached main first, and a run
+#     stamped v9 was computed without these corrections, so it has to count
+#     as older too.
+#     The §16a comparison now moves foreign interest into the separate base
+#     together with the dividends, keeps the taxable §10 currency result in
+#     the general base of that scenario, divides the §38f ratio there by the
+#     unrounded base like the general path, and no longer reports a difference
+#     of rounding as a saving — its figures and its advice change. Korean
+#     dividends are credited at the 5 % treaty rate instead of the 15 %
+#     default, which raises the tax. A tax row between two same-size income
+#     rows is linked by its TransactionID instead of a per-run uuid, which
+#     decides where the per-item credit cap falls. The §38f summary gained the
+#     final credit per state (ftc_<cc>_credited), and the per-state credits
+#     are whole hellers that add up to the total, with a zero for a state
+#     credited nothing. Same statements, different figures and rows.
+_FINGERPRINT_VERSION = "v10"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —

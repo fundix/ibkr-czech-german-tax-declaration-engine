@@ -1,17 +1,18 @@
 # tests/test_cz_dividend_separate_base.py
 """
-Tests for the §16a separate dividend tax base comparison.
+Tests for the §16a separate tax base comparison.
 
-Foreign dividends (§8 odst. 4 ZDP) may, at the taxpayer's election, be taxed
-in a separate flat 15 % base (§16a) instead of the general base. The engine
-computes both and recommends the cheaper:
+Foreign §8 income (§8 odst. 4 ZDP — dividends and interest alike) may, at the
+taxpayer's election, be taxed in a separate flat 15 % base (§16a) instead of
+the general base; the election covers all of it or none (§8 odst. 8). The
+engine computes both and recommends the cheaper:
 
 1. Below the 23 % threshold → no saving → recommend general (tie).
 2. Above the threshold, dividends only → saving = 23 %−15 % on the top slice.
 3. Above the threshold, dividends stacked on domestic securities → separate
    base pulls dividends out of the 23 % bracket AND credits their WHT in full.
-4. FTC is split by income category (dividend vs interest).
-5. Disabled by config / EUR mode / no dividends → no comparison.
+4. Foreign interest moves into the separate base together with the dividends.
+5. Disabled by config / EUR mode / no foreign §8 income → no comparison.
 6. Line items + recommended_final_tax property.
 """
 from decimal import Decimal
@@ -156,11 +157,13 @@ class TestDividendsStackedOnSecurities:
 
 
 # ---------------------------------------------------------------------------
-# Test 4: interest stays in the general base (not eligible for §16a)
+# Test 4: foreign interest moves with the dividends — the election covers all
+# foreign §8 income or none of it (§8 odst. 8 ZDP). This test used to pin the
+# opposite, "interest stays in the general base" (audit 2026-11, X04).
 # ---------------------------------------------------------------------------
 
-class TestInterestStaysGeneral:
-    def test_interest_not_moved_to_separate_base(self):
+class TestInterestMovesWithDividends:
+    def test_interest_joins_the_separate_base(self):
         cfg = CzTaxConfig(elevated_rate_threshold_czk=Decimal("100000"))
         # dividends 150000 (foreign), interest 50000 (foreign)
         s = CzForeignTaxCreditSummary()
@@ -175,10 +178,13 @@ class TestInterestStaysGeneral:
             config=cfg,
         )
         cmp = result.dividend_separate_base
-        # General base in the separate scenario = interest only (50000)
-        assert cmp.separate_general_base == Decimal("50000")
-        # dividend base = 150000
-        assert cmp.separate_dividend_base_rounded == Decimal("150000")
+        # No §10 income here, so nothing is left in the general base
+        assert cmp.separate_general_base == ZERO
+        # separate base = dividends 150000 + interest 50000
+        assert cmp.separate_dividend_base_rounded == Decimal("200000")
+        # 200000 * 0.15, against 100000*0.15 + 100000*0.23 = 38000 in general
+        assert cmp.separate_base_total_tax == Decimal("30000")
+        assert cmp.saving == Decimal("8000")
 
 
 # ---------------------------------------------------------------------------

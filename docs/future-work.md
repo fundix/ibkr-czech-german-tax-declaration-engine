@@ -206,7 +206,11 @@ are IBKR-only by design. What remains, ordered by value-for-effort:
       `tests/test_cz_dividend_separate_base.py` (9). LIMITATION: the election
       itself stays with the taxpayer — the primary DAP layout still files
       dividends in §8; only the exact §16a form line is left to verify per
-      form vzor.
+      form vzor. CORRECTED 2026-11-27 (audit X04): the separate base takes
+      foreign interest as well — the election covers all foreign §8 income
+      or none (§8 odst. 8 ZDP), so nothing credit-bearing stays in the
+      general base of that scenario and the credit is no longer split by
+      category. The comparison now also runs for a year with interest only.
 - [ ] **Sale-impact / max-gain-loss optimiser surfacing.** We already
       have per-sale simulation (`simulate_sale`); additionally
       highlights which lots to sell to hit a target gain/loss (e.g. use
