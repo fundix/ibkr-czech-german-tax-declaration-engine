@@ -16,6 +16,7 @@ Regression tests for the lot-pairing findings of the 2026-11 audit:
 Everything is synthetic: an invented symbol, account U1234567, round EUR
 amounts. Expected figures are worked out by hand in each test.
 """
+import json
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -850,3 +851,52 @@ def test_service_optimal_minimises_the_czk_base(tmp_path):
         assert Decimal(item["gain_loss_czk"]) == Decimal("50")
     finally:
         svc.runner.shutdown(wait=False)
+
+
+# ---------------------------------------------------------------------------
+# V04 + optimal — the filed assignment is stored and replayed
+# ---------------------------------------------------------------------------
+
+class TestOptimalAcrossYears:
+
+    def test_plan_is_stored_marked_and_replayed(self, two_years):
+        svc = two_years
+        _execute(svc, "2024-opt", 2024, "optimal")
+        stored = json.loads(
+            (svc.runs_dir / "2024-opt" / "pairing_plan.daily.json").read_text())
+        assert stored["plan"] == {"103": [["102", "10"]]}
+        entry = svc.mark_run_filed("2024-opt")
+        assert entry["pairing_plan"] == {"103": [["102", "10"]]}
+
+        meta = _execute(svc, "2025-fifo", 2025)
+        (item,) = _disposals(svc, "2025-fifo")
+        # 2024 sold the March lot, so January is what 2025 sells.
+        assert item["acquisition_date"] == "2024-01-10"
+        assert Decimal(item["cost_basis_eur"]) == Decimal("1000")
+        assert meta["prior_year_pairing"] == {"2024": "optimal"}
+        assert not meta.get("soy_unverified_symbols")
+
+    def test_unmarked_optimal_year_is_assumed_fifo_with_a_warning(self, two_years):
+        svc = two_years
+        _execute(svc, "2024-opt", 2024, "optimal")
+        meta = _execute(svc, "2025-fifo", 2025)
+        (item,) = _disposals(svc, "2025-fifo")
+        assert Decimal(item["cost_basis_eur"]) == Decimal("1300")
+        assert any("Roky 2024 nejsou označené" in n for n in meta["notes"])
+
+    def test_a_plan_that_does_not_fit_goes_to_review(self, two_years):
+        svc = two_years
+        _execute(svc, "2024-opt", 2024, "optimal")
+        svc.mark_run_filed("2024-opt")
+
+        def _break(store):
+            store["years"]["2024"]["pairing_plan"] = {"103": [["999", "10"]]}
+        svc._write_filed_years(_break)
+        meta = _execute(svc, "2025-fifo", 2025)
+        assert meta["soy_unverified_symbols"] == ["PAIRA"]
+        (item,) = _disposals(svc, "2025-fifo")
+        assert item["acquisition_date_estimated"] is True
+
+    def test_fifo_run_writes_no_plan(self, two_years):
+        _execute(two_years, "2024-fifo", 2024)
+        assert not list((two_years.runs_dir / "2024-fifo").glob("pairing_plan.*"))

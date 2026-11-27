@@ -1252,6 +1252,20 @@ class RunService:
                 "pending_review_count": exported.get("warnings", {}).get("pending_review_count", 0),
             }
 
+        if pairing == PairingMethod.OPTIMAL:
+            # Which lots each sale consumed. Stored with the run, copied into
+            # filed_years.json when the run is marked filed, and replayed by
+            # every later year -- the solver cannot be re-run for a past year.
+            plan = {
+                str(tx): [[str(lot), format(Decimal(qty).normalize(), "f")]
+                          for lot, qty in rows]
+                for tx, rows in sorted((getattr(processing, "pairing_plan", None)
+                                        or {}).items())
+            }
+            for mode, _result in mode_results:
+                dump_json({"tax_year": tax_year, "fx_mode": mode, "plan": plan},
+                          run_dir / f"pairing_plan.{mode}.json")
+
         # Its own converter, on its own provider: lots bought in earlier
         # years are converted only here, for the snapshot.
         portfolio_converter = self._converter_factory()
