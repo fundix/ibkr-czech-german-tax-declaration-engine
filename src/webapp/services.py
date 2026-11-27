@@ -402,7 +402,16 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 #     converted on such a day now gets a different CZK figure from the same
 #     statements — and the fingerprint does not cover the rate cache, so only
 #     a bump retires the runs computed from the wrong rates.
-_FINGERPRINT_VERSION = "v7"
+# v9: options and corporate actions (v8 is the §16a / treaty-cap batch,
+#     developed in parallel). An option on an ETF carries its premium into the
+#     delivered shares; a delivery is matched to its exercise/assignment on the
+#     side as well; an exercise or assignment that delivers nothing is closed
+#     on the option at the amount on its row; a merger finds its acquirer by
+#     ISIN; a split reported as two rows is applied once and follows the new
+#     ISIN; a corporate action with no handler is reported and its shares held
+#     as a zero-cost placeholder. Statements with any of these events give
+#     different figures — or a result where the run used to stop.
+_FINGERPRINT_VERSION = "v9"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —
