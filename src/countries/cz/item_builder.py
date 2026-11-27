@@ -337,6 +337,42 @@ def _convert_eur(
     return _convert(eur_amount, "EUR", date_str, fx, fx_records)
 
 
+def cost_leg_czk(
+    total_eur: Optional[Decimal],
+    cost_date: str,
+    components: Optional[List[Tuple[str, Decimal]]],
+    fx: Optional[CzCurrencyConverter],
+    fx_records: Optional[List[FxConversionRecord]] = None,
+) -> Tuple[Optional[Decimal], Optional[FxConversionRecord]]:
+    """The CZK acquisition cost of a long disposal (or a lot), per payment day.
+
+    Each part of the cost converts at the rate of the day it was paid (NSS
+    2 Afs 4/2019-35). Without *components* that is the whole *total_eur* on
+    *cost_date* -- exactly the conversion this module always made. With them
+    (a weighted average blends purchases of several days) every component
+    converts on its own date; if any of them cannot be converted the cost is
+    unknown, ``(None, None)``, and the caller flags the item.
+
+    Shared with the optimal pairing's objective (``optimal_pairing``), so the
+    cost the solver minimises is the cost that is filed.
+    """
+    records = fx_records if fx_records is not None else []
+    if not components:
+        return _convert_eur(total_eur, cost_date, fx, records)
+    staged: List[FxConversionRecord] = []
+    total = Decimal(0)
+    first: Optional[FxConversionRecord] = None
+    for day, amount in components:
+        czk, rec = _convert_eur(amount, day, fx, staged)
+        if czk is None:
+            return None, None
+        total += czk
+        if first is None:
+            first = rec
+    records.extend(staged)
+    return total, first
+
+
 # --- Income items ----------------------------------------------------------
 
 def _build_income_items(
@@ -754,7 +790,12 @@ def _build_disposal_items(
                 rgl.holding_period_start or rgl.acquisition_date or rgl.realization_date
             )
             proceeds_date = rgl.realization_date
-        cost_czk, fx_cost = _convert_eur(rgl.total_cost_basis_eur, cost_date, fx, fx_records)
+        if is_short:
+            cost_czk, fx_cost = _convert_eur(rgl.total_cost_basis_eur, cost_date, fx, fx_records)
+        else:
+            cost_czk, fx_cost = cost_leg_czk(
+                rgl.total_cost_basis_eur, cost_date,
+                getattr(rgl, "cost_basis_components_eur", None), fx, fx_records)
         proceeds_czk, fx_proceeds = _convert_eur(rgl.total_realization_value_eur, proceeds_date, fx, fx_records)
 
         # §10 gain in CZK = proceeds(@sale) − cost(@acquisition).

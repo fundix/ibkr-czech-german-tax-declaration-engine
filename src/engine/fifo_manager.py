@@ -89,6 +89,47 @@ def _long_lot_sort_key(lot: "FifoLot"):
     )
 
 
+def _lot_cost_date(lot: "FifoLot") -> str:
+    """The day a lot's cost was paid: where its holding began."""
+    return lot.holding_period_start or lot.acquisition_date
+
+
+def _components_of(lot: "FifoLot") -> List[Tuple[str, Decimal]]:
+    """A lot's dated cost components; one component on its cost date if none."""
+    if lot.cost_components is not None:
+        return list(lot.cost_components)
+    return [(_lot_cost_date(lot), lot.total_cost_basis_eur)]
+
+
+def _merge_components(parts) -> List[Tuple[str, Decimal]]:
+    """Add components of the same date together, ordered by date."""
+    merged: dict = {}
+    for day, amount in parts:
+        merged[day] = merged.get(day, Decimal(0)) + amount
+    return sorted(merged.items())
+
+
+def _scale_components(components: List[Tuple[str, Decimal]], target: Decimal,
+                      ctx: Context) -> List[Tuple[str, Decimal]]:
+    """*components* rescaled so they add up EXACTLY to *target*.
+
+    Proportional to their amounts; the last component takes the remainder,
+    so rounding never leaves the parts disagreeing with the whole.
+    """
+    if not components:
+        return []
+    base = sum((amount for _d, amount in components), Decimal(0))
+    scaled: List[Tuple[str, Decimal]] = []
+    running = Decimal(0)
+    for day, amount in components[:-1]:
+        part = (ctx.divide(ctx.multiply(amount, target), base)
+                if base != Decimal(0) else Decimal(0))
+        scaled.append((day, part))
+        running += part
+    scaled.append((components[-1][0], ctx.subtract(target, running)))
+    return scaled
+
+
 def _allocate_rescaled_quantities(
     quantities: List[Decimal],
     ratio: Decimal,
@@ -302,6 +343,16 @@ class FifoLot:
     # Callers fall back to the EUR figure; a wrong number would be worse.
     total_cost_original: Optional[Decimal] = None
     cost_currency: Optional[str] = None
+
+    # When the money behind total_cost_basis_eur was paid: ((YYYY-MM-DD, EUR),
+    # ...) adding up exactly to the total. None means all of it was paid on
+    # the lot's cost date (holding_period_start, else acquisition_date) --
+    # every bought lot. A weighted-average sale re-prices the surviving lots to
+    # a blend of purchases made on different days; a country that converts
+    # the cost leg at the rate of the day it was paid (CZ §10) needs to know
+    # which money is whose, or it converts the whole average at one lot's
+    # rate (audit W08).
+    cost_components: Optional[List[Tuple[str, Decimal]]] = None
 
     @property
     def unit_cost_original(self) -> Optional[Decimal]:
@@ -665,6 +716,9 @@ class FifoLedger:
                                            if lot.total_cost_original is not None
                                            else None),
                         )
+                        if lot.cost_components is not None:
+                            final_lot.cost_components = _scale_components(
+                                lot.cost_components, final_lot.total_cost_basis_eur, self.ctx)
                         self.lots.append(final_lot)
                         qty_to_assign -= qty_from_this_lot
                     if qty_to_assign.copy_abs() > Decimal('1e-8'):
@@ -1087,6 +1141,9 @@ class FifoLedger:
                     # how many shares the same money bought, not the money.
                     total_cost_original=lot.total_cost_original,
                     cost_currency=lot.cost_currency,
+                    # The same money, paid on the same days.
+                    cost_components=(list(lot.cost_components)
+                                     if lot.cost_components is not None else None),
                     source_transaction_id=source_transaction_id,
                     holding_period_start=lot.holding_period_start,
                     holding_period_start_estimated=lot.holding_period_start_estimated,
@@ -1199,6 +1256,8 @@ class FifoLedger:
                     if self.asset_category == AssetCategory.INVESTMENT_FUND else None
                 ),
             )
+            if lot.cost_components is not None:
+                rgl.cost_basis_components_eur = list(lot.cost_components)
             if self._tax_classifier is not None:
                 self._tax_classifier(rgl)
             realized.append(rgl)
@@ -1442,6 +1501,14 @@ class FifoLedger:
             _pool_cost = sum((l.total_cost_basis_eur for l in self.lots), Decimal(0))
             if _pool_qty > Decimal(0):
                 pool_avg_unit_cost = self.ctx.divide(_pool_cost, _pool_qty)
+        # The average blends money paid on different days. Each disposed
+        # unit -- and each surviving one -- gets the pool's dated components
+        # in proportion, so a country converting the cost at the rate of the
+        # day it was paid converts the average correctly (audit W08).
+        pool_components: Optional[List[Tuple[str, Decimal]]] = None
+        if pool_avg_unit_cost is not None:
+            pool_components = _merge_components(
+                part for l in self.lots for part in _components_of(l))
 
         realization_type_for_rgl: RealizationType
         if self.asset_category == AssetCategory.OPTION:
@@ -1458,6 +1525,7 @@ class FifoLedger:
             wanted = (quantity_remaining_to_realize if cap is None
                       else min(cap, quantity_remaining_to_realize))
             quantity_from_this_lot: Decimal
+            lot_components = current_lot.cost_components
             if current_lot.quantity <= wanted:
                 quantity_from_this_lot = current_lot.quantity
                 lots_to_remove_indices.append(i)
@@ -1468,6 +1536,9 @@ class FifoLedger:
                 current_lot.total_cost_original = current_lot.rescaled_original(remaining_qty)
                 current_lot.quantity = remaining_qty
                 current_lot.total_cost_basis_eur = self.ctx.multiply(current_lot.quantity, current_lot.unit_cost_basis_eur) # Renamed
+                if lot_components is not None:
+                    current_lot.cost_components = _scale_components(
+                        lot_components, current_lot.total_cost_basis_eur, self.ctx)
 
             quantity_remaining_to_realize = self.ctx.subtract(quantity_remaining_to_realize, quantity_from_this_lot)
 
@@ -1502,6 +1573,13 @@ class FifoLedger:
                     holding_period_start_estimated=current_lot.holding_period_start_estimated,
                     is_acquisition_estimated=current_lot.acquisition_date_estimated,
                 )
+                # Only where the cost is not simply the lot's own, paid on its
+                # cost date: a plain FIFO/LIFO disposal stays as it was.
+                source_components = (pool_components if pool_components is not None
+                                     else lot_components)
+                if source_components is not None:
+                    rgl.cost_basis_components_eur = _scale_components(
+                        source_components, cost_basis_for_portion, self.ctx)
                 if self._tax_classifier is not None:
                     self._tax_classifier(rgl)
                 realized_gains_losses.append(rgl)
@@ -1512,6 +1590,8 @@ class FifoLedger:
             for lot in self.lots:
                 lot.unit_cost_basis_eur = pool_avg_unit_cost
                 lot.total_cost_basis_eur = self.ctx.multiply(lot.quantity, pool_avg_unit_cost)
+                lot.cost_components = _scale_components(
+                    pool_components, lot.total_cost_basis_eur, self.ctx)
                 # Re-priced to a blended pool average: no single original
                 # purchase corresponds to it any more, and rescaling the old
                 # figure would invent an exchange rate. Drop it and let the
@@ -1579,21 +1659,16 @@ class FifoLedger:
         short_lots_to_remove_indices: List[int] = []
         current_available_qty_in_short_lots = sum(sl.quantity_shorted for sl in self.short_lots)
 
-        # Weighted-average pairing (short side): the opening proceeds of every
-        # covered unit are blended to the pool average; deemed-covered lot
-        # identity (opening dates → time test) stays FIFO. Surviving short lots
-        # are re-priced to the average afterwards.
+        # Short positions are covered FIFO at each lot's own proceeds under
+        # every method but LIFO. The weighted average is an acquisition-cost
+        # rule for held securities; blending the proceeds of written positions
+        # opened on different days loses the day each amount was received,
+        # the same defect the long side had (audit W08).
         active_method = (coerce_pairing_method(method) if method is not None
                          else self.pairing_method)
         if is_historical_simulation and active_method == PairingMethod.LIFO:
             self._replayed_non_fifo_disposal = True
 
-        pool_avg_unit_proceeds: Optional[Decimal] = None
-        if uses_pool_average_cost(active_method) and self.short_lots:
-            _pool_qty = sum((sl.quantity_shorted for sl in self.short_lots), Decimal(0))
-            _pool_proceeds = sum((sl.total_sale_proceeds_eur for sl in self.short_lots), Decimal(0))
-            if _pool_qty > Decimal(0):
-                pool_avg_unit_proceeds = self.ctx.divide(_pool_proceeds, _pool_qty)
 
         realization_type_for_rgl: RealizationType
         if self.asset_category == AssetCategory.OPTION:
@@ -1604,7 +1679,7 @@ class FifoLedger:
         for i in consumption_order_indices(len(self.short_lots), active_method):
             if quantity_remaining_to_realize <= Decimal(0): break
             current_short_lot = self.short_lots[i]
-            effective_unit_proceeds = pool_avg_unit_proceeds if pool_avg_unit_proceeds is not None else current_short_lot.unit_sale_proceeds_eur
+            effective_unit_proceeds = current_short_lot.unit_sale_proceeds_eur
             quantity_covered_from_this_lot: Decimal
             if current_short_lot.quantity_shorted <= quantity_remaining_to_realize:
                 quantity_covered_from_this_lot = current_short_lot.quantity_shorted
@@ -1647,11 +1722,6 @@ class FifoLedger:
                 realized_gains_losses.append(rgl)
 
         for i in sorted(short_lots_to_remove_indices, reverse=True): del self.short_lots[i]
-
-        if pool_avg_unit_proceeds is not None:
-            for sl in self.short_lots:
-                sl.unit_sale_proceeds_eur = pool_avg_unit_proceeds
-                sl.total_sale_proceeds_eur = self.ctx.multiply(sl.quantity_shorted, pool_avg_unit_proceeds)
 
         small_tolerance_qty = Decimal('1e-10')
         if quantity_remaining_to_realize.copy_abs() > small_tolerance_qty:
@@ -1780,6 +1850,7 @@ class FifoLedger:
         lots_to_remove_indices: List[int] = []
         for i, current_lot in enumerate(self.lots):
             if qty_remaining <= Decimal(0): break
+            lot_components = current_lot.cost_components
             if current_lot.quantity <= qty_remaining:
                 quantity_from_this_lot = current_lot.quantity
                 cost_basis_for_portion = current_lot.total_cost_basis_eur
@@ -1794,6 +1865,9 @@ class FifoLedger:
                 current_lot.total_cost_original = current_lot.rescaled_original(remaining_qty)
                 current_lot.quantity = remaining_qty
                 current_lot.total_cost_basis_eur = self.ctx.multiply(current_lot.quantity, current_lot.unit_cost_basis_eur)
+                if lot_components is not None:
+                    current_lot.cost_components = _scale_components(
+                        lot_components, current_lot.total_cost_basis_eur, self.ctx)
             qty_remaining = self.ctx.subtract(qty_remaining, quantity_from_this_lot)
 
             realization_value_for_portion = self.ctx.multiply(quantity_from_this_lot, realization_value_eur_per_unit_for_event)
@@ -1823,6 +1897,9 @@ class FifoLedger:
                 is_acquisition_estimated=current_lot.acquisition_date_estimated,
                 fund_type_at_sale=self.fund_type if self.asset_category == AssetCategory.INVESTMENT_FUND else None,
             )
+            if lot_components is not None:
+                rgl.cost_basis_components_eur = _scale_components(
+                    lot_components, cost_basis_for_portion, self.ctx)
             if self._tax_classifier is not None:
                 self._tax_classifier(rgl)
             realized_gains_losses.append(rgl)
@@ -2033,6 +2110,10 @@ class FifoLedger:
                 return
             lot.total_cost_basis_eur = self.ctx.subtract(lot.total_cost_basis_eur, reduction)
             lot.unit_cost_basis_eur = self.ctx.divide(lot.total_cost_basis_eur, lot.quantity) if lot.quantity > Decimal('0') else Decimal('0')
+            if lot.cost_components is not None:
+                # The repayment returns part of each payment in proportion.
+                lot.cost_components = _scale_components(
+                    lot.cost_components, lot.total_cost_basis_eur, self.ctx)
             # The reduction is an EUR amount. Subtracting it from a USD original
             # would need a rate this function has no business choosing, and
             # scaling by the EUR ratio would invent one — so the original is

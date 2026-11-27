@@ -2191,6 +2191,17 @@ class RunService:
         """
         if converter is None or acquisition_date is None:
             return None
+        components = getattr(lot, "cost_components", None)
+        if components:
+            # A weighted-average lot blends money paid on several days: each
+            # part converts at its own day's rate (audit W08).
+            total = Decimal(0)
+            for day, amount in components:
+                part = self._to_czk(converter, amount, "EUR", parse_ibkr_date(day))
+                if part is None:
+                    return None
+                total += part
+            return total
         if lot.total_cost_original is not None and lot.cost_currency:
             return self._to_czk(converter, lot.total_cost_original,
                                 lot.cost_currency, acquisition_date)

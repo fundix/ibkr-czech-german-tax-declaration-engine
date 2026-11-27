@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field, KW_ONLY
 from decimal import Decimal
 import uuid
-from typing import Optional, Dict
+from typing import Dict, List, Optional, Tuple
 from collections import defaultdict
 
 import logging
@@ -68,6 +68,13 @@ class RealizedGainLoss:
     net_gain_loss_after_teilfreistellung_eur: Optional[Decimal] = None
 
     is_stillhalter_income: bool = False
+
+    # When the money behind total_cost_basis_eur was paid: ((YYYY-MM-DD, EUR),
+    # ...) adding up exactly to it. Set only where the cost is not simply one
+    # lot's, paid on its holding_period_start -- a weighted-average disposal
+    # blends purchases of several days. None everywhere else, so a plain
+    # disposal is unchanged.
+    cost_basis_components_eur: Optional[List[Tuple[str, Decimal]]] = None
 
     def __post_init__(self):
         if not self.holding_period_start:

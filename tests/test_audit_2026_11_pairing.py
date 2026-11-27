@@ -533,3 +533,148 @@ def test_mcp_list_datasets_reports_filed(two_years):
     years = {d["tax_year"]: d for d in data["datasets"]}
     assert years[2024]["filed"]["run_id"] == "2024-fifo"
     assert years[2025]["filed"] is None
+
+
+# ---------------------------------------------------------------------------
+# W08 — the weighted average is kept in EUR AND per payment date
+# ---------------------------------------------------------------------------
+
+from src.domain.enums import FinancialEventType  # noqa: E402
+from src.domain.events import TradeEvent  # noqa: E402
+
+
+def _ledger(method, category=AssetCategory.STOCK):
+    provider = _one_to_one()
+    return FifoLedger(
+        asset_internal_id=uuid.uuid4(), asset_category=category,
+        asset_multiplier_from_asset=None,
+        currency_converter=CurrencyConverter(rate_provider=provider),
+        exchange_rate_provider=provider,
+        internal_working_precision=global_config.INTERNAL_CALCULATION_PRECISION,
+        decimal_rounding_mode=global_config.DECIMAL_ROUNDING_MODE,
+        pairing_method=method,
+    )
+
+
+def _ev(ledger, kind, when, qty, eur, tx):
+    ev = TradeEvent(asset_internal_id=ledger.asset_internal_id, event_date=when,
+                    event_type=kind, quantity=Decimal(qty),
+                    price_foreign_currency=Decimal("1"), ibkr_transaction_id=tx)
+    ev.net_proceeds_or_cost_basis_eur = Decimal(eur)
+    return ev
+
+
+def _buy(ledger, when, qty, eur, tx):
+    ledger.add_long_lot(_ev(ledger, FinancialEventType.TRADE_BUY_LONG, when, qty, eur, tx))
+
+
+def _sell(ledger, when, qty, eur, tx):
+    return ledger.consume_long_lots_for_sale(
+        _ev(ledger, FinancialEventType.TRADE_SELL_LONG, when, f"-{qty}", eur, tx))
+
+
+def _sum(components):
+    return sum((amount for _d, amount in components), Decimal(0))
+
+
+class TestW08CostComponents:
+
+    def test_weighted_average_sale_carries_dated_components(self):
+        ledger = _ledger(PairingMethod.WEIGHTED_AVERAGE)
+        _buy(ledger, "2024-01-10", "10", "1000", "101")
+        _buy(ledger, "2024-03-11", "10", "1300", "102")
+        (rgl,) = _sell(ledger, "2024-06-10", "10", "1500", "103")
+        assert rgl.total_cost_basis_eur == Decimal("1150")
+        assert rgl.cost_basis_components_eur == [
+            ("2024-01-10", Decimal("500")), ("2024-03-11", Decimal("650"))]
+        (lot,) = ledger.lots
+        assert lot.total_cost_basis_eur == Decimal("1150")
+        assert lot.cost_components == [
+            ("2024-01-10", Decimal("500")), ("2024-03-11", Decimal("650"))]
+        # A second average sale splits the pool's components again.
+        (rgl2,) = _sell(ledger, "2024-07-10", "5", "800", "104")
+        assert rgl2.cost_basis_components_eur == [
+            ("2024-01-10", Decimal("250")), ("2024-03-11", Decimal("325"))]
+        assert _sum(ledger.lots[0].cost_components) == ledger.lots[0].total_cost_basis_eur
+
+    def test_components_always_add_up_exactly(self):
+        ledger = _ledger(PairingMethod.WEIGHTED_AVERAGE)
+        _buy(ledger, "2024-01-10", "3", "100", "101")
+        _buy(ledger, "2024-02-10", "7", "233.33", "102")
+        _buy(ledger, "2024-03-11", "11", "419.17", "103")
+        rgls = _sell(ledger, "2024-06-10", "13", "900", "104")
+        assert len(rgls) == 3  # FIFO lot identity: 3 + 7 + 3 of 11
+        for rgl in rgls:
+            assert _sum(rgl.cost_basis_components_eur) == rgl.total_cost_basis_eur
+        for lot in ledger.lots:
+            assert _sum(lot.cost_components) == lot.total_cost_basis_eur
+
+    @pytest.mark.parametrize("method", [PairingMethod.FIFO, PairingMethod.LIFO])
+    def test_fifo_and_lifo_rgls_carry_no_components(self, method):
+        ledger = _ledger(method)
+        _buy(ledger, "2024-01-10", "10", "1000", "101")
+        _buy(ledger, "2024-03-11", "10", "1300", "102")
+        rgls = _sell(ledger, "2024-06-10", "15", "2250", "103")
+        assert all(r.cost_basis_components_eur is None for r in rgls)
+        assert all(l.cost_components is None for l in ledger.lots)
+
+    def test_fifo_sale_of_an_averaged_lot_splits_its_components(self):
+        ledger = _ledger(PairingMethod.FIFO)
+        _buy(ledger, "2024-01-10", "10", "1150", "101")
+        ledger.lots[0].cost_components = [
+            ("2024-01-10", Decimal("500")), ("2024-03-11", Decimal("650"))]
+        (rgl,) = _sell(ledger, "2025-06-10", "4", "640", "104")
+        assert rgl.cost_basis_components_eur == [
+            ("2024-01-10", Decimal("200")), ("2024-03-11", Decimal("260"))]
+        assert ledger.lots[0].cost_components == [
+            ("2024-01-10", Decimal("300")), ("2024-03-11", Decimal("390"))]
+
+    def test_capital_repayment_scales_the_components(self):
+        ledger = _ledger(PairingMethod.FIFO)
+        _buy(ledger, "2024-01-10", "10", "1150", "101")
+        ledger.lots[0].cost_components = [
+            ("2024-01-10", Decimal("500")), ("2024-03-11", Decimal("650"))]
+        ledger.reduce_cost_basis_for_capital_repayment(Decimal("115"))
+        lot = ledger.lots[0]
+        assert lot.total_cost_basis_eur == Decimal("1035")
+        assert lot.cost_components == [
+            ("2024-01-10", Decimal("450")), ("2024-03-11", Decimal("585"))]
+
+    def test_short_side_under_weighted_average_is_fifo(self):
+        ledger = _ledger(PairingMethod.WEIGHTED_AVERAGE)
+        ledger.add_short_lot(_ev(ledger, FinancialEventType.TRADE_SELL_SHORT_OPEN,
+                                 "2024-01-10", "-1", "100", "201"))
+        ledger.add_short_lot(_ev(ledger, FinancialEventType.TRADE_SELL_SHORT_OPEN,
+                                 "2024-02-10", "-1", "120", "202"))
+        (rgl,) = ledger.consume_short_lots_for_cover(
+            _ev(ledger, FinancialEventType.TRADE_BUY_SHORT_COVER,
+                "2024-03-11", "1", "90", "203"))
+        assert rgl.total_realization_value_eur == Decimal("100")
+        assert rgl.gross_gain_loss_eur == Decimal("10")
+        (left,) = ledger.short_lots
+        assert left.total_sale_proceeds_eur == Decimal("120")
+
+
+class TestW08Czk:
+
+    def test_weighted_average_cost_is_the_czk_average(self, two_years):
+        """Rates 25 (January) and 24 (March). Year 1 sells half the pool at
+        the average 115: 500 EUR of January money and 650 EUR of March money,
+        28 100 CZK (not 1 150 x 25 = 28 750). Year 2 sells the other half,
+        likewise 28 100; together 56 200 = 1 000 x 25 + 1 300 x 24."""
+        svc = two_years
+        _execute(svc, "2024-wa", 2024, "weighted_average")
+        (y1,) = _disposals(svc, "2024-wa")
+        assert Decimal(y1["cost_basis_czk"]) == Decimal("28100")
+        svc.mark_run_filed("2024-wa")
+        _execute(svc, "2025-fifo", 2025)
+        (y2,) = _disposals(svc, "2025-fifo")
+        assert Decimal(y2["cost_basis_eur"]) == Decimal("1150")
+        assert Decimal(y2["cost_basis_czk"]) == Decimal("28100")
+        assert Decimal(y1["cost_basis_czk"]) + Decimal(y2["cost_basis_czk"]) \
+            == Decimal("56200")
+
+    def test_fifo_czk_cost_is_unchanged(self, two_years):
+        _execute(two_years, "2024-fifo", 2024)
+        (item,) = _disposals(two_years, "2024-fifo")
+        assert Decimal(item["cost_basis_czk"]) == Decimal("25000")
