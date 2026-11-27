@@ -18,7 +18,8 @@ dependency — the per-asset graphs are tiny.
 The objective is exact for the base + rate part of the liability; the 100k
 all-or-nothing cliff can make the true optimum non-convex, but the caller
 always scores the resulting matching with the real aggregator and reports the
-cheapest method, so ``optimal`` is never worse than plain FIFO.
+cheapest method. The solver does not see that cliff, so ``optimal`` minimises
+the base, not necessarily the final tax: compare it with FIFO before filing.
 """
 from __future__ import annotations
 
@@ -46,6 +47,11 @@ class SupplyLot:
     # running from the old share while acq_date still picks the regime.
     holding_start: Optional[date_obj] = None
     holding_start_estimated: bool = False
+    # Where the lot sits in the ledger's sequence of operations. With an
+    # order_key on both the lot and the sale, a lot may fill a sale only if
+    # it was booked BEFORE it -- the date alone lets a purchase made later
+    # the same day fill an earlier sale (audit W07).
+    order_key: Optional[int] = None
 
     def __post_init__(self):
         if self.holding_start is None:
@@ -60,6 +66,7 @@ class SaleDemand:
     quantity: Decimal
     unit_proceeds_eur: Decimal
     originating_event_id: object
+    order_key: Optional[int] = None
 
 
 @dataclass
@@ -145,12 +152,19 @@ def solve_optimal_matching(
     supplies: List[SupplyLot],
     demands: List[SaleDemand],
     is_exempt: Callable[[SupplyLot, SaleDemand], bool],
+    arc_cost: Optional[Callable[[SupplyLot, SaleDemand], Optional[Decimal]]] = None,
 ) -> Optional[List[Assignment]]:
     """Return the tax-minimising lot→sale assignment, or None if infeasible.
 
     ``is_exempt(lot, sale)`` decides whether a match passes the time test
     (→ zero-cost arc). ``None`` means the total demand could not be met from
     the eligible supply — the caller should fall back to FIFO.
+
+    ``arc_cost(lot, sale)`` prices a taxable match per unit (default: the EUR
+    gain). A country that files in another currency passes its own, so the
+    solver minimises the base that is actually filed (audit W06). When it
+    cannot price an arc (returns None) the problem is not solved at all and
+    None is returned: a partly priced optimum is no optimum.
     """
     if not demands:
         return []
@@ -178,11 +192,18 @@ def solve_optimal_matching(
     has_feasible_arc = [False] * S
     for i, lot in enumerate(supplies):
         for j, sale in enumerate(demands):
-            if lot.acq_date > sale.sale_date:
+            if lot.order_key is not None and sale.order_key is not None:
+                if not lot.order_key < sale.order_key:
+                    continue  # booked after the sale, even if the same day
+            elif lot.acq_date > sale.sale_date:
                 continue  # purchases must precede sales
             has_feasible_arc[j] = True
             if is_exempt(lot, sale):
                 cost = ZERO
+            elif arc_cost is not None:
+                cost = arc_cost(lot, sale)
+                if cost is None:
+                    return None
             else:
                 cost = sale.unit_proceeds_eur - lot.unit_cost_eur
             cap = lot.quantity if lot.quantity < sale.quantity else sale.quantity

@@ -678,3 +678,175 @@ class TestW08Czk:
         _execute(two_years, "2024-fifo", 2024)
         (item,) = _disposals(two_years, "2024-fifo")
         assert Decimal(item["cost_basis_czk"]) == Decimal("25000")
+
+
+# ---------------------------------------------------------------------------
+# W07 / W06 / W05 — optimal pairing: order within a day, CZK, the ledger
+# ---------------------------------------------------------------------------
+
+from src.countries.cz.config import CzTaxConfig  # noqa: E402
+from src.countries.cz.fx_policy import CzCurrencyConverter  # noqa: E402
+from src.engine.pairing_solver import (  # noqa: E402
+    SaleDemand, SupplyLot, solve_optimal_matching,
+)
+
+
+class ObjectiveCnb(GoldenCnbProvider):
+    """Lot A at 27, lot B at 24, the sale at 25 CZK per EUR."""
+
+    CZK_PER_UNIT = {
+        ("EUR", date(2025, 1, 6)): Decimal("27"),
+        ("EUR", date(2025, 2, 3)): Decimal("24"),
+        ("EUR", date(2025, 3, 3)): Decimal("25"),
+    }
+
+
+def _czk(provider):
+    return CzCurrencyConverter(provider, CzTaxConfig().fx_policy)
+
+
+# Lot A: 1 @ 100 EUR (January), lot B: 1 @ 104 EUR (February), sale 1 @ 110.
+OBJECTIVE_TRADES = [
+    _trade(PAIRA, "2025-01-06", "1", "100", "601"),
+    _trade(PAIRA, "2025-02-03", "1", "104", "602"),
+    _trade(PAIRA, "2025-03-03", "-1", "110", "603"),
+]
+
+
+class TestW07SameDay:
+
+    def test_solver_respects_the_order_key(self):
+        lots = [SupplyLot(date(2025, 3, 3), Decimal("1"), Decimal("100"), "501",
+                          order_key=1),
+                SupplyLot(date(2025, 3, 3), Decimal("1"), Decimal("200"), "506",
+                          order_key=3)]
+        sale = [SaleDemand(date(2025, 3, 3), Decimal("1"), Decimal("110"), "S",
+                           order_key=2)]
+        (a,) = solve_optimal_matching(lots, sale, lambda l, s: False)
+        assert a.supply_index == 0
+        # Without the keys the same-day later lot is taken (the old rule).
+        for x in (*lots, *sale):
+            x.order_key = None
+        (a,) = solve_optimal_matching(lots, sale, lambda l, s: False)
+        assert a.supply_index == 1
+
+    def test_a_lot_bought_later_the_same_day_is_not_paired(self, run):
+        trades = [
+            _trade(PAIRA, "2025-03-03", "10", "100", "501"),
+            _trade(PAIRA, "2025-03-03", "-10", "110", "505"),
+            _trade(PAIRA, "2025-03-03", "10", "200", "506"),
+        ]
+        out = run(trades, tax_year=2025, eoy=[_position(PAIRA, "10", "2000")],
+                  method=PairingMethod.OPTIMAL)
+        (r,) = out.realized_gains_losses
+        assert r.gross_gain_loss_eur == Decimal("100")
+        (lot,) = next(iter(
+            l for l in out.fifo_ledgers_by_asset_id.values() if l.lots)).lots
+        assert lot.source_transaction_id == "506"
+
+
+class TestW06CzkObjective:
+
+    def test_eur_objective_without_converter(self, run):
+        out = run(OBJECTIVE_TRADES, tax_year=2025, eoy=[_position(PAIRA, "1", "100")],
+                  method=PairingMethod.OPTIMAL)
+        (r,) = out.realized_gains_losses
+        assert r.acquisition_date == "2025-02-03"   # B: EUR gain 6 < 10
+        assert out.pairing_plan == {"603": [("602", Decimal("1"))]}
+
+    def test_czk_objective_with_converter(self, run):
+        """In CZK, A gains 110 x 25 - 100 x 27 = 50 and B gains
+        2 750 - 104 x 24 = 254: A is the optimum (and here also FIFO)."""
+        out = run(OBJECTIVE_TRADES, tax_year=2025, eoy=[_position(PAIRA, "1", "104")],
+                  method=PairingMethod.OPTIMAL,
+                  pairing_objective_converter=_czk(ObjectiveCnb()))
+        (r,) = out.realized_gains_losses
+        assert r.acquisition_date == "2025-01-06"
+        assert out.pairing_plan == {"603": [("601", Decimal("1"))]}
+
+    def test_unpriceable_arc_keeps_fifo(self, run):
+        class Missing(GoldenCnbProvider):
+            CZK_PER_UNIT = {("EUR", date(2025, 3, 3)): Decimal("25")}
+        trades = [
+            _trade(PAIRA, "2024-01-10", "1", "100", "601"),
+            _trade(PAIRA, "2024-06-03", "1", "130", "602"),
+            _trade(PAIRA, "2025-03-03", "-1", "110", "603"),
+        ]
+        out = run(trades, tax_year=2025, soy=[_position(PAIRA, "2", "230")],
+                  eoy=[_position(PAIRA, "1", "130")], method=PairingMethod.OPTIMAL,
+                  pairing_objective_converter=_czk(Missing()))
+        (r,) = out.realized_gains_losses
+        assert r.acquisition_date == "2024-01-10"   # FIFO, not the 130 lot
+        assert out.pairing_plan == {}
+
+
+class TestW05LedgerAfterOptimal:
+
+    def test_open_lots_are_what_the_assignment_left(self, run):
+        out = run(OBJECTIVE_TRADES, tax_year=2025, eoy=[_position(PAIRA, "1", "100")],
+                  method=PairingMethod.OPTIMAL)
+        (ledger,) = [l for l in out.fifo_ledgers_by_asset_id.values() if l.lots]
+        (lot,) = ledger.lots
+        # The solver sold B, so A is held -- FIFO would have kept B.
+        assert lot.source_transaction_id == "601"
+        assert lot.acquisition_date == "2025-01-06"
+        assert lot.total_cost_basis_eur == Decimal("100")
+
+    def test_partial_lot_after_optimal(self, run):
+        trades = [
+            _trade(PAIRA, "2025-01-06", "10", "100", "601"),
+            _trade(PAIRA, "2025-02-03", "10", "130", "602"),
+            _trade(PAIRA, "2025-03-03", "-4", "120", "603"),
+        ]
+        out = run(trades, tax_year=2025, eoy=[_position(PAIRA, "16", "1900")],
+                  method=PairingMethod.OPTIMAL)
+        (ledger,) = [l for l in out.fifo_ledgers_by_asset_id.values() if l.lots]
+        held = sorted((l.source_transaction_id, l.quantity, l.total_cost_basis_eur)
+                      for l in ledger.lots)
+        assert held == [("601", Decimal("10"), Decimal("1000")),
+                        ("602", Decimal("6"), Decimal("780"))]
+
+    def test_portfolio_shows_the_optimal_lots(self, two_years):
+        """2024 optimal in CZK: the March lot (24 CZK/EUR, 3 120 CZK a share)
+        beats January (2 500): it is sold, January is held."""
+        svc = two_years
+        _execute(svc, "2024-opt", 2024, "optimal")
+        pf = svc.load_portfolio("2024-opt")
+        (pos,) = pf["positions"]
+        assert [l["acquisition_date"] for l in pos["lots"]] == ["2024-01-10"]
+
+
+def test_pairing_matrix_runs_optimal_once_per_fx_mode():
+    from src.countries.cz.aggregation_service import run_cz_pairing_matrix
+    calls = []
+
+    def _runner(method, objective_converter=None):
+        calls.append((method, objective_converter is not None))
+        raise _Stop()
+
+    class _Stop(Exception):
+        pass
+
+    with pytest.raises(_Stop):
+        run_cz_pairing_matrix(_runner, 2025, fx_modes=("daily",),
+                              pairing_methods=(PairingMethod.OPTIMAL,),
+                              fx_providers={"daily": ObjectiveCnb()})
+    assert calls == [(PairingMethod.OPTIMAL, True)]
+
+
+def test_service_optimal_minimises_the_czk_base(tmp_path):
+    """Through the web service the objective is the run's own CZK base: lot A
+    (50 CZK gain) is sold, not lot B (the EUR optimum, 254 CZK)."""
+    from src.webapp.services import RunService
+    svc = RunService(data_dir=tmp_path / "data", runs_dir=tmp_path / "runs")
+    svc._today = lambda: date(2026, 3, 1)
+    try:
+        _write_dataset(svc, 2025, trades=OBJECTIVE_TRADES,
+                       eoy=[_position(PAIRA, "1", "104")])
+        svc._execute_run("2025-opt", 2025, "daily", ecb_provider=GoldenEcbProvider(),
+                         cz_fx_provider=ObjectiveCnb(), pairing_method="optimal")
+        (item,) = _disposals(svc, "2025-opt")
+        assert item["acquisition_date"] == "2025-01-06"
+        assert Decimal(item["gain_loss_czk"]) == Decimal("50")
+    finally:
+        svc.runner.shutdown(wait=False)

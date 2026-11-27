@@ -51,7 +51,8 @@ def main_application():
         else PairingMethod(cz_pairing_method)
     )
 
-    def _run_pipeline_for(method: PairingMethod) -> ProcessingOutput:
+    def _run_pipeline_for(method: PairingMethod,
+                          objective_converter=None) -> ProcessingOutput:
         return run_core_processing_pipeline(
             trades_file_path=args.trades,
             cash_transactions_file_path=args.cash,
@@ -62,10 +63,21 @@ def main_application():
             tax_year_to_process=args.tax_year,
             country_code=args.country,
             pairing_method=method,
+            # optimal minimises the CZK base of one FX mode (see
+            # run_cz_pairing_matrix); None = the EUR gain.
+            pairing_objective_converter=objective_converter,
         )
 
+    _initial_objective = None
+    _cli_fx_mode = getattr(args, "cz_fx_mode", "daily")
+    if (args.country == "cz" and _initial_pairing == PairingMethod.OPTIMAL
+            and _cli_fx_mode in ("daily", "uniform")):
+        from src.countries.cz.aggregation_service import cz_fx_setup
+        _initial_objective = cz_fx_setup(_cli_fx_mode)[2]
+
     try:
-        processing_results: ProcessingOutput = _run_pipeline_for(_initial_pairing)
+        processing_results: ProcessingOutput = _run_pipeline_for(
+            _initial_pairing, _initial_objective)
     except Exception as e:
         logger.critical(f"Core processing pipeline failed: {e}. Exiting.", exc_info=True)
         sys.exit(1)

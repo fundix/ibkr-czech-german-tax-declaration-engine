@@ -39,7 +39,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import src.config as config
-from src.countries.cz.aggregation_service import run_cz_aggregation, run_cz_compare
+from src.countries.cz.aggregation_service import (
+    cz_fx_setup, run_cz_aggregation, run_cz_compare,
+)
 from src.countries.cz.config import CzTaxConfig
 from src.countries.cz.time_test import time_test_deadline
 from src.engine.pairing import (
@@ -1181,6 +1183,12 @@ class RunService:
                     cz_cfg.fx_policy.source,
                     cache_file_path=cz_cfg.cnb_cache_file_path,
                 )
+            objective_converter = None
+            if pairing == PairingMethod.OPTIMAL:
+                # The optimum of the CZK base this run files: the same mode,
+                # the same provider as its aggregation below (audit W06).
+                _cfg, _provider, objective_converter = cz_fx_setup(
+                    fx_mode, cz_fx_provider)
             processing = run_core_processing_pipeline(
                 trades_file_path=str(inputs["trades"]),
                 cash_transactions_file_path=str(inputs["cash"]),
@@ -1194,6 +1202,7 @@ class RunService:
                 pairing_method=pairing,
                 statement_of_funds_file_path=sof_path,
                 pairing_history=pairing_ctx["history"],
+                pairing_objective_converter=objective_converter,
             )
             unverified_symbols = list(
                 getattr(processing, "soy_unverified_symbols", None) or [])

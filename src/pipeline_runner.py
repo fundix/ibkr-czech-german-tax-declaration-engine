@@ -93,6 +93,7 @@ def run_core_processing_pipeline(
     pairing_method: PairingMethod = PairingMethod.FIFO,
     statement_of_funds_file_path: Optional[str] = None,
     pairing_history: Optional[PairingHistory] = None,
+    pairing_objective_converter: Optional[Any] = None,
 ) -> ProcessingOutput:
     """
     Runs the core data processing pipeline: parsing, enrichment, and calculations.
@@ -209,16 +210,22 @@ def run_core_processing_pipeline(
 
     # Tax-optimal pairing is a CZ §10 feature: the core ran FIFO (OPTIMAL
     # behaves as FIFO at the ledger level); re-match eligible assets to
-    # minimise the §10 taxable base, then re-classify the new RGLs.
+    # minimise the §10 taxable base, then re-classify the new RGLs. The
+    # converter (one FX mode's) makes the objective the CZK base that is
+    # filed; without it the EUR gain is minimised.
+    pairing_plan: Dict[str, List[Tuple[str, Decimal]]] = {}
     if pairing_method == PairingMethod.OPTIMAL and country_code == "cz":
-        from src.countries.cz.optimal_pairing import apply_cz_optimal_pairing
-        realized_gains_losses = apply_cz_optimal_pairing(
+        from src.countries.cz.optimal_pairing import rematch_cz_optimal
+        outcome = rematch_cz_optimal(
             realized_gains_losses=realized_gains_losses,
             fifo_ledgers=fifo_ledgers,
             all_financial_events=financial_events_enriched,
             tax_year=tax_year_to_process,
             classifier=_tax_classifier.classify,
+            fx=pairing_objective_converter,
         )
+        realized_gains_losses = outcome.realized_gains_losses
+        pairing_plan = outcome.plan
 
     soy_unverified_symbols = sorted({
         _symbol_of(orchestrator.asset_resolver, asset_id)
@@ -238,6 +245,7 @@ def run_core_processing_pipeline(
         unapplied_corporate_actions=unapplied_corporate_actions,
         option_events_closed_at_zero=option_events_closed_at_zero,
         pairing_method=pairing_method,
+        pairing_plan=pairing_plan,
         soy_unverified_symbols=soy_unverified_symbols,
     )
 
