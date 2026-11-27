@@ -385,6 +385,54 @@ class TestX14ExerciseOrAssignmentWithoutDelivery(FifoTestCaseBase):
                  for r in out.realized_gains_losses]
         assert gains == [(RealizationType.OPTION_TRADE_CLOSE_SHORT, Decimal("299.00"))]
 
+        # ... and the event is named, so that it reaches the review notes: a
+        # premium on the option instead of in the shares must not pass unseen.
+        (closed,) = out.option_events_closed_at_zero
+        assert closed["symbol"] == put["symbol"]
+        assert closed["event"] == "assignment"
+        assert closed["event_date"] == "2025-03-21"
+        assert closed["contracts"] == Decimal("1")
+        assert closed["transaction_id"] == "3203"
+
+    def test_a_cash_settled_option_is_an_ordinary_result_and_is_not_named(self):
+        call = _option_on(INDEX, put_call="C", strike="5000", expiry="2025-05-16",
+                          conid="900000311")
+        trades = [
+            _trade_row(**call, trade_date="2025-05-05", quantity="1", price="20.00",
+                       buy_sell="BUY", open_close="O", tx_id="3301"),
+            _trade_row(**call, trade_date="2025-05-16", quantity="-1", price="35.25",
+                       buy_sell="SELL", open_close="C", tx_id="3302",
+                       commission="0", notes="Ex"),
+        ]
+
+        out = self._run_pipeline(trades_data=trades, tax_year=TAX_YEAR,
+                                 custom_rate_provider=_one_to_one(),
+                                 country_code="cz")
+
+        assert out.option_events_closed_at_zero == []
+
+    def test_the_czech_result_names_an_option_closed_at_zero(self):
+        from types import SimpleNamespace
+        from src.countries.cz.aggregation_service import run_cz_aggregation
+
+        processing = SimpleNamespace(
+            realized_gains_losses=[], processed_income_events=[],
+            asset_resolver=AssetResolver(AssetClassifier()),
+            option_events_closed_at_zero=[{
+                "symbol": "SYNA  250321P00050000", "description": "SYNA 21MAR25 50 P",
+                "event_date": "2025-03-21", "event": "assignment",
+                "contracts": Decimal("1"), "transaction_id": "3203",
+            }],
+        )
+
+        result = run_cz_aggregation(processing, TAX_YEAR, "daily",
+                                    fx_provider=_FlatCnb())
+
+        (note,) = result.sections["option_events_closed_at_zero"].notes
+        assert "REVIEW REQUIRED" in note and "DO NOT FILE" in note
+        assert "SYNA  250321P00050000" in note and "assignment" in note
+        assert "2025-03-21" in note and "3203" in note
+
 
 # ---------------------------------------------------------------------------
 # X15 — a merger names the acquirer by ISIN

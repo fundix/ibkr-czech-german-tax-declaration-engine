@@ -72,7 +72,8 @@ def _closing_trade(event: OptionLifecycleEvent, exercised: bool) -> TradeEvent:
 
 
 def _close_without_delivery(event: OptionLifecycleEvent, ledger: FifoLedger,
-                            option_asset: Option, exercised: bool) -> List[RealizedGainLoss]:
+                            option_asset: Option, exercised: bool,
+                            context: Dict[str, Any]) -> List[RealizedGainLoss]:
     """Realise an exercise or assignment that delivers no shares.
 
     A cash-settled contract (an index option) delivers nothing: its settlement
@@ -84,10 +85,22 @@ def _close_without_delivery(event: OptionLifecycleEvent, ledger: FifoLedger,
     The same applies when shares should have come but no delivery trade is
     linked (its row is missing from the export, or could not be matched): the
     row then closes the option at zero and the premium is realised on it,
-    rather than left waiting for a trade that never arrives.
+    rather than left waiting for a trade that never arrives. That outcome is
+    recorded for the result's review notes: either a trade or a settlement
+    amount is missing from the inputs.
     """
     trade = _closing_trade(event, exercised)
     if not trade.gross_amount_foreign_currency:
+        closed_at_zero = context.get('option_events_closed_at_zero')
+        if closed_at_zero is not None:
+            closed_at_zero.append({
+                "symbol": option_asset.ibkr_symbol or option_asset.get_classification_key(),
+                "description": option_asset.description or "",
+                "event_date": event.event_date,
+                "event": "exercise" if exercised else "assignment",
+                "contracts": event.quantity_contracts,
+                "transaction_id": event.ibkr_transaction_id,
+            })
         logger.error(
             f"{event.event_type.name} of {event.quantity_contracts} contract(s) of "
             f"{option_asset.ibkr_symbol or option_asset.get_classification_key()} on {event.event_date} "
@@ -134,7 +147,7 @@ class OptionExerciseProcessor(EventProcessor):
         if not _has_delivery(event, context):
             # Nothing is delivered (a cash-settled index option, typically):
             # the long option is sold at the amount on its own row.
-            return _close_without_delivery(event, ledger, option_asset, exercised=True)
+            return _close_without_delivery(event, ledger, option_asset, True, context)
 
         if option_asset.underlying_asset_internal_id is None:
             logger.critical(f"Option asset {option_asset.get_classification_key()} (ID: {option_asset.internal_asset_id}) "
@@ -195,7 +208,7 @@ class OptionAssignmentProcessor(EventProcessor):
         if not _has_delivery(event, context):
             # Nothing is delivered (a cash-settled index option, typically):
             # the short option is bought back at the amount on its own row.
-            return _close_without_delivery(event, ledger, option_asset, exercised=False)
+            return _close_without_delivery(event, ledger, option_asset, False, context)
 
         if option_asset.underlying_asset_internal_id is None:
             logger.critical(f"Option asset {option_asset.get_classification_key()} (ID: {option_asset.internal_asset_id}) "

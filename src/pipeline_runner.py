@@ -39,7 +39,8 @@ class ProcessingOutput:
                  eoy_mismatch_error_count: int,
                  fifo_ledgers_by_asset_id: Optional[Dict[Any, Any]] = None,
                  eoy_mismatch_details: Optional[List[Dict[str, Any]]] = None,
-                 unapplied_corporate_actions: Optional[List[Dict[str, Any]]] = None):
+                 unapplied_corporate_actions: Optional[List[Dict[str, Any]]] = None,
+                 option_events_closed_at_zero: Optional[List[Dict[str, Any]]] = None):
         self.realized_gains_losses = realized_gains_losses
         self.vorabpauschale_items = vorabpauschale_items
         self.processed_income_events = processed_income_events
@@ -54,6 +55,11 @@ class ProcessingOutput:
         # shares are held as a zero-cost placeholder) -- likewise a blocking
         # review note in the CZ aggregation.
         self.unapplied_corporate_actions = list(unapplied_corporate_actions or [])
+        # One entry per option exercise or assignment that had neither a
+        # delivery trade nor an amount on its own row: it was closed on the
+        # option at zero, which means a trade or a settlement amount is
+        # missing from the inputs. Also a review note in the CZ aggregation.
+        self.option_events_closed_at_zero = list(option_events_closed_at_zero or [])
         # Final FIFO ledgers (open lots after all tax-year events) keyed by
         # asset internal id — end-of-year open positions for portfolio views.
         self.fifo_ledgers_by_asset_id = fifo_ledgers_by_asset_id or {}
@@ -151,6 +157,7 @@ def run_core_processing_pipeline(
     eoy_mismatch_error_count_calc = 0
     eoy_mismatch_details = []
     unapplied_corporate_actions = []
+    option_events_closed_at_zero = []
     try:
         # Ensure run_main_calculations uses the passed tax_year_to_process
         _tax_plugin = get_tax_plugin(country_code)
@@ -158,7 +165,7 @@ def run_core_processing_pipeline(
         logger.info(f"Using tax classifier for country: {country_code}")
         (realized_gains_losses, vorabpauschale_items, processed_income_events,
          eoy_mismatch_error_count_calc, fifo_ledgers, eoy_mismatch_details,
-         unapplied_corporate_actions) = run_main_calculations(
+         unapplied_corporate_actions, option_events_closed_at_zero) = run_main_calculations(
             financial_events=financial_events_enriched,
             asset_resolver=orchestrator.asset_resolver, # Use the resolver from the orchestrator
             currency_converter=currency_converter,
@@ -208,4 +215,5 @@ def run_core_processing_pipeline(
         fifo_ledgers_by_asset_id=fifo_ledgers,
         eoy_mismatch_details=eoy_mismatch_details,
         unapplied_corporate_actions=unapplied_corporate_actions,
+        option_events_closed_at_zero=option_events_closed_at_zero,
     )

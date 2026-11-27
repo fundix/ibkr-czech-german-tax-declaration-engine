@@ -255,7 +255,7 @@ def run_main_calculations(
     security_price_provider: Optional[Any] = None,
     pairing_method: PairingMethod = PairingMethod.FIFO,
     hold_unapplied_shares_as_placeholders: bool = False,
-) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger], List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Runs the main calculation logic:
     1. Separates historical and current year events.
@@ -275,6 +275,8 @@ def run_main_calculations(
        such an action adds are held as zero-cost placeholder lots only when
        ``hold_unapplied_shares_as_placeholders`` is set -- by a country layer
        whose result reports these actions.
+    9. The eighth names each option exercise or assignment that had neither a
+       delivery trade nor an amount on its row and was closed at zero.
     """
     pairing_method = coerce_pairing_method(pairing_method)
     logger.info(f"Starting main calculation engine for tax year {tax_year} with {len(financial_events)} events (pairing: {pairing_method.value}).")
@@ -297,6 +299,9 @@ def run_main_calculations(
     # Corporate actions that move shares and that no processor applies (a
     # spin-off, a tender, ...): one entry each, for a blocking review note.
     unapplied_corporate_actions: List[Dict[str, Any]] = []
+    # Exercises and assignments that came with neither a delivery trade nor an
+    # amount on their own row, and were therefore closed on the option at zero.
+    option_events_closed_at_zero: List[Dict[str, Any]] = []
 
     tax_year_start_date_str = f"{tax_year}-01-01"
     tax_year_end_date_str = f"{tax_year}-12-31"
@@ -305,10 +310,10 @@ def run_main_calculations(
 
     if not tax_year_start_date_obj:
         logger.error(f"Could not parse tax year start date: {tax_year_start_date_str}. Aborting calculations.")
-        return [], [], financial_events, 0, {}, [], []
+        return [], [], financial_events, 0, {}, [], [], []
     if not tax_year_end_date_obj:
         logger.error(f"Could not parse tax year end date: {tax_year_end_date_str}. Aborting calculations.")
-        return [], [], financial_events, 0, {}, [], []
+        return [], [], financial_events, 0, {}, [], [], []
 
     logger.info("Separating historical and current year events...")
     filtered_events_count = 0
@@ -482,6 +487,7 @@ def run_main_calculations(
                     'asset_resolver': asset_resolver,
                     'pending_option_adjustments': pending_option_adjustments,
                     'option_events_with_delivery': option_events_with_delivery,
+                    'option_events_closed_at_zero': option_events_closed_at_zero,
                     'currency_converter': currency_converter,
                     'tax_classifier': tax_classifier,
                     'merger_policy': merger_policy,
@@ -650,7 +656,7 @@ def run_main_calculations(
 
     return (realized_gains_losses, vorabpauschale_data_items, processed_income_events_for_output,
             eoy_mismatch_errors, fifo_ledgers, eoy_mismatch_details,
-            unapplied_corporate_actions)
+            unapplied_corporate_actions, option_events_closed_at_zero)
 
 
 def _create_excess_dividend_event(original_event, excess_amount, asset_object):

@@ -74,7 +74,50 @@ def run_cz_aggregation(
         getattr(processing_results, "unapplied_corporate_actions", None) or [])
     if unapplied is not None:
         result.sections[unapplied.section_key] = unapplied
+    closed_at_zero = option_events_closed_at_zero_section(
+        getattr(processing_results, "option_events_closed_at_zero", None) or [])
+    if closed_at_zero is not None:
+        result.sections[closed_at_zero.section_key] = closed_at_zero
     return result
+
+
+def option_events_closed_at_zero_section(
+    events: List[Dict[str, Any]],
+) -> Optional[TaxResultSection]:
+    """A blocking review section for option exercises and assignments that
+    came with neither a delivery trade nor an amount, or None when there are
+    none.
+
+    An exercise or assignment either delivers shares -- then its premium moves
+    into their cost or proceeds -- or settles in cash on the option's own row.
+    One that shows neither was closed on the option at zero so that its premium
+    is not lost, but something is missing from the statements: the delivery
+    trade, or the settlement amount.
+    """
+    if not events:
+        return None
+    listed = "; ".join(
+        f"{e.get('symbol')}"
+        + (f" ({e['description']})" if e.get("description") else "")
+        + f": {e.get('event')} of {e.get('contracts')} contract(s) on {e.get('event_date')}"
+        + f", transaction {e.get('transaction_id') or '?'}"
+        for e in events
+    )
+    note = (
+        f"REVIEW REQUIRED — DO NOT FILE: {len(events)} option exercise(s)/assignment(s) "
+        f"came with neither a delivery trade nor an amount on their own row — {listed}. "
+        "Each was closed on the option at zero, so its premium is in the result as an "
+        "option gain or loss on that day. If shares were delivered, their trade is "
+        "missing from the export or could not be matched to the option, and the "
+        "premium is NOT in their cost or proceeds; if the contract was settled in "
+        "cash, the settlement amount is missing."
+    )
+    return TaxResultSection(
+        section_key="option_events_closed_at_zero",
+        label="Opce uplatněné nebo přidělené bez dodávky",
+        line_items={"event_count": Decimal(len(events))},
+        notes=[note],
+    )
 
 
 def unapplied_corporate_actions_section(
