@@ -246,7 +246,7 @@ date is read.
 |------|--------|
 | Per-item preliminary cap: `min(wht_paid, cap_rate × gross_income)` | **IMPLEMENTED** |
 | Default cap rate: 15% (`default_max_credit_rate`) | **IMPLEMENTED** |
-| Per-country treaty cap: `country_credit_caps` dict | **IMPLEMENTED** — 16 treaties with Sb. citations (12 verified 2026-07-03, SE/CN/HK/KZ added 2026-08-08) |
+| Per-country treaty cap: `country_credit_caps` dict | **IMPLEMENTED** — 17 treaties with Sb. citations (12 verified 2026-07-03, SE/CN/HK/KZ added 2026-08-08, KR added 2026-11-27) |
 | Missing source_country → PENDING_MANUAL_REVIEW, default cap applied | **IMPLEMENTED** |
 | No linked WHT → zero credit record, no crash | **IMPLEMENTED** |
 | Source country for the cap: the item's own `source_country`, else the first WHT record carrying one | **IMPLEMENTED** — the item's country comes from `IssuerCountryCode` and outranks the tax row, which on an ADR names the depositary |
@@ -256,7 +256,7 @@ date is read.
 | Final FTC = `min(preliminary, czech_tax_on_foreign_income)` | **IMPLEMENTED** |
 | Czech tax on foreign income: proportional method `gross_tax × (foreign_income / combined_base)` | **IMPLEMENTED** |
 | Per-country FTC aggregation in summary | **IMPLEMENTED** |
-| Treaty-by-treaty verification of cap rates | **IMPLEMENTED** for the 16 treaties in `country_credit_caps` (AT, AU, CA, CH, CN, DE, FR, GB, HK, IE, JP, KZ, LU, NL, SE, US); others fall back to the 15 % default |
+| Treaty-by-treaty verification of cap rates | **IMPLEMENTED** for the 17 treaties in `country_credit_caps` (AT, AU, CA, CH, CN, DE, FR, GB, HK, IE, JP, KR, KZ, LU, NL, SE, US); others fall back to the 15 % default |
 
 ### What "not creditable" is made of
 
@@ -288,6 +288,10 @@ source is usually not applied to a Czech retail holder, so the statement showed
 30 % withheld and 15 % was being credited where the treaty allows 10 %. Fixing
 it moved the 2025 credit from 209,33 to 139,55 CZK and the final tax from
 28 850 to 28 920 CZK.
+
+South Korea turned up the same way in the 2026-11 audit: the 15 % default
+against a treaty cap of 5 % (1/2020 Sb.m.s., Art. 10(2) — one rate for all
+dividends, applied to tax withheld from 1 January 2020).
 
 Adding a cap therefore changes filed figures: bump `_FINGERPRINT_VERSION` so
 cached runs are recomputed rather than served.

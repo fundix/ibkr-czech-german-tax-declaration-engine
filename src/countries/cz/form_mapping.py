@@ -291,26 +291,29 @@ def build_form_mapping(
     result.sections.append(sec_liability)
 
     # =====================================================================
-    # Samostatný základ daně (§16a) — porovnání pro zahraniční dividendy
+    # Samostatný základ daně (§16a) — porovnání pro zahraniční příjmy §8
+    # (dividendy i úroky: volba je možná jen pro všechny najednou)
     # =====================================================================
     cmp = liability.dividend_separate_base if liability else None
     if cmp is not None and cmp.available:
         sec_sep = CzFormSection(
             section_id="CZ_FORM_DIVIDEND_SEPARATE_BASE",
-            label="Samostatný základ daně §16a – zahraniční dividendy (porovnání)",
+            label="Samostatný základ daně §16a – zahraniční dividendy a úroky (porovnání)",
         )
         sec_sep.lines.append(CzFormLine(
             code="CZ_DAP_16A_GENERAL_TOTAL",
-            label="Varianta A – dividendy v obecném základu: celková daň",
+            label="Varianta A – dividendy a úroky v obecném základu: celková daň",
             value=q(cmp.general_base_total_tax),
-            official_line_ref="ř. 58 DAP (dividendy součástí §8, ř. 38)",
+            official_line_ref="ř. 58 DAP (dividendy a úroky součástí §8, ř. 38)",
         ))
         sec_sep.lines.append(CzFormLine(
             code="CZ_DAP_16A_SEPARATE_BASE",
-            label="Varianta B – samostatný základ daně (dividendy)",
+            label="Varianta B – samostatný základ daně (dividendy a úroky)",
             value=q(cmp.separate_dividend_base_rounded),
             official_line_ref="DAP – samostatný základ daně §16a (ověřit řádek dle vzoru)",
-            note=f"Sazba {cmp.separate_dividend_rate * 100:.0f} %",
+            note=(f"Sazba {cmp.separate_dividend_rate * 100:.0f} %; dividendy "
+                  f"{q(cmp.dividends)} + úroky {q(cmp.interest)}, "
+                  f"zaokrouhleno na celé stokoruny dolů"),
         ))
         sec_sep.lines.append(CzFormLine(
             code="CZ_DAP_16A_SEPARATE_DIVIDEND_TAX",
@@ -320,7 +323,7 @@ def build_form_mapping(
         ))
         sec_sep.lines.append(CzFormLine(
             code="CZ_DAP_16A_SEPARATE_GENERAL_TAX",
-            label="Varianta B – daň z obecného základu (bez dividend) po zápočtu",
+            label="Varianta B – daň z obecného základu (bez zahraničních dividend a úroků)",
             value=q(cmp.separate_general_base_net_tax),
         ))
         sec_sep.lines.append(CzFormLine(
@@ -337,13 +340,26 @@ def build_form_mapping(
             sec_sep.notes.append(
                 f"DOPORUČENÍ: varianta B (samostatný základ §16a) je levnější o "
                 f"{q(cmp.saving)} {currency}. Volba §16a je na poplatníkovi; při "
-                f"jejím uplatnění dividendy nepatří do ř. 38 (§8), ale do "
-                f"samostatného základu daně."
+                f"jejím uplatnění zahraniční dividendy ani úroky nepatří do "
+                f"ř. 38 (§8), ale do samostatného základu daně — volbu lze "
+                f"učinit jen pro všechny tyto příjmy najednou (§8 odst. 8 ZDP)."
+            )
+        elif not cmp.same_tax_before_rounding:
+            sec_sep.notes.append(
+                "Samostatný základ daně §16a (zahraniční dividendy a úroky) by "
+                "nepřinesl úsporu — doporučena varianta A."
             )
         else:
+            # Both variants tax the same income at the same rate, so their
+            # totals can differ by rounding only — said here, because the two
+            # totals above may not match to the crown.
             sec_sep.notes.append(
-                "Samostatný základ daně §16a by nepřinesl úsporu (obecný základ "
-                "nedosahuje sazby 23 %) — doporučena varianta A."
+                "Samostatný základ daně §16a (zahraniční dividendy a úroky) by "
+                "nepřinesl úsporu: obecný základ nedosahuje zvýšené sazby, takže "
+                "se v obou variantách daní vše stejnou sazbou. Liší-li se součty "
+                "obou variant o několik korun, jde jen o zaokrouhlení (ve "
+                "variantě B se na celé stokoruny dolů zaokrouhlují dva základy "
+                "místo jednoho), ne o úsporu — doporučena varianta A."
             )
         result.sections.append(sec_sep)
 

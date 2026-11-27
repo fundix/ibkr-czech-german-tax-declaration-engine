@@ -46,10 +46,11 @@ _FTC_ELIGIBLE_TYPES = {
     CzTaxItemType.INTEREST,
 }
 
-# FTC income categories. Only DIVIDEND-category income (§8/4 podíly na zisku)
-# is eligible for the §16a separate tax base; interest stays in the general
-# base. Splitting the credit by category lets the liability layer finalize the
-# §38f cap separately for each base in the separate-base scenario.
+# FTC income categories — a breakdown of the credit by kind of income. They do
+# not decide which tax base an item belongs to: dividends and interest are
+# both foreign §8 income, and the §16a election moves all of it into the
+# separate base together (§8 odst. 8 ZDP), so the liability layer credits
+# against whole per-state totals in either scenario.
 CATEGORY_DIVIDEND = "dividend"
 CATEGORY_INTEREST = "interest"
 _INTEREST_ITEM_TYPES = {CzTaxItemType.INTEREST}
@@ -84,8 +85,8 @@ class CzForeignTaxCreditRecord:
     # credit here is too generous.
     cap_rate_defaulted: bool = False
 
-    # Income category ("dividend" | "interest"): drives the §16a separate-base
-    # split in the liability layer.
+    # Income category ("dividend" | "interest") — a breakdown only; both kinds
+    # share one tax base in either scenario of the liability layer.
     category: str = CATEGORY_DIVIDEND
     review_status: str = "RESOLVED"
     review_note: Optional[str] = None
@@ -120,8 +121,8 @@ class CzCountryCreditAggregate:
     creditable_czk: Decimal = ZERO
     non_creditable_czk: Decimal = ZERO
     item_count: int = 0
-    # Per-category split (dividend vs interest) — used by the §16a
-    # separate-base scenario to apply the §38f/8 per-state cap to each base.
+    # Per-category split (dividend vs interest) of the figures above. The
+    # §38f/8 per-state cap works on the state's total, never on one category.
     dividend_gross_income_czk: Decimal = ZERO
     dividend_creditable_czk: Decimal = ZERO
     interest_gross_income_czk: Decimal = ZERO
@@ -144,8 +145,8 @@ class CzForeignTaxCreditSummary:
     pending_review_count: int = 0
     item_count: int = 0
 
-    # Per-category totals (dividend vs interest) — feed the §16a separate-base
-    # scenario in the liability layer.
+    # Per-category totals (dividend vs interest); they add up to the totals
+    # above and are a breakdown only.
     dividend_income_total_czk: Decimal = ZERO
     dividend_creditable_total_czk: Decimal = ZERO
     interest_income_total_czk: Decimal = ZERO
@@ -154,7 +155,23 @@ class CzForeignTaxCreditSummary:
     per_country: Dict[str, CzCountryCreditAggregate] = field(default_factory=dict)
     records: List[CzForeignTaxCreditRecord] = field(default_factory=list)
 
-    def to_line_items(self, currency: str) -> Dict[str, Decimal]:
+    def to_line_items(
+        self,
+        currency: str,
+        credited_per_state: Optional[Dict[str, Decimal]] = None,
+    ) -> Dict[str, Decimal]:
+        """Summary rows, with a breakdown per source state.
+
+        ``credited_per_state`` is what each state was FINALLY credited once
+        the §38f limits were applied (``CzTaxLiabilitySummary.per_state_credit``)
+        — the figure that state's own Příloha č. 3 sheet carries. When given,
+        every state gets a ``ftc_<cc>_credited`` row beside its preliminary
+        ``ftc_<cc>_creditable`` (the per-item treaty caps added up); a state
+        missing from the mapping was credited nothing and says so with a zero.
+        The credited rows add up to the liability's final credit, which the
+        creditable ones need not. Without the mapping only the preliminary
+        rows can be written.
+        """
         c = currency.lower()
         d: Dict[str, Decimal] = {
             f"ftc_foreign_income_total_{c}": self.foreign_income_total_czk.quantize(TWO),
@@ -169,6 +186,10 @@ class CzForeignTaxCreditSummary:
         for code, agg in sorted(self.per_country.items()):
             d[f"ftc_{code.lower()}_paid_{c}"] = agg.foreign_tax_paid_czk.quantize(TWO)
             d[f"ftc_{code.lower()}_creditable_{c}"] = agg.creditable_czk.quantize(TWO)
+            if credited_per_state is not None:
+                d[f"ftc_{code.lower()}_credited_{c}"] = credited_per_state.get(
+                    code, ZERO
+                ).quantize(TWO)
             d[f"ftc_{code.lower()}_non_creditable_{c}"] = agg.non_creditable_czk.quantize(TWO)
         return d
 

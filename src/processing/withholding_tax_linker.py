@@ -192,7 +192,10 @@ class WithholdingTaxLinker:
     ) -> Optional[LinkingCriteriaMatch]:
         """Find the best matching income event for a withholding tax event."""
         
-        candidate_matches: List[LinkingCriteriaMatch] = []
+        # Each match is kept next to its income event: the tie-breaks below
+        # need the event's TransactionID and construction order, which the
+        # match itself does not carry.
+        candidate_matches: List[Tuple[LinkingCriteriaMatch, FinancialEvent]] = []
         
         for income_event in income_events:
             # Try different matching strategies in order of confidence
@@ -205,7 +208,7 @@ class WithholdingTaxLinker:
                 match = self._try_proximity_match(wht_event, income_event)
             
             if match:
-                candidate_matches.append(match)
+                candidate_matches.append((match, income_event))
         
         # Return the match with highest confidence score.
         # Equal-confidence candidates (e.g. two same-day, same-currency
@@ -213,21 +216,53 @@ class WithholdingTaxLinker:
         # WHT/income ratio is to the most common treaty rate (15 %) — an
         # id-only tie-break sent BOTH same-day WHTs to the same dividend,
         # and the per-item FTC cap then swallowed part of the credit. The
-        # anchor is a tie-break only; it plays no role in validation. The
-        # event id remains as the final deterministic fallback.
+        # anchor is a tie-break only; it plays no role in validation.
+        #
+        # Two income rows of the SAME size (a dividend and a payment in lieu)
+        # tie on the rate as well. IBKR books a tax row after the income row
+        # it belongs to, so the TransactionIDs decide next: an income row
+        # booked before the tax row beats one booked after it, and among
+        # those the nearer one wins. Last comes the order the income rows
+        # were read in. The event id used to be last: unique, but a uuid4
+        # redrawn on every run, so the same statements linked differently
+        # from one run to the next.
         if candidate_matches:
             anchor = Decimal("0.15")
 
-            def _match_key(m: LinkingCriteriaMatch):
+            def _match_key(candidate: Tuple[LinkingCriteriaMatch, FinancialEvent]):
+                m, income_event = candidate
                 if m.effective_tax_rate is None:
                     rate_closeness = Decimal("-999")
                 else:
                     rate_closeness = -(m.effective_tax_rate.copy_abs() - anchor).copy_abs()
-                return (m.confidence_score, rate_closeness, str(m.candidate_event_id))
+                gap = self._transaction_id_gap(wht_event, income_event)
+                if gap is None:
+                    id_closeness = (0, 0, 0)        # unknown: behind any known gap
+                else:
+                    id_closeness = (1, gap >= 0, -abs(gap))
+                return (
+                    m.confidence_score,
+                    rate_closeness,
+                    id_closeness,
+                    -income_event.creation_sequence,
+                )
 
-            return max(candidate_matches, key=_match_key)
+            return max(candidate_matches, key=_match_key)[0]
 
         return None
+
+    @staticmethod
+    def _transaction_id_gap(
+        wht_event: WithholdingTaxEvent,
+        income_event: FinancialEvent,
+    ) -> Optional[int]:
+        """The tax row's TransactionID minus the income row's — positive when
+        the tax row was booked later. None if either id is missing or not a
+        number."""
+        try:
+            return int(wht_event.ibkr_transaction_id) - int(income_event.ibkr_transaction_id)
+        except (TypeError, ValueError, OverflowError):
+            return None
     
     def _try_exact_match(
         self, 

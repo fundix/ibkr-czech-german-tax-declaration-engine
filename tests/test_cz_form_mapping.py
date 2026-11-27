@@ -63,6 +63,9 @@ def _ftc(paid=ZERO, creditable=ZERO, foreign_income=ZERO, countries=None):
         for code, agg_data in countries.items():
             s.per_country[code] = CzCountryCreditAggregate(
                 country=code,
+                # A state is credited against its income; one without any is
+                # credited nothing, whatever its per-item caps add up to.
+                gross_income_czk=agg_data.get("gross_income", ZERO),
                 foreign_tax_paid_czk=agg_data.get("paid", ZERO),
                 creditable_czk=agg_data.get("creditable", ZERO),
                 non_creditable_czk=agg_data.get("non_creditable", ZERO),
@@ -206,7 +209,8 @@ class TestFtcMapping:
     def test_ftc_lines_present(self):
         ftc = _ftc(paid=Decimal("1500"), creditable=Decimal("1000"),
                     foreign_income=Decimal("10000"),
-                    countries={"US": {"paid": Decimal("1500"), "creditable": Decimal("1000"),
+                    countries={"US": {"gross_income": Decimal("10000"),
+                                      "paid": Decimal("1500"), "creditable": Decimal("1000"),
                                       "non_creditable": Decimal("500")}})
         liability = _liability(div=Decimal("10000"), ftc=ftc)
 
@@ -311,7 +315,8 @@ class TestFtcMapping:
     def test_an_uncapped_country_line_stays_quiet(self):
         ftc = _ftc(paid=Decimal("1000"), creditable=Decimal("1000"),
                    foreign_income=Decimal("10000"),
-                   countries={"US": {"paid": Decimal("1000"),
+                   countries={"US": {"gross_income": Decimal("10000"),
+                                     "paid": Decimal("1000"),
                                      "creditable": Decimal("1000"),
                                      "non_creditable": Decimal("0")}})
         liability = _liability(div=Decimal("10000"), ftc=ftc)

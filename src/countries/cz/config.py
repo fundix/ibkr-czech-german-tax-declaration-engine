@@ -80,15 +80,21 @@ class CzTaxConfig:
         2025: Decimal("1676052"),   # 36 × 46 557
     })
 
-    # --- Dividend separate tax base (§16a ZDP) ---
-    # Foreign dividends (§8 odst. 4 ZDP — podíly na zisku ze zdrojů
-    # v zahraničí) may, at the taxpayer's ELECTION, be taxed in a SEPARATE
-    # 15 % tax base (samostatný základ daně §16a) instead of the general
-    # base. This is advantageous once the general base reaches the 23 %
-    # bracket, because the separate base is a flat 15 % with no progression.
-    # When enabled, the engine computes BOTH scenarios and reports which is
-    # cheaper (the election itself stays with the taxpayer). The rate is the
-    # statutory §16a odst. 2 rate (15 %), kept independent of base_tax_rate.
+    # --- Separate tax base for foreign §8 income (§16a ZDP) ---
+    # Foreign income from capital (§8 odst. 4 ZDP — profit shares, interest
+    # on deposits and on account balances, ...) may, at the taxpayer's
+    # ELECTION, be taxed in a SEPARATE 15 % tax base (samostatný základ daně
+    # §16a) instead of the general base. This is advantageous once the general
+    # base reaches the 23 % bracket, because the separate base is a flat 15 %
+    # with no progression. The election is all or nothing (§8 odst. 8 ZDP:
+    # once such income is included, all of it is), so dividends and interest
+    # move together. When enabled, the engine computes BOTH scenarios and
+    # reports which is cheaper (the election itself stays with the taxpayer).
+    # The rate is the statutory §16a odst. 1 rate (15 %), kept independent of
+    # base_tax_rate; odst. 2 rounds the base down to whole hundreds.
+    # Paragraph numbers as read in the consolidated text in force on
+    # 2024-01-01 and on 2026-11-27. The "dividend" in the two names below is
+    # older than the all-or-nothing rule being applied here.
     dividend_separate_base_enabled: bool = True
     dividend_separate_base_rate: Decimal = Decimal("0.15")
 
@@ -219,6 +225,19 @@ class CzTaxConfig:
         "HK": Decimal("0.05"),  # 49/2012 Sb.m.s. — Hong Kong SAR has its OWN
                                 # treaty, separate from the PRC one; flat 5 %.
         "KZ": Decimal("0.10"),  # 3/2000 Sb.m.s.
+        # Added 2026-11-27 (audit W27): Korean dividends fell back to the 15 %
+        # default, three times what the treaty leaves to Korea, so the credit
+        # was too generous and the Czech tax understated. Art. 10(2) of the
+        # treaty signed 12 January 2018 reads "daň takto uložená nepřesáhne
+        # 5 procent hrubé částky dividend" — ONE rate, with no higher tier
+        # for small holdings (read in the text of 1/2020 Sb.m.s. as
+        # republished on zakonyprolidi.cz; published summaries of the treaty
+        # agree). It applies to tax withheld on income paid from 1 January
+        # 2020 (Art. 27; in force 20 December 2019). Before that the 1992
+        # treaty (124/1995 Sb.) applied with different rates, which this
+        # year-less table does not model. Tax withheld above 5 % is not a
+        # Czech credit — it has to be reclaimed in Korea.
+        "KR": Decimal("0.05"),  # 1/2020 Sb.m.s.
     })
 
     # --- CNB cache path (anchored to project root — cwd-independent) ---

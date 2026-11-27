@@ -331,16 +331,9 @@ class CzechTaxAggregator:
             notes=cz10_notes,
         )
 
-        # Foreign tax credit summary (preliminary per-item caps)
-        ftc_items = ftc_summary.to_line_items(cur)
-        sections["cz_ftc_summary"] = TaxResultSection(
-            section_key="cz_ftc_summary",
-            label="§38f ZDP – Zápočet zahraniční daně (per-item caps)",
-            line_items=ftc_items,
-            notes=["Per-item treaty/default cap applied; final credit in liability summary"],
-        )
-
         # --- Phase 7: Tax liability computation ---
+        # Ahead of the §38f section, which reports per state what the
+        # liability finally credited.
         liability = compute_tax_liability(
             taxable_dividends=div_taxable,
             taxable_interest=int_taxable,
@@ -349,6 +342,25 @@ class CzechTaxAggregator:
             config=self.config,
             tax_year=tax_year,
             has_fx=has_fx,
+        )
+
+        # Foreign tax credit summary: the preliminary per-item caps and, per
+        # state, the final credit after the §38f limits. The preliminary
+        # per-state rows alone do not add up to the credit on the form, and
+        # Příloha č. 3 is filled in state by state.
+        ftc_items = ftc_summary.to_line_items(
+            cur, credited_per_state=liability.per_state_credit)
+        sections["cz_ftc_summary"] = TaxResultSection(
+            section_key="cz_ftc_summary",
+            label="§38f ZDP – Zápočet zahraniční daně (per-item caps)",
+            line_items=ftc_items,
+            notes=[
+                "Per-item treaty/default cap applied (ftc_*_creditable, "
+                "preliminary). ftc_<cc>_credited is what that state is finally "
+                "credited after the §38f limits — the figure for its Příloha "
+                "č. 3 sheet; those rows add up to final_creditable_ftc in the "
+                "liability summary."
+            ],
         )
 
         liability_items = liability.to_line_items(cur)
