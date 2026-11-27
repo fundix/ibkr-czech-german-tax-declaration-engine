@@ -396,7 +396,13 @@ _ACCOUNT_COLUMNS = ("ClientAccountID", "AccountId", "AccountAlias")
 #     rate). The cache hands back a whole earlier run directory, so without a
 #     bump a recompute would serve a portfolio.json that predates the fields and
 #     the positions page would show dashes forever.
-_FINGERPRINT_VERSION = "v6"
+# v7: the ČNB rate cache no longer serves the previous day's sheet for a day
+#     that was first asked about before its afternoon fixing. Entries written
+#     by the old code are re-checked against ČNB on first use, so a run that
+#     converted on such a day now gets a different CZK figure from the same
+#     statements — and the fingerprint does not cover the rate cache, so only
+#     a bump retires the runs computed from the wrong rates.
+_FINGERPRINT_VERSION = "v7"
 
 # Czech gloss for the shared AssetClassifier dialog labels (German origin).
 # Keyed on the exact label from AssetClassifier.classification_options() —
@@ -417,6 +423,24 @@ CLASSIFY_LABELS_CZ = {
         "Měnový pár (např. EUR.USD) — neznámé",
     "Sonstiges (Standard Anlage KAP)": "Ostatní (výchozí — akcie)",
 }
+
+
+# A closed year's statements are complete only once IBKR has booked its last
+# trading day and the corrections that trail it. A file written before this
+# many days of the NEXT year have passed is a picture of a year still open:
+# everything a Year-to-Date query returned while the year ran, and also a
+# download made on 1 January, hours before IBKR closed its books.
+YEAR_SETTLE_DAYS = 7
+
+
+def _year_settled_at(year: int) -> datetime:
+    """The moment from which a download of ``year`` can be taken as complete."""
+    return datetime(year + 1, 1, 1) + timedelta(days=YEAR_SETTLE_DAYS)
+
+
+def _written_at(path: Path) -> datetime:
+    """When a statement file was last written — i.e. downloaded or uploaded."""
+    return datetime.fromtimestamp(path.stat().st_mtime)
 
 
 def _effective_fx_mode(fx_mode: str, tax_year: int, current_year: int):
@@ -469,6 +493,10 @@ class RunService:
         # Factory (not instance): the CNB provider is built lazily on the
         # worker thread; tests inject a stub with fixed rates.
         self._converter_factory = converter_factory or self._cz_converter
+
+    def _today(self) -> date:
+        """The calendar date that decides whether a tax year is still running."""
+        return date.today()
 
     # ------------------------------------------------------------------
     # Datasets
@@ -737,12 +765,18 @@ class RunService:
         results). ECB rates are deliberately excluded: for a closed year they
         are stable, and a running year changes its data (→ new hash) anyway.
         """
-        eff_mode, _ = _effective_fx_mode(fx_mode, tax_year, datetime.now().year)
+        eff_mode, _ = _effective_fx_mode(fx_mode, tax_year, self._today().year)
         h = hashlib.sha256()
         h.update(
             f"{_FINGERPRINT_VERSION}|year={tax_year}|fx={eff_mode}"
             f"|pairing={pairing_method}".encode()
         )
+        if self._unsettled_statements_from(tax_year) is not None:
+            # A closed year computed from statements of a year still open
+            # carries a warning. The same files were hashed while the year
+            # ran, when there was nothing to warn about — without this the
+            # cache hands back that earlier run and the warning never shows.
+            h.update(b"|closed-year-from-unsettled-statements")
         for p in self._dataset_source_files(tax_year):
             try:
                 data = p.read_bytes()
@@ -765,8 +799,16 @@ class RunService:
     ) -> Optional[str]:
         """Return the run_id of an existing run with identical inputs, if any."""
         fp = self._input_fingerprint(tax_year, fx_mode, pairing_method)
-        for meta in self.list_runs(limit=100):
+        for meta in self.list_runs(limit=None):
             if meta.get("input_fingerprint") != fp:
+                continue
+            if (meta.get("computed_before_year_settled")
+                    or meta.get("unverified_rate_dates")):
+                # Same inputs, but not a result to hand back: one was made
+                # while its year was still open and says "recompute me" —
+                # reused, it would say so for ever, even after statements
+                # downloaded again came back byte for byte the same. The
+                # other rests on rates nobody could check at the time.
                 continue
             run_id = meta.get("run_id")
             modes = meta.get("modes") or []
@@ -853,15 +895,21 @@ class RunService:
     ) -> Dict[str, Any]:
         """Runs the full pipeline + CZ aggregation and persists everything.
 
-        Executed on the JobRunner worker thread (decimal context set there);
-        the provider overrides exist for offline tests.
+        Executed on the JobRunner worker thread (decimal context set there).
+        ``ecb_provider`` / ``cz_fx_provider`` pin the rates in offline tests;
+        without ``cz_fx_provider`` the ČNB provider is built here, so the run
+        can ask it afterwards which rates it could not verify.
         """
         started = time.monotonic()
         requested_fx_mode = fx_mode  # before compare→daily downgrade, for the fingerprint
         run_dir = self.runs_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        fx_mode, run_notes = _effective_fx_mode(fx_mode, tax_year, datetime.now().year)
+        fx_mode, run_notes = _effective_fx_mode(fx_mode, tax_year, self._today().year)
+        early_statements = self._unsettled_statements(tax_year)
+        unsettled_from = early_statements[0][1] if early_statements else None
+        if early_statements:
+            run_notes.append(self._unsettled_year_note(tax_year, early_statements))
         if extra_notes:
             run_notes.extend(extra_notes)
 
@@ -875,6 +923,17 @@ class RunService:
         sof = inputs.get("statement_of_funds")
         sof_path = str(sof) if sof else None
         with engine_file_lock():
+            if cz_fx_provider is None and fx_mode != "uniform":
+                # Built here rather than inside the aggregation, so the run
+                # can ask it afterwards which of its rates it could not
+                # verify — and under the lock, as before: it reads the rate
+                # cache when constructed and rewrites it whole when it saves.
+                from src.utils.fx_provider_factory import create_fx_provider
+                cz_cfg = CzTaxConfig()
+                cz_fx_provider = create_fx_provider(
+                    cz_cfg.fx_policy.source,
+                    cache_file_path=cz_cfg.cnb_cache_file_path,
+                )
             processing = run_core_processing_pipeline(
                 trades_file_path=str(inputs["trades"]),
                 cash_transactions_file_path=str(inputs["cash"]),
@@ -892,7 +951,8 @@ class RunService:
             compare_lines: List[str] = []
             if fx_mode == "compare":
                 comparison = run_cz_compare(processing, tax_year,
-                                            statement_of_funds_path=sof_path)
+                                            statement_of_funds_path=sof_path,
+                                            daily_fx_provider=cz_fx_provider)
                 compare_lines = list(comparison.render_lines())
                 mode_results = [("daily", comparison.daily), ("uniform", comparison.uniform)]
             else:
@@ -925,9 +985,12 @@ class RunService:
                 "pending_review_count": exported.get("warnings", {}).get("pending_review_count", 0),
             }
 
+        # Its own converter, on its own provider: lots bought in earlier
+        # years are converted only here, for the snapshot.
+        portfolio_converter = self._converter_factory()
         dump_json(
             self._build_portfolio(processing, tax_year, account_ids=account_ids,
-                                  cz_converter=self._converter_factory()),
+                                  cz_converter=portfolio_converter),
             run_dir / "portfolio.json",
         )
 
@@ -945,7 +1008,30 @@ class RunService:
             "notes": run_notes,
             "account_ids": account_ids,
             "input_fingerprint": input_fingerprint,
+            # Which version of the calculation made this run — see
+            # _flag_stale_run for what reads it.
+            "fingerprint_version": _FINGERPRINT_VERSION,
         }
+        if unsettled_from is not None:
+            # Structured twin of the note above (the dashboard card reads it).
+            meta["unsettled_statements_from"] = unsettled_from.date().isoformat()
+        unverified = sorted(
+            set(getattr(cz_fx_provider, "unverified_dates_used", ()))
+            | set(getattr(getattr(portfolio_converter, "provider", None),
+                          "unverified_dates_used", ()))
+        )
+        if unverified:
+            # Entries the old code wrote may hold the previous day's sheet,
+            # and ČNB was not there to say. The figures stand, but not as a
+            # result to hand back later in place of a computation:
+            # find_cached_run passes over a run that carries this list.
+            meta["unverified_rate_dates"] = unverified
+            meta["notes"].append(
+                f"U {len(unverified)} dnů se nepodařilo ověřit kurz ČNB uložený "
+                f"starší verzí programu (ČNB nebyla dostupná) — může jít o kurz "
+                f"předchozího dne. Přepočítejte, až bude ČNB dostupná; do té "
+                f"doby se tento výsledek znovu nepoužije."
+            )
         dump_json(meta, run_dir / "meta.json")
         logger.info(f"Run {run_id} finished in {meta['duration_s']} s.")
         return meta
@@ -965,6 +1051,60 @@ class RunService:
         "corp_actions": "corporate_actions.csv",
         "statement_of_funds": "statement_of_funds.csv",
     }
+
+    def _flex_statement_path(self, year: int, slot: str) -> Path:
+        return self.data_dir / str(year) / self._FLEX_SLOT_FILES[slot]
+
+    def _unsettled_statements(self, tax_year: int) -> List[Tuple[str, datetime]]:
+        """The too-early statements of a CLOSED year: (slot, written), oldest first.
+
+        Empty for the running year and for a closed year whose statements
+        were all written after it settled. The file time is the only witness:
+        a positions statement carries no date, and a year with no trade in
+        its last week looks the same in the rows either way.
+        """
+        if tax_year >= self._today().year:
+            return []
+        settled_at = _year_settled_at(tax_year)
+        early = [
+            (slot, _written_at(path))
+            for slot, path in ((slot, self._flex_statement_path(tax_year, slot))
+                               for slot in self._FLEX_SLOT_FILES)
+            if path.is_file() and _written_at(path) < settled_at
+        ]
+        return sorted(early, key=lambda pair: pair[1])
+
+    def _unsettled_statements_from(self, tax_year: int) -> Optional[datetime]:
+        """When the earliest too-early statement of a closed year was written."""
+        early = self._unsettled_statements(tax_year)
+        return early[0][1] if early else None
+
+    @staticmethod
+    def _unsettled_year_note(tax_year: int,
+                             early: List[Tuple[str, datetime]]) -> str:
+        """Why a closed year computed from too-early statements is not final.
+
+        Nothing else would say so: the positions snapshot is as old as the
+        trades, so the ledger reconciles to it and the result looks complete.
+        The statements are named, because a slot with no Flex query is not
+        fixed by downloading again — that one has to be uploaded.
+        """
+        written = early[0][1]
+        when = f"{written.day}. {written.month}. {written.year}"
+        which = ", ".join(FLEX_SLOT_LABELS.get(slot, slot) for slot, _ in early)
+        if written.year <= tax_year:
+            why = ("tedy před koncem roku — chybí v nich vše, co přišlo potom "
+                   "(poslední obchody, dividendy, konečné pozice)")
+        else:
+            why = ("hned po konci roku — IBKR v té době ještě nemusel mít "
+                   "zaúčtované poslední dny")
+        settled = _year_settled_at(tax_year)
+        return (
+            f"Výpisy roku {tax_year} ({which}) byly staženy {when}, {why}. "
+            f"Než podle výsledku podáte přiznání, stáhněte rok {tax_year} z "
+            f"IBKR znovu (nejdřív {settled.day}. {settled.month}. "
+            f"{settled.year}) nebo nahrajte výpisy za celý rok."
+        )
 
     @property
     def flex_config_path(self) -> Path:
@@ -1065,22 +1205,54 @@ class RunService:
         # between each and up to a minute of statement generation apiece, a
         # bootstrap of several years runs for many minutes.
         slots = [s for s in FLEX_SLOTS if cfg.queries.get(s)]
+        today = self._today()
         # Older years are gap-filled per SLOT, not skipped per year. Skipping
         # any year that could already run meant a slot added to the config
         # later never arrived for it: statement_of_funds was configured long
         # after 2024 and 2025 had been computed, so the cash ledger the
-        # currency FIFO needs was downloadable and never downloaded. Only
-        # files absent from disk are requested, so a closed year's existing
-        # statements are still never re-downloaded over.
+        # currency FIFO needs was downloadable and never downloaded.
+        #
+        # A file that IS on disk is requested again in one case only: its
+        # year has closed and the file was written before the year settled.
+        # The queries are saved as Year to Date, so every download made while
+        # a year runs stops at the day before it — and once the year is over
+        # nothing fetched it again. The last days of December then never
+        # reached the closed year, and its result still looked complete,
+        # because the positions snapshot was exactly as old as the trades.
+        # A statement written after the year settled is never downloaded over
+        # here; only a download asked for THAT year replaces it (and keeps it).
         older: List[Tuple[int, List[str]]] = []
-        for year in range(cfg.first_year, tax_year) if cfg.first_year else ():
+        unsettled: Dict[int, List[str]] = {}
+        gap_fill_years = set(range(cfg.first_year, tax_year)) if cfg.first_year else set()
+        # Without first_year no absent file is asked for — how far back IBKR
+        # reaches is unknown. The year that has just closed is the exception:
+        # its statements came from these very queries, so its too-early ones
+        # are replaced. Anything older may be a hand upload IBKR cannot
+        # deliver, and asking for it would fail on every single download.
+        # Years before first_year are the user's own and are left alone.
+        earliest = cfg.first_year or today.year - 1
+        on_disk_years = {
+            ds.year for ds in self.list_years()
+            if earliest <= ds.year < tax_year
+        }
+        for year in sorted(gap_fill_years | on_disk_years):
             missing = [
                 s for s in slots
-                if not (self.data_dir / str(year)
-                        / self._FLEX_SLOT_FILES[s]).is_file()
+                if year in gap_fill_years
+                and not self._flex_statement_path(year, s).is_file()
             ]
-            if missing:
-                older.append((year, missing))
+            too_early = [
+                s for s in slots
+                if year < today.year
+                and self._flex_statement_path(year, s).is_file()
+                and _written_at(self._flex_statement_path(year, s))
+                < _year_settled_at(year)
+            ]
+            wanted = [s for s in slots if s in missing or s in too_early]
+            if wanted:
+                older.append((year, wanted))
+            if too_early:
+                unsettled[year] = too_early
         # Each year's slice of the progress bar is as wide as its own gap
         # list. +1 for the engine run itself, which is the last step. Steps
         # are counted off a per-year base rather than incremented, so a year
@@ -1094,14 +1266,42 @@ class RunService:
         total_steps = running + len(slots) + 1
         done_steps = 0
 
+        def _store(year: int, slot: str, content: bytes) -> None:
+            target = self._flex_statement_path(year, slot)
+            if target.is_file():
+                # A statement is a tax input and whatever replaces it is only
+                # as good as IBKR's answer was, so the old one stays. For the
+                # running year one rolling copy is enough. A closed year's
+                # statement may be the only copy of a hand upload: each one
+                # replaced is kept, under the time it was replaced.
+                suffix = ".bak"
+                if year < today.year:
+                    suffix = f".{datetime.now():%Y%m%d-%H%M%S}.bak"
+                    serial = 1
+                    while target.with_name(target.name + suffix).exists():
+                        serial += 1
+                        suffix = f".{datetime.now():%Y%m%d-%H%M%S}-{serial}.bak"
+                shutil.copy2(target, target.with_name(target.name + suffix))
+            target.write_bytes(content)
+
         def _download(year: int, base: int, year_slots: List[str],
                       delay_first: bool,
                       from_date: Optional[str] = None,
-                      to_date: Optional[str] = None) -> List[str]:
+                      to_date: Optional[str] = None,
+                      whole_or_nothing: bool = False) -> List[str]:
+            """Fetch the slots of one year; returns the slots written.
+
+            ``whole_or_nothing`` holds every statement back until the last
+            one has arrived. It is for a year whose existing statements are
+            being REPLACED: full-year trades beside December's positions
+            would be a dataset that never existed at IBKR, and worse than
+            the consistent older one it is meant to improve on.
+            """
             nonlocal done_steps
             year_dir = self.data_dir / str(year)
             year_dir.mkdir(parents=True, exist_ok=True)
             done: List[str] = []
+            held: List[Tuple[str, bytes]] = []
             for offset, slot in enumerate(year_slots):
                 query_id = cfg.queries[slot]
                 label = f"Stahuji z IBKR — {FLEX_SLOT_LABELS.get(slot, slot)} {year}"
@@ -1118,41 +1318,89 @@ class RunService:
                 content = fetch(cfg.token, query_id,
                                 from_date=from_date, to_date=to_date,
                                 report=lambda detail: say(detail=detail))
-                (year_dir / self._FLEX_SLOT_FILES[slot]).write_bytes(content)
+                if whole_or_nothing:
+                    held.append((slot, content))
+                else:
+                    _store(year, slot, content)
                 done.append(slot)
                 done_steps = base + offset + 1
+            for slot, content in held:
+                _store(year, slot, content)
             return done
 
         extra_notes: List[str] = []
         bootstrapped: List[int] = []
+        refreshed: List[int] = []
         delay_next = False
-        for year, missing in older:
-            try:
-                done = _download(year, year_base[year], missing,
-                                 delay_first=delay_next,
-                                 from_date=f"{year}0101", to_date=f"{year}1231")
-            except FlexFetchError as exc:
-                # A year IBKR cannot deliver must not sink the whole job.
-                logger.warning(f"IBKR Flex: bootstrap of {year} failed: {exc}")
-                extra_notes.append(f"Doplnění roku {year} z IBKR selhalo: {exc}")
-                delay_next = True
-                done_steps = year_base[year] + len(missing)
-                say(step=done_steps, total=total_steps,
-                    detail=f"rok {year} IBKR nedodal — pokračuji dál")
-                continue
-            delay_next = delay_next or bool(done)
-            if done:
-                bootstrapped.append(year)
-                logger.info(
-                    f"IBKR Flex: filled {', '.join(done)} for {year}."
-                )
+        for year, wanted in older:
+            too_early = unsettled.get(year, [])
+            missing = [s for s in wanted if s not in too_early]
+            # The statements being REPLACED go first and as one set; the
+            # merely missing ones follow one by one, as they always did. Each
+            # part fails on its own, so that neither can hold the other back
+            # for ever: not a slot IBKR will not deliver for that year, and
+            # not a refresh it refuses.
+            base = year_base[year]
+            for group, replacing in ((too_early, True), (missing, False)):
+                if not group:
+                    continue
+                try:
+                    done = _download(year, base, group,
+                                     delay_first=delay_next,
+                                     from_date=f"{year}0101",
+                                     to_date=f"{year}1231",
+                                     whole_or_nothing=replacing)
+                except FlexFetchError as exc:
+                    # A year IBKR cannot deliver must not sink the whole job.
+                    logger.warning(
+                        f"IBKR Flex: bootstrap of {year} failed: {exc}")
+                    extra_notes.append(
+                        f"Stažení uzavřeného roku {year} z IBKR selhalo: {exc} "
+                        f"Jeho výpisy jsou z doby, kdy rok ještě běžel, a "
+                        f"mohou být neúplné."
+                        if replacing else
+                        f"Doplnění roku {year} z IBKR selhalo: {exc}"
+                    )
+                    delay_next = True
+                    done_steps = base + len(group)
+                    say(step=done_steps, total=total_steps,
+                        detail=f"rok {year} IBKR nedodal — pokračuji dál")
+                else:
+                    delay_next = delay_next or bool(done)
+                    if done:
+                        (refreshed if replacing else bootstrapped).append(year)
+                        logger.info(
+                            f"IBKR Flex: filled {', '.join(done)} for {year}."
+                        )
+                base += len(group)
         if bootstrapped:
             extra_notes.append(
                 "Chybějící výpisy doplněny z IBKR (fd/td období přes "
                 f"stávající queries): {', '.join(map(str, bootstrapped))}."
             )
+        if refreshed:
+            extra_notes.append(
+                ("Výpisy uzavřeného roku " if len(refreshed) == 1
+                 else "Výpisy uzavřených let ")
+                + ", ".join(map(str, refreshed))
+                + " staženy z IBKR znovu za celé období 1. 1.–31. 12.: "
+                  "dosavadní byly z doby, kdy rok ještě běžel (zůstaly vedle "
+                  "nových s příponou .bak)."
+            )
 
-        fetched = _download(tax_year, running, slots, delay_first=delay_next)
+        # A closed year is asked for by its calendar dates. The queries' saved
+        # Year-to-Date period means the CURRENT year at IBKR, so without the
+        # window a download requested for last year returned this year's rows
+        # and wrote them over last year's statements.
+        year_closed = tax_year < today.year
+        fetched = _download(
+            tax_year, running, slots, delay_first=delay_next,
+            from_date=f"{tax_year}0101" if year_closed else None,
+            to_date=f"{tax_year}1231" if year_closed else None,
+            # A closed year's statements are a set; the running year's are
+            # replaced one by one as before, each fresher than the last.
+            whole_or_nothing=year_closed,
+        )
         if not fetched:
             raise ValueError("Žádná query ID nejsou nastavená.")
         logger.info(f"IBKR Flex: fetched {', '.join(fetched)} for {tax_year}.")
@@ -1165,6 +1413,8 @@ class RunService:
         meta["fetched_slots"] = fetched
         if bootstrapped:
             meta["bootstrapped_years"] = bootstrapped
+        if refreshed:
+            meta["refreshed_years"] = refreshed
         return meta
 
     # ------------------------------------------------------------------
@@ -3563,7 +3813,14 @@ class RunService:
     def get_job(self, job_id: str) -> Optional[JobState]:
         return self.runner.get(job_id)
 
-    def list_runs(self, limit: int = 20) -> List[Dict[str, Any]]:
+    def list_runs(self, limit: Optional[int] = 20) -> List[Dict[str, Any]]:
+        """Persisted runs, newest first. ``limit=None`` returns every run.
+
+        The cap is for LISTS shown to a person. A lookup that filters by year
+        or fingerprint must pass ``None``: the running year is recomputed
+        almost daily, so the newest hundred runs soon all belong to it and a
+        capped lookup stops seeing the closed years at all.
+        """
         metas = []
         if self.runs_dir.is_dir():
             for run_dir in self.runs_dir.iterdir():
@@ -3574,14 +3831,73 @@ class RunService:
                     except Exception:
                         logger.warning(f"Unreadable meta.json in {run_dir}")
         metas.sort(key=lambda m: m.get("created_at", ""), reverse=True)
-        return metas[:limit]
+        return [self._flag_stale_run(m) for m in metas[:limit]]
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         meta_path = self.runs_dir / run_id / "meta.json"
-        return load_json(meta_path) if meta_path.is_file() else None
+        if not meta_path.is_file():
+            return None
+        return self._flag_stale_run(load_json(meta_path))
+
+    def _flag_stale_run(self, meta: Dict[str, Any]) -> Dict[str, Any]:
+        """Mark, as it is read, a stored run whose figures are not current.
+
+        A run stays the newest of its year until someone recomputes it, so
+        the dashboard card, the results pages and the MCP year tools go on
+        serving it. Two things make it stale without touching it, and both
+        are decided on every read and never stored:
+
+        * its year was still open when it was computed
+          (``_flag_run_from_an_open_year``);
+        * it was computed by an older version of the calculation. The
+          fingerprint version is bumped whenever the same statements can
+          give different figures — a corrected rule, corrected rates — and
+          that bump only stops the compute cache from handing the run back.
+          It does not stop anything from showing it.
+        """
+        meta = self._flag_run_from_an_open_year(meta)
+        if meta.get("fingerprint_version") != _FINGERPRINT_VERSION:
+            year = meta.get("tax_year")
+            meta["computed_by_older_version"] = True
+            meta["notes"] = list(meta.get("notes") or []) + [
+                "Tento výpočet vznikl ve starší verzi programu — od té doby se "
+                "změnil výpočet nebo kurzy, ze kterých vychází. Než čísla "
+                f"použijete, rok {year} přepočítejte."
+            ]
+        return meta
+
+    def _flag_run_from_an_open_year(self, meta: Dict[str, Any]) -> Dict[str, Any]:
+        """Mark, as it is read, a closed year's run computed before the year settled.
+
+        Such a run stays the newest of its year until someone recomputes it,
+        so the dashboard card and the MCP year tools serve it all through
+        filing season — and it was written when there was nothing to warn
+        about. Its own age is proof enough: no run made before a year
+        settled can contain the year's last days. Decided on every read and
+        never stored, since it becomes true by the calendar alone.
+        """
+        year, created = meta.get("tax_year"), meta.get("created_at")
+        if not isinstance(year, int) or not created or year >= self._today().year:
+            return meta
+        if meta.get("unsettled_statements_from"):
+            return meta  # already says so, with the statements named
+        try:
+            made = datetime.fromisoformat(created).astimezone().replace(tzinfo=None)
+        except ValueError:
+            return meta
+        if made >= _year_settled_at(year):
+            return meta
+        meta["computed_before_year_settled"] = True
+        meta["notes"] = [
+            f"Tento výpočet je z {made.day}. {made.month}. {made.year} — z doby, "
+            f"kdy rok {year} ještě nebyl uzavřený, takže v něm chybí vše, co "
+            f"přišlo potom. Stáhněte výpisy z IBKR a rok {year} přepočítejte, "
+            f"než podle něj podáte přiznání."
+        ] + list(meta.get("notes") or [])
+        return meta
 
     def latest_run_id(self, tax_year: int) -> Optional[str]:
-        for meta in self.list_runs(limit=100):
+        for meta in self.list_runs(limit=None):
             if meta.get("tax_year") == tax_year:
                 return meta.get("run_id")
         return None
@@ -3595,7 +3911,7 @@ class RunService:
         worth today" view back to that year's 31 Dec snapshot. Grouped by
         account so a second account later is a data change, not a UI rewrite.
         """
-        runs = self.list_runs(limit=100)  # newest first
+        runs = self.list_runs(limit=None)  # newest first; every year's runs
         per_year: Dict[int, Dict[str, Any]] = {}
         accounts: set = set()
         for meta in runs:

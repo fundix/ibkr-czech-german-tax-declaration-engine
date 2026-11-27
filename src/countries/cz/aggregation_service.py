@@ -116,10 +116,17 @@ def run_cz_compare(
     processing_results: "ProcessingOutput",
     tax_year: int,
     statement_of_funds_path: "str | None" = None,
+    daily_fx_provider=None,
 ) -> CzFxModeComparison:
-    """Aggregate under BOTH FX modes and return the comparison."""
+    """Aggregate under BOTH FX modes and return the comparison.
+
+    ``daily_fx_provider`` overrides the daily leg's provider, as
+    ``fx_provider`` does in ``run_cz_aggregation`` — so the caller can ask it
+    afterwards how far its rates could be trusted, and tests can pin them.
+    """
     return CzFxModeComparison(
         daily=run_cz_aggregation(processing_results, tax_year, "daily",
+                                 fx_provider=daily_fx_provider,
                                  statement_of_funds_path=statement_of_funds_path),
         uniform=run_cz_aggregation(processing_results, tax_year, "uniform",
                                    statement_of_funds_path=statement_of_funds_path),

@@ -76,6 +76,21 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
             )
         return run_id
 
+    def _answer(run_id: str, payload: dict) -> dict:
+        """A year tool's answer: the run it was read from, that run's own
+        warnings, then the figures.
+
+        ``run_notes`` are warnings about the RUN rather than about a figure —
+        above all that it was computed while its year was still open, which
+        no result file can know. Every year tool carries them, because each
+        one answers from the same stored run.
+        """
+        return _jsonable({
+            "run_id": run_id,
+            "run_notes": (svc.get_run(run_id) or {}).get("notes") or [],
+            **payload,
+        })
+
     def _default_mode(run_id: str) -> str:
         meta = svc.get_run(run_id) or {}
         modes = meta.get("modes") or ["daily"]
@@ -104,14 +119,14 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
 
     @mcp.tool()
     def refresh_data(fx_mode: str = "compare") -> dict:
-        """Download fresh Year-to-Date statements from IBKR (Flex Web Service) for the CURRENT year and recompute. Requires the token + query IDs configured on the web GUI's Files page. May take a few minutes (IBKR generates the statements server-side)."""
+        """Download fresh Year-to-Date statements from IBKR (Flex Web Service) for the CURRENT year and recompute it. The year that has just closed (with a first IBKR year configured: any year from it on) is downloaded again for its whole calendar year first when its statements were written before 8 January of the following year — they stop short of 31 Dec, or predate IBKR's own year-end bookkeeping. Such a year is listed under refreshed_years but NOT recomputed: call run_pipeline for it before using its figures. Requires the token + query IDs configured on the web GUI's Files page. May take a few minutes (IBKR generates the statements server-side)."""
         from datetime import date as _date
         return _jsonable(svc.fetch_and_run_sync(_date.today().year, fx_mode))
 
     @mcp.tool()
     def get_tax_summary(tax_year: int, fx_mode: str = "daily",
                         run_id: Optional[str] = None) -> dict:
-        """Tax result sections for a year (§8 dividends/interest, §10 securities/options netting, §38f foreign tax credit, final liability). Reads the latest run; pass run_id for an older one."""
+        """Tax result sections for a year (§8 dividends/interest, §10 securities/options netting, §38f foreign tax credit, final liability). Reads the latest run; pass run_id for an older one. run_notes (on every year tool) carries warnings about the run itself — read them before quoting a figure."""
         run_id = _require_run(tax_year, run_id)
         result = svc.load_result(run_id, fx_mode)
         if result is None:
@@ -119,8 +134,7 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
                 f"Run {run_id} has no '{fx_mode}' result. Available modes: "
                 f"{(svc.get_run(run_id) or {}).get('modes')}."
             )
-        return _jsonable({
-            "run_id": run_id,
+        return _answer(run_id, {
             "metadata": result.get("metadata"),
             "sections": result.get("sections"),
             "warnings": result.get("warnings"),
@@ -138,7 +152,7 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
         form = svc.load_form(run_id, fx_mode)
         if form is None:
             raise ValueError(f"Run {run_id} has no '{fx_mode}' form mapping.")
-        return _jsonable({"run_id": run_id, **form})
+        return _answer(run_id, form)
 
     @mcp.tool()
     def get_pending_review_items(tax_year: int, fx_mode: str = "daily",
@@ -153,9 +167,9 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
             for note in sec.get("notes", []):
                 if "REVIEW" in note.upper() or "excluded" in note:
                     notes.append({"section": sec.get("label", key), "note": note})
-        return _jsonable({"run_id": run_id, "pending_items": pending,
-                          "section_notes": notes,
-                          "warnings": result.get("warnings")})
+        return _answer(run_id, {"pending_items": pending,
+                                "section_notes": notes,
+                                "warnings": result.get("warnings")})
 
     @mcp.tool()
     def get_positions(tax_year: int, run_id: Optional[str] = None) -> dict:
@@ -164,7 +178,7 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
         pf = svc.load_portfolio(run_id)
         if pf is None:
             raise ValueError(f"Run {run_id} has no portfolio snapshot.")
-        return _jsonable({"run_id": run_id, **pf})
+        return _answer(run_id, pf)
 
     @mcp.tool()
     def get_options(tax_year: int, run_id: Optional[str] = None,
@@ -174,7 +188,7 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
         overview = svc.options_overview(run_id, with_quotes=with_quotes)
         if overview.get("as_of") is None:
             raise ValueError(f"Run {run_id} has no portfolio snapshot.")
-        return _jsonable({"run_id": run_id, **overview})
+        return _answer(run_id, overview)
 
     @mcp.tool()
     def get_time_test_status(tax_year: int, symbol: Optional[str] = None,
@@ -184,7 +198,7 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
         overview = svc.time_test_overview(run_id, symbol)
         if overview is None:
             raise ValueError(f"Run {run_id} has no portfolio snapshot.")
-        return _jsonable({"run_id": run_id, **overview})
+        return _answer(run_id, overview)
 
     @mcp.tool()
     def get_dividends(tax_year: int, fx_mode: str = "daily",
@@ -194,7 +208,7 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
         summary = svc.dividend_summary(run_id, fx_mode)
         if summary is None:
             raise ValueError(f"Run {run_id} has no '{fx_mode}' result.")
-        return _jsonable({"run_id": run_id, **summary})
+        return _answer(run_id, summary)
 
     @mcp.tool()
     def get_disposals(tax_year: int, symbol: Optional[str] = None,
@@ -215,13 +229,22 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
                 f"Run {run_id} has no '{fx_mode}' result. Available modes: "
                 f"{(svc.get_run(run_id) or {}).get('modes')}."
             )
-        return _jsonable({"run_id": run_id, **summary})
+        return _answer(run_id, summary)
 
     @mcp.tool()
     def compare_runs(run_id_a: str, run_id_b: str,
                      fx_mode: Optional[str] = None) -> dict:
         """Diff two computed runs (run ids from list_datasets): headline tax-liability lines plus per-symbol deltas — realized gain decomposed into proceeds vs cost-basis legs, plus taxable_gain_delta_czk so a pure §4/1/u exemption flip (same gross gain, different time-test outcome) still surfaces. All deltas are b − a. Use for what-ifs: run run_pipeline twice with different pairing_method (fifo vs lifo) or fx_mode (daily vs uniform), then compare. fx_mode defaults to a mode both runs share."""
-        return _jsonable(svc.compare_runs(run_id_a, run_id_b, fx_mode))
+        diff = svc.compare_runs(run_id_a, run_id_b, fx_mode)
+        return _jsonable({
+            # The warnings of each run compared (see _answer): a difference
+            # may simply be that one of them is stale.
+            "run_notes": {
+                run_id: (svc.get_run(run_id) or {}).get("notes") or []
+                for run_id in (run_id_a, run_id_b)
+            },
+            **diff,
+        })
 
     @mcp.tool()
     def simulate_sale(tax_year: int, symbol: str, quantity: float,
@@ -234,6 +257,6 @@ def create_server(service: Optional[RunService] = None) -> FastMCP:
             quantity=Decimal(str(quantity)),
             price=Decimal(str(price)) if price is not None else None,
         )
-        return _jsonable({"run_id": run_id, **sim})
+        return _answer(run_id, sim)
 
     return mcp

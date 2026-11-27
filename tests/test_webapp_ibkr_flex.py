@@ -5,6 +5,7 @@ ReferenceCode → GetStatement with 1019 polling), config handling, and the
 fetch-then-recompute service flow. All offline via injected fetchers.
 """
 import time
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -182,8 +183,12 @@ class TestEffectiveFxMode:
 
 class TestServiceFetchFlow:
     @pytest.fixture
-    def service(self, tmp_path):
+    def service(self, tmp_path, monkeypatch):
         svc = RunService(data_dir=tmp_path / "data", runs_dir=tmp_path / "runs")
+        # Every test here downloads 2026 as the RUNNING year. Pinned, because
+        # a closed year is fetched differently (its whole calendar window)
+        # and the suite must not change meaning on 1 January.
+        monkeypatch.setattr(svc, "_today", lambda: date(2026, 6, 15))
         yield svc
         svc.runner.shutdown(wait=False)
 

@@ -132,6 +132,18 @@ year, downloaded positions act as the current-state snapshot and the tax
 summary is a running estimate. The token is stored only locally
 (`data/webapp/ibkr_flex.json`, gitignored) and expires after max 1 year.
 
+**Year end.** A Year-to-Date download stops at the day before it was made,
+so the statements a year ends with are never its complete ones. The first
+download after New Year therefore fetches the year just closed again, for
+1 Jan – 31 Dec, and repeats that until a week into January, when IBKR has
+booked the last trading day. (With a first IBKR year configured the same
+goes for any year from it on whose statements were written before 8 January
+of the following year.) Every statement it replaces is kept beside the new
+one (`trades.csv.<time>.bak`). Only the current year is recomputed by
+that download: a result of the closed year computed earlier stays as it was
+and carries a warning — on its pages, on its dashboard card and in the MCP
+tools — until you run that year again.
+
 Two optional extras make a **fresh install bootstrap itself entirely via
 the API** (no manual export):
 

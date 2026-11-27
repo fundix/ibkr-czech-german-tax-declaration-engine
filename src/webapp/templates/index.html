@@ -42,6 +42,11 @@
       {% if run.summary.daily and run.summary.daily.pending_review_count %}
       <p><span class="badge warn">{{ run.summary.daily.pending_review_count }} k revizi</span></p>
       {% endif %}
+      {% if run.computed_before_year_settled or run.unsettled_statements_from %}
+      <p><span class="badge warn" title="Výpočet nebo výpisy jsou z doby, kdy rok ještě nebyl uzavřený — stáhněte výpisy znovu a přepočítejte.">neúplný rok — přepočítat</span></p>
+      {% elif run.computed_by_older_version %}
+      <p><span class="badge warn" title="Výpočet vznikl ve starší verzi programu; od té doby se změnil výpočet nebo kurzy. Před použitím čísel rok přepočítejte.">starší verze výpočtu — přepočítat</span></p>
+      {% endif %}
       <p><a href="/results/{{ run.run_id }}">Výsledky →</a></p>
     </div>
     {% endfor %}

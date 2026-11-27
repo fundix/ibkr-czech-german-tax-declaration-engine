@@ -51,6 +51,56 @@ def set_decimal_precision_session_wide():
     # print(f"\nDecimal context set for test session: Precision={getcontext().prec}, Rounding={getcontext().rounding}")
 
 
+@pytest.fixture(autouse=True)
+def no_real_cnb_cache(monkeypatch):
+    """Keep every test off the developer's real ČNB rate cache.
+
+    ``RunService`` builds its default CZK converter on
+    ``cache/cnb_exchange_rates.json`` — real rates, owned by the web app. A
+    test that left the default in place read that file, fetched from ČNB
+    whatever it lacked, and (now that entries written by an older version
+    are re-checked against ČNB on first use) could rewrite it. The default
+    is replaced by the pinned golden rates; a test that injects its own
+    ``converter_factory`` is unaffected.
+    """
+    from pathlib import Path
+
+    from src.countries.cz.config import CzTaxConfig
+    from src.utils.cnb_exchange_rate_provider import CNBExchangeRateProvider
+
+    # A hard stop first, and whatever else can or cannot be imported: any
+    # provider built on that file raises — an aggregation run without an
+    # injected provider builds one there too. Loud, because a silent read is
+    # how the real cache came to hold the synthetic dataset's dates.
+    real_cache = Path(CzTaxConfig().cnb_cache_file_path).resolve()
+    original_init = CNBExchangeRateProvider.__init__
+
+    def guarded_init(self, *args, **kwargs):
+        path = kwargs.get("cache_file_path",
+                          args[0] if args else "cache/cnb_exchange_rates.json")
+        if Path(path).resolve() == real_cache:
+            raise AssertionError(
+                "This test built a ČNB provider on the real rate cache "
+                f"({real_cache}). Pass a provider (fx_provider= / "
+                "cz_fx_provider=) or a converter_factory, or give the "
+                "provider a cache_file_path under tmp_path."
+            )
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(CNBExchangeRateProvider, "__init__", guarded_init)
+
+    # The web service's default converter would trip that guard on every
+    # run; it gets the pinned golden rates instead.
+    try:
+        from src.webapp.services import RunService
+    except ImportError:
+        return
+    from tests.support.golden_fx import golden_cz_converter
+
+    monkeypatch.setattr(RunService, "_cz_converter",
+                        lambda self: golden_cz_converter())
+
+
 @pytest.fixture
 def temp_data_dir():
     """

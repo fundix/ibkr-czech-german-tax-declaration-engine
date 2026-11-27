@@ -27,6 +27,7 @@ from tests.test_webapp_services import (  # noqa: E402
     _seed_synthetic_year,
 )
 
+from datetime import datetime  # noqa: E402
 from decimal import Decimal  # noqa: E402
 
 # Marker stamped into the older LIFO run's payload so run_id tests can prove
@@ -294,3 +295,64 @@ class TestErrors:
                        {"run_id_a": "2024-mcp", "run_id_b": "ghost"})
         assert result.isError
         assert "not found" in result.content[0].text
+
+
+class TestYearToolsPassOnTheRunsWarnings:
+    """The figures an agent files from come out of get_tax_summary and
+    get_form_mapping. A warning that lives only in the run's meta — "this
+    was computed while the year was still open" — has to travel with them.
+    """
+
+    @pytest.fixture
+    def december_server(self, tmp_path):
+        svc = RunService(
+            data_dir=tmp_path / "data", runs_dir=tmp_path / "runs",
+            quote_service=StubQuotes({}), converter_factory=StubConverter,
+        )
+        _seed_synthetic_year(svc)
+        svc._execute_run(
+            "2024-december", 2024, "daily",
+            ecb_provider=GoldenEcbProvider(),
+            cz_fx_provider=GoldenCnbProvider(),
+        )
+        # As if it had been computed on 30 December of its own year.
+        meta_path = tmp_path / "runs" / "2024-december" / "meta.json"
+        meta = json.loads(meta_path.read_text())
+        meta["created_at"] = "2024-12-30T12:00:00+00:00"
+        meta_path.write_text(json.dumps(meta))
+        yield create_server(svc)
+        svc.runner.shutdown(wait=False)
+
+    def test_the_tax_summary_says_the_year_was_still_open(self, december_server):
+        data = _payload(_call(december_server, "get_tax_summary", {"tax_year": 2024}))
+
+        made = datetime.fromisoformat("2024-12-30T12:00:00+00:00").astimezone()
+        assert any(f"{made.day}. {made.month}. {made.year}" in note
+                   and "přepočítejte" in note for note in data["run_notes"])
+
+    def test_the_form_mapping_says_the_year_was_still_open(self, december_server):
+        data = _payload(_call(december_server, "get_form_mapping", {"tax_year": 2024}))
+
+        assert any("přepočítejte" in note for note in data["run_notes"])
+
+    @pytest.mark.parametrize("tool", [
+        "get_pending_review_items", "get_positions", "get_time_test_status",
+        "get_dividends", "get_disposals",
+    ])
+    def test_every_year_tool_says_the_year_was_still_open(self, december_server, tool):
+        data = _payload(_call(december_server, tool, {"tax_year": 2024}))
+
+        assert any("přepočítejte" in note for note in data["run_notes"])
+
+    def test_a_run_with_nothing_to_warn_about_has_no_notes(self, server):
+        data = _payload(_call(server, "get_tax_summary", {"tax_year": 2024}))
+
+        assert data["run_notes"] == []
+
+    def test_comparing_runs_says_it_of_each_run(self, december_server):
+        data = _payload(_call(december_server, "compare_runs",
+                              {"run_id_a": "2024-december",
+                               "run_id_b": "2024-december"}))
+
+        assert any("přepočítejte" in note
+                   for note in data["run_notes"]["2024-december"])
