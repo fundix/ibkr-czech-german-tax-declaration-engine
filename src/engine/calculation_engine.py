@@ -255,6 +255,7 @@ def run_main_calculations(
     security_price_provider: Optional[Any] = None,
     pairing_method: PairingMethod = PairingMethod.FIFO,
     hold_unapplied_shares_as_placeholders: bool = False,
+    pairing_history: Optional[Any] = None,
 ) -> Tuple[List[RealizedGainLoss], List[VorabpauschaleData], List[FinancialEvent], int, Dict[uuid.UUID, FifoLedger], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Runs the main calculation logic:
@@ -399,6 +400,7 @@ def run_main_calculations(
                 fund_type=asset_fund_type,
                 tax_classifier=tax_classifier,
                 pairing_method=ledger_pairing_method,
+                pairing_history=pairing_history,
             )
 
             asset_historical_events_for_soy_init = []

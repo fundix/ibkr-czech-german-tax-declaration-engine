@@ -184,6 +184,14 @@ daň mezi FIFO a LIFO?"*. Tools: `list_datasets`, `run_pipeline`,
 Read tools default to the latest persisted run; pass `run_id` to pin an older
 one (e.g. a run computed with a different pairing method).
 
+**Pairing across years.** The opening lots of a year are rebuilt by replaying
+the earlier years, each with the pairing method it was *filed* with. Mark the
+run you filed with the „Podáno" button on its results page (closed years only);
+an unmarked year counts as FIFO, so a FIFO-only history needs no marking. An
+`optimal` run stores which lots each sale consumed and later years replay
+exactly that; `optimal` is computed in CZK for one FX mode, so pick the daily
+or the uniform rate for it, not „Porovnat oba".
+
 ### Prerequisites
 - Python 3.10+
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/) package manager

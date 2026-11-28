@@ -32,6 +32,25 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 
+def warn_cli_pairing_history(cz_pairing_method: str) -> None:
+    """Say that the CLI replays every earlier year as filed FIFO.
+
+    The opening lots come from replaying the earlier years, each with the
+    method it was filed with; only the web app records that method
+    (filed_years.json). For a FIFO run the assumption changes nothing, for
+    any other it may.
+    """
+    if (cz_pairing_method or "fifo") == "fifo":
+        return
+    logger.warning(
+        "Pairing method '%s': the CLI replays every earlier year as filed FIFO "
+        "when it rebuilds the start-of-year lots. If an earlier year was filed "
+        "with another method, the opening lots may differ from that filing; the "
+        "per-year filed method can only be recorded in the web app (\"Podáno\").",
+        cz_pairing_method,
+    )
+
+
 def main_application():
     """
     Main application entry point.
@@ -44,6 +63,8 @@ def main_application():
 
     from src.engine.pairing import PairingMethod
     cz_pairing_method = getattr(args, "cz_pairing_method", "fifo")
+    if args.country == "cz":
+        warn_cli_pairing_history(cz_pairing_method)
     # For a single chosen method, run the core with it up front; 'compare'
     # re-runs the core per method later via the matrix driver, so start on FIFO.
     _initial_pairing = (
@@ -51,7 +72,8 @@ def main_application():
         else PairingMethod(cz_pairing_method)
     )
 
-    def _run_pipeline_for(method: PairingMethod) -> ProcessingOutput:
+    def _run_pipeline_for(method: PairingMethod,
+                          objective_converter=None) -> ProcessingOutput:
         return run_core_processing_pipeline(
             trades_file_path=args.trades,
             cash_transactions_file_path=args.cash,
@@ -62,10 +84,21 @@ def main_application():
             tax_year_to_process=args.tax_year,
             country_code=args.country,
             pairing_method=method,
+            # optimal minimises the CZK base of one FX mode (see
+            # run_cz_pairing_matrix); None = the EUR gain.
+            pairing_objective_converter=objective_converter,
         )
 
+    _initial_objective = None
+    _cli_fx_mode = getattr(args, "cz_fx_mode", "daily")
+    if (args.country == "cz" and _initial_pairing == PairingMethod.OPTIMAL
+            and _cli_fx_mode in ("daily", "uniform")):
+        from src.countries.cz.aggregation_service import cz_fx_setup
+        _initial_objective = cz_fx_setup(_cli_fx_mode)[2]
+
     try:
-        processing_results: ProcessingOutput = _run_pipeline_for(_initial_pairing)
+        processing_results: ProcessingOutput = _run_pipeline_for(
+            _initial_pairing, _initial_objective)
     except Exception as e:
         logger.critical(f"Core processing pipeline failed: {e}. Exiting.", exc_info=True)
         sys.exit(1)

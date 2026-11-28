@@ -33,6 +33,27 @@ if TYPE_CHECKING:
     from src.pipeline_runner import ProcessingOutput
 
 
+def cz_fx_setup(fx_mode: str, fx_provider=None):
+    """The CZ config, rate provider and CZK converter of one FX mode.
+
+    One place decides them, so the aggregation that files a mode and the
+    optimal pairing that minimises its base (audit W06) cannot use different
+    rates. ``fx_provider`` overrides the mode's default provider.
+    """
+    from src.countries.cz.fx_policy import CzCurrencyConverter
+
+    if fx_mode == "uniform":
+        cfg = CzTaxConfig(fx_policy=uniform_fx_policy())
+        provider = fx_provider or CzUniformRateProvider()
+    else:
+        cfg = CzTaxConfig()
+        provider = fx_provider or create_fx_provider(
+            cfg.fx_policy.source,
+            cache_file_path=cfg.cnb_cache_file_path,
+        )
+    return cfg, provider, CzCurrencyConverter(provider, cfg.fx_policy)
+
+
 def run_cz_aggregation(
     processing_results: "ProcessingOutput",
     tax_year: int,
@@ -49,15 +70,7 @@ def run_cz_aggregation(
     the currency disposals carry a computed FX gain; without it they are
     recorded but not valued, which is all the other statements allow.
     """
-    if fx_mode == "uniform":
-        cfg = CzTaxConfig(fx_policy=uniform_fx_policy())
-        provider = fx_provider or CzUniformRateProvider()
-    else:
-        cfg = CzTaxConfig()
-        provider = fx_provider or create_fx_provider(
-            cfg.fx_policy.source,
-            cache_file_path=cfg.cnb_cache_file_path,
-        )
+    cfg, provider, _converter = cz_fx_setup(fx_mode, fx_provider)
     plugin = get_tax_plugin("cz", config=cfg, fx_provider=provider)
     result = plugin.get_tax_aggregator().aggregate(
         realized_gains_losses=processing_results.realized_gains_losses,
@@ -226,25 +239,37 @@ def run_cz_compare(
 
 
 def run_cz_pairing_matrix(
-    run_pipeline_for_method: Callable[[PairingMethod], "ProcessingOutput"],
+    run_pipeline_for_method: Callable[..., "ProcessingOutput"],
     tax_year: int,
     fx_modes: Sequence[str] = ("daily", "uniform"),
     pairing_methods: Sequence[PairingMethod] = ALL_METHODS,
+    fx_providers: Optional[Dict[str, Any]] = None,
 ) -> CzPairingComparison:
     """Score the full FX-mode × pairing-method grid and return the comparison.
 
-    ``run_pipeline_for_method`` re-runs the CORE pipeline for one pairing
-    method (the method changes the RealizedGainLoss set, unlike the FX mode
-    which only affects downstream aggregation). Each resulting output is then
-    aggregated under every requested FX mode. Every cell is a real aggregation
-    run, so the reported figures are exact and the cheapest cell is a safe
-    recommendation.
+    ``run_pipeline_for_method(method, objective_converter=None)`` re-runs the
+    CORE pipeline for one pairing method (the method changes the
+    RealizedGainLoss set, unlike the FX mode which only affects downstream
+    aggregation). Each resulting output is then aggregated under every
+    requested FX mode -- except ``optimal``, whose pairing minimises the CZK
+    base of one FX mode: it is run once per mode, with that mode's converter
+    (audit W06). Every cell is a real aggregation run, so the reported
+    figures are exact. ``fx_providers`` overrides a mode's rate provider.
     """
+    fx_providers = fx_providers or {}
     grid: dict = {}
     for method in pairing_methods:
+        if method == PairingMethod.OPTIMAL:
+            for fx in fx_modes:
+                _cfg, provider, converter = cz_fx_setup(fx, fx_providers.get(fx))
+                processing = run_pipeline_for_method(method, objective_converter=converter)
+                grid[(fx, method.value)] = run_cz_aggregation(
+                    processing, tax_year, fx, fx_provider=provider)
+            continue
         processing = run_pipeline_for_method(method)
         for fx in fx_modes:
-            grid[(fx, method.value)] = run_cz_aggregation(processing, tax_year, fx)
+            grid[(fx, method.value)] = run_cz_aggregation(
+                processing, tax_year, fx, fx_provider=fx_providers.get(fx))
     return CzPairingComparison(
         grid=grid,
         fx_modes=list(fx_modes),

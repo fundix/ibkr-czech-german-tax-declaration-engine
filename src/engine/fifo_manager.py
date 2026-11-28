@@ -1,5 +1,5 @@
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace as dc_replace
 from decimal import Decimal, Context, ROUND_DOWN, getcontext as get_global_context
 from typing import Any, List, Optional, Tuple
 import uuid
@@ -18,7 +18,7 @@ from src.utils.exchange_rate_provider import ECBExchangeRateProvider
 from src.utils.type_utils import parse_ibkr_date, safe_decimal, numeric_tx_sort_key
 from src.utils.tax_utils import get_teilfreistellung_rate_for_fund_type
 from src.engine.pairing import (
-    PairingMethod, coerce as coerce_pairing_method,
+    PairingHistory, PairingMethod, coerce as coerce_pairing_method,
     consumption_order_indices, uses_pool_average_cost,
 )
 import src.config as global_config
@@ -87,6 +87,66 @@ def _long_lot_sort_key(lot: "FifoLot"):
         parse_ibkr_date(lot.holding_period_start) or datetime.min.date(),
         numeric_tx_sort_key(lot.source_transaction_id),
     )
+
+
+def plan_key(lot: "FifoLot") -> str:
+    """How a filed pairing plan names a lot.
+
+    The IBKR TransactionID of its purchase -- except for a lot carried in by
+    a merger, which carries the merger's id like every other lot of that
+    merger; its ``carried_from`` (old asset + the original purchase) tells
+    it apart. Used where a plan is written and where it is replayed, so the
+    two cannot name lots differently.
+    """
+    return str(lot.carried_from or lot.source_transaction_id)
+
+
+def _lot_cost_date(lot: "FifoLot") -> str:
+    """The day a lot's cost was paid: where its holding began."""
+    return lot.holding_period_start or lot.acquisition_date
+
+
+def _components_of(lot: "FifoLot") -> List[Tuple[str, Decimal]]:
+    """A lot's dated cost components; one component on its cost date if none."""
+    if lot.cost_components is not None:
+        return list(lot.cost_components)
+    return [(_lot_cost_date(lot), lot.total_cost_basis_eur)]
+
+
+def _merge_components(parts) -> List[Tuple[str, Decimal]]:
+    """Add components of the same date together, ordered by date."""
+    merged: dict = {}
+    for day, amount in parts:
+        merged[day] = merged.get(day, Decimal(0)) + amount
+    return sorted(merged.items())
+
+
+def _scale_components(components: List[Tuple[str, Decimal]], target: Decimal,
+                      ctx: Context) -> List[Tuple[str, Decimal]]:
+    """*components* rescaled so they add up EXACTLY to *target*.
+
+    Proportional to their amounts; the last component takes the remainder,
+    so rounding never leaves the parts disagreeing with the whole.
+    """
+    if not components:
+        return []
+    # Every part but the last is put on a grid no finer than the target's
+    # own last digit, so the parts, their running sum and the remainder all
+    # fit the working precision without rounding: the last part is then the
+    # exact remainder and the parts add up to the target to the last digit.
+    wide = Context(prec=2 * ctx.prec + 10)
+    grid = Decimal(1).scaleb(min(target.as_tuple().exponent, -12))
+    base = sum((amount for _d, amount in components), Decimal(0))
+    scaled: List[Tuple[str, Decimal]] = []
+    running = Decimal(0)
+    for day, amount in components[:-1]:
+        part = (wide.divide(wide.multiply(amount, target), base)
+                if base != Decimal(0) else Decimal(0))
+        part = part.quantize(grid, context=wide)
+        scaled.append((day, part))
+        running = wide.add(running, part)
+    scaled.append((components[-1][0], wide.subtract(target, running)))
+    return scaled
 
 
 def _allocate_rescaled_quantities(
@@ -303,6 +363,26 @@ class FifoLot:
     total_cost_original: Optional[Decimal] = None
     cost_currency: Optional[str] = None
 
+    # When the money behind total_cost_basis_eur was paid: ((YYYY-MM-DD, EUR),
+    # ...) adding up exactly to the total. None means all of it was paid on
+    # the lot's cost date (holding_period_start, else acquisition_date) --
+    # every bought lot. A weighted-average sale re-prices the surviving lots to
+    # a blend of purchases made on different days; a country that converts
+    # the cost leg at the rate of the day it was paid (CZ §10) needs to know
+    # which money is whose, or it converts the whole average at one lot's
+    # rate (audit W08).
+    cost_components: Optional[List[Tuple[str, Decimal]]] = None
+
+    # Bookkeeping of the ledger that holds the lot, not part of its value:
+    # lot_id names the lot within its ledger (it survives partial sales, so
+    # a consumed part can be traced back to the lot), sequence is the
+    # ledger's operation counter when the lot was booked -- the order of
+    # trades within one day, which a date cannot give (audit W07). Both are
+    # 0 for a lot no tax-year bookkeeping has stamped (start-of-year lots
+    # carry sequence 0 and their own ids).
+    lot_id: int = field(default=0, compare=False, repr=False)
+    sequence: int = field(default=0, compare=False, repr=False)
+
     @property
     def unit_cost_original(self) -> Optional[Decimal]:
         """Per-unit original cost, or None when the total is unknown."""
@@ -423,6 +503,29 @@ class ShortFifoLot:
             )
 
 @dataclass
+class TaxYearSale:
+    """A long sale of the tax year as the ledger booked it (journal entry)."""
+    event_id: Any
+    ibkr_transaction_id: Optional[str]
+    sequence: int
+    sale_date: str
+    quantity: Decimal
+    unit_proceeds_eur: Decimal
+
+
+@dataclass
+class ConsumedPortion:
+    """Exactly the part of a lot one tax-year sale consumed (journal entry).
+
+    ``lot`` is a snapshot of the lot holding the consumed quantity only, with
+    the lot's own id, sequence, dates and flags and its cost scaled to that
+    quantity -- its OWN cost, not a weighted average.
+    """
+    sale_sequence: int
+    lot: "FifoLot"
+
+
+@dataclass
 class ConsumedLotDetail:
     consumed_quantity: Decimal
     value_per_unit_eur: Decimal # Cost basis per unit for long, proceeds per unit for short
@@ -441,7 +544,8 @@ class FifoLedger:
                  decimal_rounding_mode: str,
                  fund_type: Optional[InvestmentFundType] = None,
                  tax_classifier: _TaxClassifierCallable = None,
-                 pairing_method: PairingMethod = PairingMethod.FIFO):
+                 pairing_method: PairingMethod = PairingMethod.FIFO,
+                 pairing_history: Optional[PairingHistory] = None):
         self.asset_internal_id: uuid.UUID = asset_internal_id
         self.asset_category: AssetCategory = asset_category
         self.fund_type: Optional[InvestmentFundType] = fund_type
@@ -450,6 +554,30 @@ class FifoLedger:
         # cost basis / time-test outcome. OPTIMAL behaves as FIFO here (the
         # global solver produces its RGLs separately).
         self.pairing_method: PairingMethod = coerce_pairing_method(pairing_method)
+        # How each earlier year was filed, for the start-of-year replay. None
+        # means every earlier year was filed FIFO. Option contracts are always
+        # matched FIFO, whatever a year was filed with, so their ledger never
+        # reads a history.
+        self.pairing_history: Optional[PairingHistory] = (
+            None if asset_category == AssetCategory.OPTION else pairing_history
+        )
+        # Set while replaying history when a disposal of an earlier year was
+        # matched by anything other than FIFO. The broker's lot snapshot and
+        # every other fallback follow the broker's own FIFO matching, so after
+        # such a year a fallback cannot be trusted to name the right lots.
+        self._replayed_non_fifo_disposal: bool = False
+        # True when the start-of-year lots came from a fallback after a
+        # non-FIFO year: their dates and costs are flagged for review.
+        self.soy_lots_unverified: bool = False
+        # Tax-year bookkeeping (audit W05/W07). Every lot booked and every
+        # long sale gets the next value of one operation counter, so the
+        # order of the day survives; the journals record each tax-year sale
+        # and exactly which part of which lot it consumed, so a country layer
+        # can re-match the sales and rebuild the open lots from its answer.
+        self._operation_counter: int = 0
+        self._last_lot_id: int = 0
+        self.tax_year_sales: List[TaxYearSale] = []
+        self.consumed_portions: List[ConsumedPortion] = []
         # Trades excluded from FIFO because enrichment left their EUR value
         # None (missing FX rate). Each exclusion silently removes a taxable
         # trade from the results — the engine surfaces the total at the end.
@@ -498,6 +626,11 @@ class FifoLedger:
         self.lots.clear()
         self.short_lots.clear()
         historical_simulation_inconsistent = False
+        self._replayed_non_fifo_disposal = False
+        self.soy_lots_unverified = False
+        # Whether the opening lots came from somewhere other than a clean
+        # replay (a fallback, or a replay trimmed to the broker's quantity).
+        soy_lots_from_fallback = False
 
         logger.info(f"Asset {asset.get_classification_key()} (ID: {asset.internal_asset_id}): Initializing SOY. "
                     f"Processing {len(all_historical_events_for_asset)} historical events for simulation.")
@@ -521,15 +654,26 @@ class FifoLedger:
                         sum((lot.quantity for lot in self.lots), Decimal(0)),
                         sum((lot.quantity_shorted for lot in self.short_lots), Decimal(0)),
                     )
+                    # Each earlier year is replayed with the method it was
+                    # FILED with, not with this run's method (V04).
+                    year_method = self._filed_method_for(event_date_obj.year)
                     for sub_event in sub_events:
                         if sub_event.event_type == FinancialEventType.TRADE_BUY_LONG:
                             self.add_long_lot(sub_event)
                         elif sub_event.event_type == FinancialEventType.TRADE_SELL_LONG:
-                            self.consume_long_lots_for_sale(sub_event, is_historical_simulation=True)
+                            plan = None
+                            if year_method == PairingMethod.OPTIMAL and self.pairing_history is not None:
+                                plan = self.pairing_history.plan_for(
+                                    event_date_obj.year, sub_event.ibkr_transaction_id)
+                            self.consume_long_lots_for_sale(
+                                sub_event, is_historical_simulation=True,
+                                method=year_method, plan=plan)
                         elif sub_event.event_type == FinancialEventType.TRADE_SELL_SHORT_OPEN:
                             self.add_short_lot(sub_event)
                         elif sub_event.event_type == FinancialEventType.TRADE_BUY_SHORT_COVER:
-                            self.consume_short_lots_for_cover(sub_event, is_historical_simulation=True)
+                            self.consume_short_lots_for_cover(
+                                sub_event, is_historical_simulation=True,
+                                method=year_method)
                 elif isinstance(hist_event, CorpActionSplitForward):
                     self.adjust_lots_for_split(hist_event)
                 elif isinstance(hist_event, CorpActionStockDividend):
@@ -584,6 +728,7 @@ class FifoLedger:
 
         if reported_soy_qty == Decimal(0):
             logger.info(f"Asset {asset.get_classification_key()}: Reported SOY quantity is 0. Initializing with no lots.")
+            self._reset_bookkeeping()
             return
 
         use_fallback = historical_simulation_inconsistent
@@ -608,6 +753,7 @@ class FifoLedger:
                             "Keeping the NEWEST lots per FIFO; review acquisition dates/costs."
                         )
                         lots_source = list(reversed(reconstructed_long_lots_snapshot))
+                        soy_lots_from_fallback = True
                     for lot in lots_source:
                         if qty_to_assign <= Decimal(0): break
                         qty_from_this_lot = min(lot.quantity, qty_to_assign)
@@ -632,6 +778,9 @@ class FifoLedger:
                                            if lot.total_cost_original is not None
                                            else None),
                         )
+                        if lot.cost_components is not None:
+                            final_lot.cost_components = _scale_components(
+                                lot.cost_components, final_lot.total_cost_basis_eur, self.ctx)
                         self.lots.append(final_lot)
                         qty_to_assign -= qty_from_this_lot
                     if qty_to_assign.copy_abs() > Decimal('1e-8'):
@@ -657,6 +806,7 @@ class FifoLedger:
                             "Keeping the NEWEST short lots per FIFO; review opening dates/proceeds."
                         )
                         short_lots_source = list(reversed(reconstructed_short_lots_snapshot))
+                        soy_lots_from_fallback = True
                     for lot in short_lots_source:
                         if qty_to_assign <= Decimal(0): break
                         qty_from_this_lot = min(lot.quantity_shorted, qty_to_assign)
@@ -678,6 +828,7 @@ class FifoLedger:
 
 
         if use_fallback:
+            soy_lots_from_fallback = True
             self.lots.clear()
             self.short_lots.clear()
             # Reconstruction from trade history alone was insufficient. Prefer
@@ -696,6 +847,24 @@ class FifoLedger:
                 if not self._create_lots_from_soy_snapshot(asset, reported_soy_qty.copy_abs(), tax_year, long_side=False):
                     self._create_fallback_short_lot(asset, reported_soy_qty.copy_abs(), tax_year)
 
+        if soy_lots_from_fallback and self._replayed_non_fifo_disposal:
+            # The fallbacks follow the broker's own matching, which is FIFO; an
+            # earlier year filed another way may have left different lots. The
+            # quantity is right, which lots they are is not established.
+            for lot in self.lots:
+                lot.acquisition_date_estimated = True
+                lot.holding_period_start_estimated = True
+            for short_lot in self.short_lots:
+                short_lot.opening_date_estimated = True
+            if self.lots or self.short_lots:
+                self.soy_lots_unverified = True
+                logger.warning(
+                    f"Asset {asset.get_classification_key()}: an earlier year was filed "
+                    "with a non-FIFO pairing method, and the start-of-year lots come from "
+                    "a fallback that follows the broker's FIFO matching. Their dates and "
+                    "costs are marked for review."
+                )
+
         if self.lots:
             self.lots.sort(key=_long_lot_sort_key)
             if any((parse_ibkr_date(lot.acquisition_date) is None) for lot in self.lots):
@@ -704,6 +873,20 @@ class FifoLedger:
             self.short_lots.sort(key=lambda lot: (parse_ibkr_date(lot.opening_date) or datetime.min.date(), numeric_tx_sort_key(lot.source_transaction_id)))
             if any((parse_ibkr_date(lot.opening_date) is None) for lot in self.short_lots):
                  raise ValueError(f"Unparseable opening date found in final SOY short lots for asset {self.asset_internal_id}.")
+        self._reset_bookkeeping()
+
+    def _reset_bookkeeping(self) -> None:
+        """Start the tax year's bookkeeping: the opening lots get their own
+        ids and sequence 0 (held before anything the year books), the
+        journals start empty."""
+        self._operation_counter = 0
+        self._last_lot_id = 0
+        for lot in self.lots:
+            self._last_lot_id += 1
+            lot.lot_id = self._last_lot_id
+            lot.sequence = 0
+        self.tax_year_sales = []
+        self.consumed_portions = []
 
     def _create_lots_from_soy_snapshot(
         self,
@@ -966,6 +1149,8 @@ class FifoLedger:
         for lot in [*long_lots, *short_lots]:
             if not lot.carried_from:
                 lot.carried_from = f"{carried_from_prefix}:{lot.source_transaction_id}"
+        for lot in long_lots:
+            self._stamp(lot)  # ids belong to the ledger that holds the lot
         self.lots.extend(long_lots)
         self.lots.sort(key=_long_lot_sort_key)
         self.short_lots.extend(short_lots)
@@ -1034,6 +1219,9 @@ class FifoLedger:
                     # how many shares the same money bought, not the money.
                     total_cost_original=lot.total_cost_original,
                     cost_currency=lot.cost_currency,
+                    # The same money, paid on the same days.
+                    cost_components=(list(lot.cost_components)
+                                     if lot.cost_components is not None else None),
                     source_transaction_id=source_transaction_id,
                     holding_period_start=lot.holding_period_start,
                     holding_period_start_estimated=lot.holding_period_start_estimated,
@@ -1066,6 +1254,8 @@ class FifoLedger:
                 ))
 
         # COMMIT — cannot fail.
+        for lot in prepared_long:
+            self._stamp(lot)
         self.lots.extend(prepared_long)
         self.lots.sort(key=_long_lot_sort_key)
         self.short_lots.extend(prepared_short)
@@ -1146,6 +1336,8 @@ class FifoLedger:
                     if self.asset_category == AssetCategory.INVESTMENT_FUND else None
                 ),
             )
+            if lot.cost_components is not None:
+                rgl.cost_basis_components_eur = list(lot.cost_components)
             if self._tax_classifier is not None:
                 self._tax_classifier(rgl)
             realized.append(rgl)
@@ -1175,7 +1367,7 @@ class FifoLedger:
         for index, qty in enumerate(quantities):
             if qty <= Decimal(0):
                 continue
-            self.lots.append(FifoLot(
+            self.lots.append(self._stamp(FifoLot(
                 acquisition_date=merger_date,
                 quantity=qty,
                 unit_cost_basis_eur=unit_value_eur,
@@ -1184,7 +1376,7 @@ class FifoLedger:
                 # holding_period_start defaults to the acquisition date: a
                 # taxable exchange starts a new holding.
                 carried_from=f"{carried_from_prefix}:taxable-merger[{index}]",
-            ))
+            )))
         self.lots.sort(key=_long_lot_sort_key)
         return sum((q for q in quantities if q > Decimal(0)), Decimal(0))
 
@@ -1206,7 +1398,7 @@ class FifoLedger:
         of the shares would find nothing to consume and end the run.
         """
         zero = self.ctx.create_decimal(0)
-        self.lots.append(FifoLot(
+        self.lots.append(self._stamp(FifoLot(
             acquisition_date=acquisition_date,
             quantity=quantity.quantize(global_config.PRECISION_QUANTITY, context=self.ctx),
             unit_cost_basis_eur=zero,
@@ -1214,8 +1406,36 @@ class FifoLedger:
             source_transaction_id=source_transaction_id,
             acquisition_date_estimated=True,
             holding_period_start_estimated=True,
-        ))
+        )))
         self.lots.sort(key=_long_lot_sort_key)
+
+    def _next_sequence(self) -> int:
+        self._operation_counter += 1
+        return self._operation_counter
+
+    def _stamp(self, lot: "FifoLot") -> "FifoLot":
+        """Give a newly booked long lot its id and its place in the day."""
+        self._last_lot_id += 1
+        lot.lot_id = self._last_lot_id
+        lot.sequence = self._next_sequence()
+        return lot
+
+    def replace_open_long_lots(
+        self,
+        lots: List["FifoLot"],
+        consumed_portions: Optional[List["ConsumedPortion"]] = None,
+    ) -> None:
+        """Install *lots* as the open long lots (after a re-matching of the
+        year's sales decided which of them are left).
+
+        *consumed_portions* is what that re-matching consumed. The journal is
+        replaced with it, so the open lots and the journal keep adding up to
+        the year's supply; left as FIFO wrote it, a second re-matching would
+        count the lots FIFO sold on top of the ones still open.
+        """
+        self.lots = sorted(lots, key=_long_lot_sort_key)
+        if consumed_portions is not None:
+            self.consumed_portions = list(consumed_portions)
 
     def add_long_lot(self, trade_event: TradeEvent):
         if trade_event.event_type != FinancialEventType.TRADE_BUY_LONG: return
@@ -1250,7 +1470,7 @@ class FifoLedger:
             total_cost_original=original_total,
             cost_currency=original_currency,
         )
-        self.lots.append(new_lot)
+        self.lots.append(self._stamp(new_lot))
         self.lots.sort(key=_long_lot_sort_key)
         if any((parse_ibkr_date(lot.acquisition_date) is None) for lot in self.lots):
              raise ValueError(f"Unparseable acquisition date found in FIFO lots for asset {self.asset_internal_id} after adding lot.")
@@ -1288,7 +1508,74 @@ class FifoLedger:
              raise ValueError(f"Unparseable opening date found in Short FIFO lots for asset {self.asset_internal_id} after adding lot.")
 
 
-    def consume_long_lots_for_sale(self, sale_event: TradeEvent, is_historical_simulation: bool = False) -> List[RealizedGainLoss]:
+    def _portion_of(self, lot: "FifoLot", quantity: Decimal) -> "FifoLot":
+        """A copy of *lot* holding *quantity* of it, at the lot's own cost."""
+        if quantity == lot.quantity:
+            return dc_replace(lot)
+        total = self.ctx.multiply(quantity, lot.unit_cost_basis_eur)
+        original = lot.rescaled_original(quantity)
+        return dc_replace(
+            lot, quantity=quantity, total_cost_basis_eur=total,
+            total_cost_original=original,
+            cost_currency=lot.cost_currency if original is not None else None,
+            cost_components=(_scale_components(lot.cost_components, total, self.ctx)
+                             if lot.cost_components is not None else None),
+        )
+
+    def _filed_method_for(self, year: int) -> PairingMethod:
+        """The method an earlier *year* was filed with (FIFO when unknown)."""
+        if self.pairing_history is None:
+            return PairingMethod.FIFO
+        return self.pairing_history.method_for(year)
+
+    def _plan_picks(self, plan, quantity_to_realize: Decimal, sale_event: TradeEvent) -> List[Tuple[int, Decimal]]:
+        """Turn a filed plan entry into (lot index, quantity) picks.
+
+        Raises UserWarning when the entry cannot be applied as filed -- a lot
+        it names is not held, holds too little, or the entry does not add up
+        to the sale -- so the replay is marked inconsistent instead of
+        consuming something the filing did not.
+        """
+        label = sale_event.ibkr_transaction_id or sale_event.event_id
+        total = sum((Decimal(q) for _lot, q in plan), Decimal(0))
+        if (total - quantity_to_realize).copy_abs() > Decimal("1e-10"):
+            raise UserWarning(
+                f"Filed pairing plan for sale {label} covers {total}, the sale is "
+                f"{quantity_to_realize}.")
+        taken: dict = {}
+        for lot_id, qty in plan:
+            need = Decimal(qty)
+            matching = [index for index, lot in enumerate(self.lots)
+                        if plan_key(lot) == str(lot_id)]
+            if len(matching) > 1:
+                # Several lots answer to the name: picking one would be a
+                # guess, and a wrong guess claims one cost twice.
+                raise UserWarning(
+                    f"Filed pairing plan for sale {label} names lot {lot_id}, which is "
+                    f"ambiguous: {len(matching)} replayed lots carry that key.")
+            for index in matching:
+                lot = self.lots[index]
+                free = lot.quantity - taken.get(index, Decimal(0))
+                if free <= Decimal(0):
+                    continue
+                take = min(free, need)
+                taken[index] = taken.get(index, Decimal(0)) + take
+                need -= take
+            if need > Decimal("1e-10"):
+                raise UserWarning(
+                    f"Filed pairing plan for sale {label} names lot {lot_id} for "
+                    f"{qty}, which the replayed ledger does not hold.")
+        return sorted(taken.items())
+
+    def consume_long_lots_for_sale(self, sale_event: TradeEvent, is_historical_simulation: bool = False,
+                                   *, method: Optional[PairingMethod] = None,
+                                   plan=None) -> List[RealizedGainLoss]:
+        """Realise a long sale against the open lots.
+
+        *method* overrides the ledger's own method (the start-of-year replay
+        passes the method each earlier year was filed with). *plan*, for an
+        ``optimal`` year, names exactly which lots the filed sale consumed.
+        """
         if sale_event.event_type != FinancialEventType.TRADE_SELL_LONG: return []
         if sale_event.quantity is None or sale_event.quantity >= Decimal(0): return []
         if sale_event.net_proceeds_or_cost_basis_eur is None:
@@ -1319,12 +1606,36 @@ class FifoLedger:
         # lot identity (dates → time test) stays FIFO. Surviving lots are then
         # re-priced to the average so the next average stays consistent (moving
         # average). FIFO/LIFO leave the per-lot cost untouched.
+        active_method = (coerce_pairing_method(method) if method is not None
+                         else self.pairing_method)
+        # A filed plan applies only to an optimal year; without an entry the
+        # sale stayed on FIFO in the filed run (OPTIMAL orders as FIFO here).
+        # Flagged before the plan is read: a plan that cannot be applied is
+        # just as much a non-FIFO year.
+        if is_historical_simulation and (
+                active_method in (PairingMethod.LIFO, PairingMethod.WEIGHTED_AVERAGE)
+                or (active_method == PairingMethod.OPTIMAL and plan is not None)):
+            self._replayed_non_fifo_disposal = True
+        picks: List[Tuple[int, Optional[Decimal]]]
+        if plan is not None and active_method == PairingMethod.OPTIMAL:
+            picks = list(self._plan_picks(plan, quantity_to_realize, sale_event))
+        else:
+            picks = [(i, None) for i in consumption_order_indices(len(self.lots), active_method)]
+
         pool_avg_unit_cost: Optional[Decimal] = None
-        if uses_pool_average_cost(self.pairing_method) and self.lots:
+        if uses_pool_average_cost(active_method) and self.lots:
             _pool_qty = sum((l.quantity for l in self.lots), Decimal(0))
             _pool_cost = sum((l.total_cost_basis_eur for l in self.lots), Decimal(0))
             if _pool_qty > Decimal(0):
                 pool_avg_unit_cost = self.ctx.divide(_pool_cost, _pool_qty)
+        # The average blends money paid on different days. Each disposed
+        # unit -- and each surviving one -- gets the pool's dated components
+        # in proportion, so a country converting the cost at the rate of the
+        # day it was paid converts the average correctly (audit W08).
+        pool_components: Optional[List[Tuple[str, Decimal]]] = None
+        if pool_avg_unit_cost is not None:
+            pool_components = _merge_components(
+                part for l in self.lots for part in _components_of(l))
 
         realization_type_for_rgl: RealizationType
         if self.asset_category == AssetCategory.OPTION:
@@ -1332,23 +1643,42 @@ class FifoLedger:
         else:
             realization_type_for_rgl = RealizationType.LONG_POSITION_SALE # Renamed
 
-        for i in consumption_order_indices(len(self.lots), self.pairing_method):
+        # Tax-year sales are journaled: their place in the day, and exactly
+        # which part of which lot each consumed (audit W05/W07).
+        journal = not is_historical_simulation
+        sale_sequence = self._next_sequence() if journal else 0
+
+        for i, cap in picks:
             if quantity_remaining_to_realize <= Decimal(0): break
             current_lot = self.lots[i]
+            lot_before = dc_replace(current_lot) if journal else None
             effective_unit_cost = pool_avg_unit_cost if pool_avg_unit_cost is not None else current_lot.unit_cost_basis_eur
+            # Without a cap (every method but a filed plan) the lot gives as
+            # much as the sale still needs, exactly as before.
+            wanted = (quantity_remaining_to_realize if cap is None
+                      else min(cap, quantity_remaining_to_realize))
             quantity_from_this_lot: Decimal
-            if current_lot.quantity <= quantity_remaining_to_realize:
+            lot_components = current_lot.cost_components
+            if current_lot.quantity <= wanted:
                 quantity_from_this_lot = current_lot.quantity
                 lots_to_remove_indices.append(i)
             else:
-                quantity_from_this_lot = quantity_remaining_to_realize
+                quantity_from_this_lot = wanted
                 remaining_qty = self.ctx.subtract(current_lot.quantity, quantity_from_this_lot)
                 # Rescale the display-only original before the quantity moves.
                 current_lot.total_cost_original = current_lot.rescaled_original(remaining_qty)
                 current_lot.quantity = remaining_qty
                 current_lot.total_cost_basis_eur = self.ctx.multiply(current_lot.quantity, current_lot.unit_cost_basis_eur) # Renamed
+                if lot_components is not None:
+                    current_lot.cost_components = _scale_components(
+                        lot_components, current_lot.total_cost_basis_eur, self.ctx)
 
             quantity_remaining_to_realize = self.ctx.subtract(quantity_remaining_to_realize, quantity_from_this_lot)
+            if journal:
+                self.consumed_portions.append(ConsumedPortion(
+                    sale_sequence=sale_sequence,
+                    lot=self._portion_of(lot_before, quantity_from_this_lot),
+                ))
 
             if not is_historical_simulation:
                 cost_basis_for_portion = self.ctx.multiply(quantity_from_this_lot, effective_unit_cost)
@@ -1381,16 +1711,35 @@ class FifoLedger:
                     holding_period_start_estimated=current_lot.holding_period_start_estimated,
                     is_acquisition_estimated=current_lot.acquisition_date_estimated,
                 )
+                # Only where the cost is not simply the lot's own, paid on its
+                # cost date: a plain FIFO/LIFO disposal stays as it was.
+                source_components = (pool_components if pool_components is not None
+                                     else lot_components)
+                if source_components is not None:
+                    rgl.cost_basis_components_eur = _scale_components(
+                        source_components, cost_basis_for_portion, self.ctx)
                 if self._tax_classifier is not None:
                     self._tax_classifier(rgl)
                 realized_gains_losses.append(rgl)
 
         for i in sorted(lots_to_remove_indices, reverse=True): del self.lots[i]
 
+        if journal:
+            self.tax_year_sales.append(TaxYearSale(
+                event_id=sale_event.event_id,
+                ibkr_transaction_id=sale_event.ibkr_transaction_id,
+                sequence=sale_sequence,
+                sale_date=sale_event.event_date,
+                quantity=self.ctx.subtract(quantity_to_realize, quantity_remaining_to_realize),
+                unit_proceeds_eur=sale_proceeds_eur_per_unit_for_event,
+            ))
+
         if pool_avg_unit_cost is not None:
             for lot in self.lots:
                 lot.unit_cost_basis_eur = pool_avg_unit_cost
                 lot.total_cost_basis_eur = self.ctx.multiply(lot.quantity, pool_avg_unit_cost)
+                lot.cost_components = _scale_components(
+                    pool_components, lot.total_cost_basis_eur, self.ctx)
                 # Re-priced to a blended pool average: no single original
                 # purchase corresponds to it any more, and rescaling the old
                 # figure would invent an exchange rate. Drop it and let the
@@ -1433,7 +1782,8 @@ class FifoLedger:
                 raise ValueError(msg)
         return realized_gains_losses
 
-    def consume_short_lots_for_cover(self, cover_event: TradeEvent, is_historical_simulation: bool = False) -> List[RealizedGainLoss]:
+    def consume_short_lots_for_cover(self, cover_event: TradeEvent, is_historical_simulation: bool = False,
+                                     *, method: Optional[PairingMethod] = None) -> List[RealizedGainLoss]:
         if cover_event.event_type != FinancialEventType.TRADE_BUY_SHORT_COVER: return []
         if cover_event.quantity is None or cover_event.quantity <= Decimal(0): return []
         if cover_event.net_proceeds_or_cost_basis_eur is None:
@@ -1457,16 +1807,16 @@ class FifoLedger:
         short_lots_to_remove_indices: List[int] = []
         current_available_qty_in_short_lots = sum(sl.quantity_shorted for sl in self.short_lots)
 
-        # Weighted-average pairing (short side): the opening proceeds of every
-        # covered unit are blended to the pool average; deemed-covered lot
-        # identity (opening dates → time test) stays FIFO. Surviving short lots
-        # are re-priced to the average afterwards.
-        pool_avg_unit_proceeds: Optional[Decimal] = None
-        if uses_pool_average_cost(self.pairing_method) and self.short_lots:
-            _pool_qty = sum((sl.quantity_shorted for sl in self.short_lots), Decimal(0))
-            _pool_proceeds = sum((sl.total_sale_proceeds_eur for sl in self.short_lots), Decimal(0))
-            if _pool_qty > Decimal(0):
-                pool_avg_unit_proceeds = self.ctx.divide(_pool_proceeds, _pool_qty)
+        # Short positions are covered FIFO at each lot's own proceeds under
+        # every method but LIFO. The weighted average is an acquisition-cost
+        # rule for held securities; blending the proceeds of written positions
+        # opened on different days loses the day each amount was received,
+        # the same defect the long side had (audit W08).
+        active_method = (coerce_pairing_method(method) if method is not None
+                         else self.pairing_method)
+        if is_historical_simulation and active_method == PairingMethod.LIFO:
+            self._replayed_non_fifo_disposal = True
+
 
         realization_type_for_rgl: RealizationType
         if self.asset_category == AssetCategory.OPTION:
@@ -1474,10 +1824,10 @@ class FifoLedger:
         else:
             realization_type_for_rgl = RealizationType.SHORT_POSITION_COVER # Renamed
 
-        for i in consumption_order_indices(len(self.short_lots), self.pairing_method):
+        for i in consumption_order_indices(len(self.short_lots), active_method):
             if quantity_remaining_to_realize <= Decimal(0): break
             current_short_lot = self.short_lots[i]
-            effective_unit_proceeds = pool_avg_unit_proceeds if pool_avg_unit_proceeds is not None else current_short_lot.unit_sale_proceeds_eur
+            effective_unit_proceeds = current_short_lot.unit_sale_proceeds_eur
             quantity_covered_from_this_lot: Decimal
             if current_short_lot.quantity_shorted <= quantity_remaining_to_realize:
                 quantity_covered_from_this_lot = current_short_lot.quantity_shorted
@@ -1521,11 +1871,6 @@ class FifoLedger:
 
         for i in sorted(short_lots_to_remove_indices, reverse=True): del self.short_lots[i]
 
-        if pool_avg_unit_proceeds is not None:
-            for sl in self.short_lots:
-                sl.unit_sale_proceeds_eur = pool_avg_unit_proceeds
-                sl.total_sale_proceeds_eur = self.ctx.multiply(sl.quantity_shorted, pool_avg_unit_proceeds)
-
         small_tolerance_qty = Decimal('1e-10')
         if quantity_remaining_to_realize.copy_abs() > small_tolerance_qty:
             if getattr(cover_event, "allows_position_flip", False) and not is_historical_simulation:
@@ -1541,7 +1886,7 @@ class FifoLedger:
                     total_cost_basis_eur=flip_cost_total,
                     source_transaction_id=cover_event.ibkr_transaction_id or str(cover_event.event_id),
                 )
-                self.lots.append(flip_lot)
+                self.lots.append(self._stamp(flip_lot))
                 self.lots.sort(key=_long_lot_sort_key)
                 logger.info(
                     f"Position FLIP (C;O) for cover {cover_event.ibkr_transaction_id or cover_event.event_id}: "
@@ -1653,6 +1998,7 @@ class FifoLedger:
         lots_to_remove_indices: List[int] = []
         for i, current_lot in enumerate(self.lots):
             if qty_remaining <= Decimal(0): break
+            lot_components = current_lot.cost_components
             if current_lot.quantity <= qty_remaining:
                 quantity_from_this_lot = current_lot.quantity
                 cost_basis_for_portion = current_lot.total_cost_basis_eur
@@ -1667,6 +2013,9 @@ class FifoLedger:
                 current_lot.total_cost_original = current_lot.rescaled_original(remaining_qty)
                 current_lot.quantity = remaining_qty
                 current_lot.total_cost_basis_eur = self.ctx.multiply(current_lot.quantity, current_lot.unit_cost_basis_eur)
+                if lot_components is not None:
+                    current_lot.cost_components = _scale_components(
+                        lot_components, current_lot.total_cost_basis_eur, self.ctx)
             qty_remaining = self.ctx.subtract(qty_remaining, quantity_from_this_lot)
 
             realization_value_for_portion = self.ctx.multiply(quantity_from_this_lot, realization_value_eur_per_unit_for_event)
@@ -1696,6 +2045,9 @@ class FifoLedger:
                 is_acquisition_estimated=current_lot.acquisition_date_estimated,
                 fund_type_at_sale=self.fund_type if self.asset_category == AssetCategory.INVESTMENT_FUND else None,
             )
+            if lot_components is not None:
+                rgl.cost_basis_components_eur = _scale_components(
+                    lot_components, cost_basis_for_portion, self.ctx)
             if self._tax_classifier is not None:
                 self._tax_classifier(rgl)
             realized_gains_losses.append(rgl)
@@ -1729,7 +2081,7 @@ class FifoLedger:
                 total_cost_basis_eur=zero,
                 source_transaction_id=event.ca_action_id_ibkr or event.ibkr_transaction_id or f"STOCKDIV_{event.event_id}",
             )
-            self.lots.append(fallback_lot)
+            self.lots.append(self._stamp(fallback_lot))
             self.lots.sort(key=_long_lot_sort_key)
             return
 
@@ -1749,7 +2101,7 @@ class FifoLedger:
             unit_cost_basis_eur=new_lot_cost_per_unit, # Renamed
             total_cost_basis_eur=new_lot_total_cost, source_transaction_id=source_id
         )
-        self.lots.append(new_lot)
+        self.lots.append(self._stamp(new_lot))
         self.lots.sort(key=_long_lot_sort_key)
         if any((parse_ibkr_date(lot.acquisition_date) is None) for lot in self.lots):
              raise ValueError(f"Unparseable acquisition date found after adding stock dividend lot for asset {self.asset_internal_id}.")
@@ -1906,6 +2258,10 @@ class FifoLedger:
                 return
             lot.total_cost_basis_eur = self.ctx.subtract(lot.total_cost_basis_eur, reduction)
             lot.unit_cost_basis_eur = self.ctx.divide(lot.total_cost_basis_eur, lot.quantity) if lot.quantity > Decimal('0') else Decimal('0')
+            if lot.cost_components is not None:
+                # The repayment returns part of each payment in proportion.
+                lot.cost_components = _scale_components(
+                    lot.cost_components, lot.total_cost_basis_eur, self.ctx)
             # The reduction is an EUR amount. Subtracting it from a USD original
             # would need a rate this function has no business choosing, and
             # scaling by the EUR ratio would invent one — so the original is
