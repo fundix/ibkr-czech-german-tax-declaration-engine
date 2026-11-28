@@ -110,13 +110,15 @@ class PairingHistory:
     def fingerprint(self) -> str:
         """A stable text naming this history, for a run's input fingerprint.
 
-        Covers only what differs from FIFO: a year filed FIFO, a year assumed
-        FIFO and a year not listed at all replay identically, so adding an
-        unrelated older year or marking an assumed-FIFO year changes nothing.
+        Covers only what differs from the default (FIFO): a year filed FIFO, a
+        year assumed FIFO and a year not listed at all replay identically, so
+        adding an unrelated older year or marking an assumed-FIFO year changes
+        nothing.
         """
+        default = coerce(self.default)
         methods = ",".join(
             f"{year}:{coerce(m).value}" for year, m in sorted(self.methods.items())
-            if coerce(m) != PairingMethod.FIFO
+            if coerce(m) != default
         )
         canonical = {
             str(year): {

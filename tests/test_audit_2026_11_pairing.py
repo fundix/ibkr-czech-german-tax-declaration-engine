@@ -1075,3 +1075,100 @@ def test_f5_scaled_components_sum_to_the_target_to_the_last_digit():
                             Decimal(str(rng.uniform(0.3, 7))))
         parts = _scale_components(comps, target, ctx)
         assert sum((a for _d, a in parts), Decimal(0)) == target
+
+
+# ---------------------------------------------------------------------------
+# Second review pass: guards around the re-matching, the registry in listings
+# ---------------------------------------------------------------------------
+
+def _lot_rows(ledger):
+    return [(lot.source_transaction_id, lot.quantity, lot.total_cost_basis_eur)
+            for lot in ledger.lots]
+
+
+def test_history_fingerprint_follows_the_default_method():
+    """What differs from the DEFAULT counts: under a LIFO default a year
+    listed as FIFO is a statement, a year listed as LIFO is not."""
+    lifo_default = PairingHistory(default=PairingMethod.LIFO)
+    fifo_year = PairingHistory(default=PairingMethod.LIFO,
+                               methods={2024: PairingMethod.FIFO})
+    lifo_year = PairingHistory(default=PairingMethod.LIFO,
+                               methods={2024: PairingMethod.LIFO})
+    assert fifo_year.fingerprint() != lifo_default.fingerprint()
+    assert lifo_year.fingerprint() == lifo_default.fingerprint()
+
+
+def test_rematch_refuses_lots_it_cannot_tell_apart():
+    """Two open lots that carry no ledger id of their own would be read as one
+    lot and their costs blended. The asset stays on FIFO instead."""
+    from src.countries.cz.optimal_pairing import rematch_cz_optimal
+    from src.engine.fifo_manager import FifoLot
+    ledger = _ledger(PairingMethod.OPTIMAL)
+    _buy(ledger, "2024-01-10", "10", "1000", "101")
+    _buy(ledger, "2024-03-11", "10", "1300", "102")
+    for day, unit, total, tx in (("2024-04-10", "140", "1400", "X1"),
+                                 ("2024-04-11", "150", "1500", "X2")):
+        ledger.lots.append(FifoLot(          # booked without the ledger's stamp
+            acquisition_date=day, quantity=Decimal("10"),
+            unit_cost_basis_eur=Decimal(unit), total_cost_basis_eur=Decimal(total),
+            source_transaction_id=tx))
+    rgls = _sell(ledger, "2024-06-10", "10", "1500", "103")
+    out = rematch_cz_optimal(rgls, {ledger.asset_internal_id: ledger}, [], 2024)
+    assert out.rematched_asset_ids == set()
+    assert out.realized_gains_losses == rgls
+    assert sorted(_lot_rows(ledger)) == [
+        ("102", Decimal("10"), Decimal("1300")),
+        ("X1", Decimal("10"), Decimal("1400")),
+        ("X2", Decimal("10"), Decimal("1500")),
+    ]
+
+
+def test_rematching_twice_changes_nothing_more():
+    """After a re-matching the ledger's journal says what the re-matching
+    consumed, so a second pass starts from the same lots and ends the same."""
+    from src.countries.cz.optimal_pairing import rematch_cz_optimal
+    ledger = _ledger(PairingMethod.OPTIMAL)
+    _buy(ledger, "2024-01-10", "10", "1000", "101")
+    _buy(ledger, "2024-03-11", "10", "1300", "102")
+    rgls = _sell(ledger, "2024-06-10", "4", "600", "103")
+    ledgers = {ledger.asset_internal_id: ledger}
+    first = rematch_cz_optimal(rgls, ledgers, [], 2024)
+    # Nothing is exempt, so the dearer March lot is sold: 10 x 100 and 6 x 130 stay.
+    assert _lot_rows(ledger) == [("101", Decimal("10"), Decimal("1000")),
+                                 ("102", Decimal("6"), Decimal("780"))]
+    second = rematch_cz_optimal(first.realized_gains_losses, ledgers, [], 2024)
+    assert _lot_rows(ledger) == [("101", Decimal("10"), Decimal("1000")),
+                                 ("102", Decimal("6"), Decimal("780"))]
+    assert second.plan == first.plan
+
+
+def test_dataset_rows_do_not_carry_the_stored_plan(two_years):
+    """The year row shown on the web page and to MCP names the filed run; the
+    assignment itself (one entry per sale) stays in the registry."""
+    svc = two_years
+    _execute(svc, "2024-opt", 2024, "optimal")
+    svc.mark_run_filed("2024-opt")
+    filed = svc.get_year(2024).filed
+    assert (filed["pairing_method"], filed["run_id"]) == ("optimal", "2024-opt")
+    assert "pairing_plan" not in filed
+    assert svc.load_filed_years()["years"]["2024"]["pairing_plan"]
+
+
+def test_listing_runs_reads_the_registry_once(two_years, monkeypatch):
+    """The running year is recomputed almost daily; a listing must not read
+    the registry and scan the datasets again for every stored run."""
+    svc = two_years
+    for index in range(4):
+        _execute(svc, f"2025-r{index}", 2025)
+    reads = {"count": 0}
+    original = svc.load_filed_years
+
+    def counting():
+        reads["count"] += 1
+        return original()
+
+    monkeypatch.setattr(svc, "load_filed_years", counting)
+    runs = svc.list_runs(limit=None)
+    assert len(runs) == 4
+    assert all(r["can_mark_filed"] for r in runs)
+    assert reads["count"] == 1

@@ -46,7 +46,7 @@ from src.domain.results import RealizedGainLoss
 from src.engine.pairing_solver import (
     Assignment, SaleDemand, SupplyLot, solve_optimal_matching,
 )
-from src.engine.fifo_manager import _scale_components, plan_key
+from src.engine.fifo_manager import ConsumedPortion, _scale_components, plan_key
 from src.utils.type_utils import parse_ibkr_date
 
 logger = logging.getLogger(__name__)
@@ -222,11 +222,23 @@ def _whole_lots(ledger) -> Optional[List[Any]]:
     Keyed by the ledger's lot_id; the open lot (or the first consumed part)
     gives the identity, the parts add their quantity and cost.
     """
+    open_lots = list(getattr(ledger, "lots", []))
+    consumed = [portion.lot for portion in getattr(ledger, "consumed_portions", [])]
+    open_ids = [lot.lot_id for lot in open_lots]
+    if (any(not lot.lot_id for lot in [*open_lots, *consumed])
+            or len(set(open_ids)) != len(open_ids)):
+        # The id its ledger stamped on a lot is all that tells it from the
+        # others here. A lot without one, or two open lots sharing one, would
+        # be put together with another lot and their costs blended.
+        logger.warning(
+            "Optimal pairing: asset %s holds lots without a ledger id of their "
+            "own — keeping FIFO.", getattr(ledger, "asset_internal_id", "?"))
+        return None
     parts: "Dict[int, List[Any]]" = defaultdict(list)
-    for lot in getattr(ledger, "lots", []):
+    for lot in open_lots:
         parts[lot.lot_id].append(lot)
-    for portion in getattr(ledger, "consumed_portions", []):
-        parts[portion.lot.lot_id].append(portion.lot)
+    for lot in consumed:
+        parts[lot.lot_id].append(lot)
     whole = []
     for _lot_id, pieces in sorted(parts.items()):
         template = pieces[0]
@@ -363,6 +375,7 @@ def _rematch_from_journal(
     new_rgls: List[RealizedGainLoss] = []
     used: Dict[int, Decimal] = defaultdict(lambda: ZERO)
     plan: Dict[str, List[Tuple[str, Decimal]]] = {}
+    consumed: List[ConsumedPortion] = []
     for a in assignments:
         lot, supply = lots[a.supply_index], supplies[a.supply_index]
         sale, demand = sales[a.demand_index], demands[a.demand_index]
@@ -396,17 +409,20 @@ def _rematch_from_journal(
         if classifier is not None:
             classifier(rgl)
         new_rgls.append(rgl)
+        consumed.append(ConsumedPortion(
+            sale_sequence=sale.sequence, lot=_part_of(lot, qty)))
         if sale.ibkr_transaction_id:
             plan.setdefault(str(sale.ibkr_transaction_id), []).append(
                 (plan_key(lot), qty))
 
-    # W05: the open lots are what the assignment left, not what FIFO left.
+    # W05: the open lots are what the assignment left, not what FIFO left --
+    # and the journal says what the assignment consumed, not what FIFO did.
     remaining = []
     for index, lot in enumerate(lots):
         left = lot.quantity - used[index]
         if left > Decimal("1e-10"):
             remaining.append(_part_of(lot, left))
-    ledger.replace_open_long_lots(remaining)
+    ledger.replace_open_long_lots(remaining, consumed_portions=consumed)
     return new_rgls, plan
 
 

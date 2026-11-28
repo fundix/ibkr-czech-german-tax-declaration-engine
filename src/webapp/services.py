@@ -573,7 +573,7 @@ class RunService:
                     for slot, name in settings.SLOT_FILES.items()
                 }
                 ds = YearDataset(year=year, files=files,
-                                 filed=filed.get(str(year)))
+                                 filed=self._filed_summary(filed.get(str(year))))
                 if files["positions_start"] is None:
                     prev = self._positions_end_of(year - 1)
                     ds.notes.append(
@@ -933,6 +933,24 @@ class RunService:
             return empty
         return store
 
+    @staticmethod
+    def _filed_summary(entry: Any) -> Optional[Dict[str, Any]]:
+        """A registry entry as a year row shows it: which run, which method.
+
+        Without the stored assignment of an ``optimal`` year -- one entry per
+        sale, which belongs to the engine, not on a page or in an MCP answer.
+        """
+        if not isinstance(entry, dict):
+            return None
+        return {key: value for key, value in entry.items() if key != "pairing_plan"}
+
+    def _dataset_year_numbers(self) -> List[int]:
+        """The years that have a dataset directory, whatever is in it."""
+        if not self.data_dir.is_dir():
+            return []
+        return sorted(int(p.name) for p in self.data_dir.iterdir()
+                      if p.is_dir() and p.name.isdigit())
+
     def _write_filed_years(self, mutator) -> None:
         """Read-modify-write under its own lock (pattern: _write_sell_targets)."""
         with engine_file_lock(lock_file=self.data_dir / FILED_YEARS_LOCK):
@@ -996,15 +1014,16 @@ class RunService:
         return removed["hit"]
 
     def _pairing_history(
-        self, tax_year: int,
+        self, tax_year: int, registry: Optional[Dict[str, Any]] = None,
     ) -> Tuple[PairingHistory, Dict[int, PairingMethod], List[int]]:
         """How every year before *tax_year* was filed.
 
         Returns the history for the engine, the effective method per year, and
         the years with no filed mark (taken as FIFO, the statutory default).
         """
-        registry = self.load_filed_years().get("years", {})
-        years = {ds.year for ds in self.list_years() if ds.year < tax_year}
+        if registry is None:
+            registry = self.load_filed_years().get("years", {})
+        years = {y for y in self._dataset_year_numbers() if y < tax_year}
         years |= {int(y) for y in registry if str(y).isdigit() and int(y) < tax_year}
         methods: Dict[int, PairingMethod] = {}
         plans: Dict[int, Dict[str, Tuple[Tuple[str, Decimal], ...]]] = {}
@@ -4132,7 +4151,8 @@ class RunService:
         """
         metas = self._raw_run_metas()
         metas.sort(key=lambda m: m.get("created_at", ""), reverse=True)
-        return [self._flag_stale_run(m) for m in metas[:limit]]
+        cache: Dict[str, Any] = {}  # the registry, read once for the listing
+        return [self._flag_stale_run(m, cache) for m in metas[:limit]]
 
     def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         meta_path = self.runs_dir / run_id / "meta.json"
@@ -4140,7 +4160,8 @@ class RunService:
             return None
         return self._flag_stale_run(load_json(meta_path))
 
-    def _flag_stale_run(self, meta: Dict[str, Any]) -> Dict[str, Any]:
+    def _flag_stale_run(self, meta: Dict[str, Any],
+                        cache: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Mark, as it is read, a stored run whose figures are not current.
 
         A run stays the newest of its year until someone recomputes it, so
@@ -4165,9 +4186,10 @@ class RunService:
                 "změnil výpočet nebo kurzy, ze kterých vychází. Než čísla "
                 f"použijete, rok {year} přepočítejte."
             ]
-        return self._flag_filed_and_history(meta)
+        return self._flag_filed_and_history(meta, cache)
 
-    def _flag_filed_and_history(self, meta: Dict[str, Any]) -> Dict[str, Any]:
+    def _flag_filed_and_history(self, meta: Dict[str, Any],
+                                cache: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Filed-year flags, decided on every read and never stored.
 
         * ``filed`` -- the registry names this run as the one its year was
@@ -4180,7 +4202,13 @@ class RunService:
         year = meta.get("tax_year")
         if not isinstance(year, int):
             return meta
-        entry = self.load_filed_years().get("years", {}).get(str(year))
+        # A listing passes one cache for all its runs: the registry is read
+        # once and each year's history worked out once, not per stored run.
+        cache = cache if cache is not None else {}
+        if "registry" not in cache:
+            cache["registry"] = self.load_filed_years().get("years", {})
+        registry = cache["registry"]
+        entry = registry.get(str(year))
         meta["filed"] = bool(isinstance(entry, dict)
                              and entry.get("run_id") == meta.get("run_id"))
         if meta["filed"]:
@@ -4191,8 +4219,11 @@ class RunService:
             # The normalised fingerprint: only years filed non-FIFO and stored
             # plans count, so an older dataset year added later (taken as
             # FIFO, like an absent one) does not read as a changed marking.
-            history, _methods, _assumed = self._pairing_history(year)
-            if stored_fp != history.fingerprint():
+            fingerprints = cache.setdefault("history_fingerprints", {})
+            if year not in fingerprints:
+                history, _methods, _assumed = self._pairing_history(year, registry)
+                fingerprints[year] = history.fingerprint()
+            if stored_fp != fingerprints[year]:
                 meta["pairing_history_changed"] = True
                 meta["notes"] = list(meta.get("notes") or []) + [
                     "Od tohoto výpočtu se změnilo označení podaných dřívějších let "

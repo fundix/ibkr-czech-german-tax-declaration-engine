@@ -1420,10 +1420,22 @@ class FifoLedger:
         lot.sequence = self._next_sequence()
         return lot
 
-    def replace_open_long_lots(self, lots: List["FifoLot"]) -> None:
+    def replace_open_long_lots(
+        self,
+        lots: List["FifoLot"],
+        consumed_portions: Optional[List["ConsumedPortion"]] = None,
+    ) -> None:
         """Install *lots* as the open long lots (after a re-matching of the
-        year's sales decided which of them are left)."""
+        year's sales decided which of them are left).
+
+        *consumed_portions* is what that re-matching consumed. The journal is
+        replaced with it, so the open lots and the journal keep adding up to
+        the year's supply; left as FIFO wrote it, a second re-matching would
+        count the lots FIFO sold on top of the ones still open.
+        """
         self.lots = sorted(lots, key=_long_lot_sort_key)
+        if consumed_portions is not None:
+            self.consumed_portions = list(consumed_portions)
 
     def add_long_lot(self, trade_event: TradeEvent):
         if trade_event.event_type != FinancialEventType.TRADE_BUY_LONG: return
